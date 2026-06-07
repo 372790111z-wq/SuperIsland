@@ -1,5 +1,7 @@
 import AppKit
+import AVFoundation
 import EventKit
+import Speech
 import SwiftUI
 import UserNotifications
 
@@ -9,6 +11,9 @@ struct ModuleSettingsView: View {
     @ObservedObject private var notificationManager = NotificationManager.shared
     @ObservedObject private var nowPlayingManager = NowPlayingManager.shared
     @ObservedObject private var shelf = ShelfStore.shared
+    @ObservedObject private var teleprompter = TeleprompterManager.shared
+    @State private var teleprompterPermissionRefresh = 0
+    @State private var didAutoRequestTeleprompterPermissions = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -123,30 +128,139 @@ struct ModuleSettingsView: View {
 
             SettingSectionLabel(title: "Productivity")
             SettingGroup {
-                SettingToggleRow(title: "Teleprompter", isOn: $appState.teleprompterEnabled)
-                SettingRowDivider()
-                HStack {
-                    Text("Script")
-                        .font(.system(size: 13))
-                    Spacer(minLength: 8)
-                    Button("Edit Script…") {
-                        TeleprompterScriptEditorWindowController.show()
+                SettingToggleRow(title: "Teleprompter", isOn: teleprompterEnabledBinding)
+                    .dataAnnotationID("teleprompter-module-toggle")
+                if appState.teleprompterEnabled {
+                    SettingRowDivider()
+                    teleprompterPermissionRow
+                    SettingRowDivider()
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Mode")
+                                .font(.system(size: 13))
+                            Text(teleprompter.listeningMode.description)
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer(minLength: 12)
+                        Picker("", selection: $teleprompter.listeningMode) {
+                            ForEach(TeleprompterListeningMode.allCases) { mode in
+                                Text(mode.label).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 190)
+                        .dataAnnotationID("teleprompter-listening-mode-control")
                     }
-                    .font(.system(size: 12))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    SettingRowDivider()
+                    HStack {
+                        Text("Script")
+                            .font(.system(size: 13))
+                        Spacer(minLength: 8)
+                        Button("Edit Script…") {
+                            TeleprompterScriptEditorWindowController.show()
+                        }
+                        .font(.system(size: 12))
+                        .dataAnnotationID("teleprompter-edit-script-button")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 11)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .onAppear {
             notificationManager.checkPermission()
             calendarManager.refreshAccessStatus()
+            refreshTeleprompterPermissionState()
+            autoRequestTeleprompterPermissionsIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             notificationManager.checkPermission()
             calendarManager.refreshAccessStatus()
+            refreshTeleprompterPermissionState()
         }
+        .onChange(of: teleprompter.listeningMode) { _, mode in
+            refreshTeleprompterPermissionState()
+            if mode == .wordTracking {
+                autoRequestTeleprompterPermissionsIfNeeded()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                refreshTeleprompterPermissionState()
+            }
+        }
+        .onChange(of: appState.teleprompterEnabled) { _, enabled in
+            if enabled {
+                autoRequestTeleprompterPermissionsIfNeeded()
+            }
+        }
+    }
+
+    private var teleprompterPermissionRow: some View {
+        let _ = teleprompterPermissionRefresh
+        let ready = PermissionsManager.shared.checkMicrophone()
+            && PermissionsManager.shared.checkSpeechRecognition()
+
+        return HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Word Tracking permissions")
+                    .font(.system(size: 13))
+                Text(teleprompterPermissionDescription)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            if ready {
+                Label("Ready", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.green)
+            } else {
+                Button(teleprompterPermissionButtonTitle) {
+                    requestTeleprompterPermissions()
+                }
+                .font(.system(size: 12))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .dataAnnotationID("teleprompter-speech-status")
+    }
+
+    private var teleprompterPermissionDescription: String {
+        let microphoneStatus = PermissionsManager.shared.microphoneAuthorizationStatus()
+        let speechStatus = PermissionsManager.shared.speechRecognitionAuthorizationStatus()
+        let microphone = microphoneStatus == .authorized
+        let speech = speechStatus == .authorized
+
+        if microphoneStatus == .denied || microphoneStatus == .restricted ||
+            speechStatus == .denied || speechStatus == .restricted {
+            return "Access was denied or restricted. Open System Settings to enable Word Tracking."
+        }
+
+        switch (microphone, speech) {
+        case (true, true):
+            return "Microphone and Speech Recognition are ready for Word Tracking."
+        case (false, true):
+            return "Microphone access will be requested when Word Tracking is enabled."
+        case (true, false):
+            return "Speech Recognition access will be requested when Word Tracking is enabled."
+        case (false, false):
+            return "Microphone and Speech Recognition access are requested when Teleprompter is enabled."
+        }
+    }
+
+    private var teleprompterPermissionButtonTitle: String {
+        let microphone = PermissionsManager.shared.microphoneAuthorizationStatus()
+        let speech = PermissionsManager.shared.speechRecognitionAuthorizationStatus()
+        if microphone == .denied || microphone == .restricted ||
+            speech == .denied || speech == .restricted {
+            return "Open Settings"
+        }
+        return "Grant Access"
     }
 
     private var calendarPermissionRow: some View {
@@ -187,6 +301,50 @@ struct ModuleSettingsView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
+    }
+
+    private var teleprompterEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { appState.teleprompterEnabled },
+            set: { enabled in
+                appState.teleprompterEnabled = enabled
+                if enabled {
+                    requestTeleprompterPermissions()
+                } else {
+                    teleprompter.pause()
+                }
+            }
+        )
+    }
+
+    private func requestTeleprompterPermissions() {
+        didAutoRequestTeleprompterPermissions = true
+        PermissionsManager.shared.requestTeleprompterWordTrackingAccess { _ in
+            refreshTeleprompterPermissionState()
+        }
+        refreshTeleprompterPermissionState()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            refreshTeleprompterPermissionState()
+        }
+    }
+
+    private func autoRequestTeleprompterPermissionsIfNeeded() {
+        guard appState.teleprompterEnabled else { return }
+        guard !didAutoRequestTeleprompterPermissions else { return }
+
+        let permissions = PermissionsManager.shared
+        let microphone = permissions.microphoneAuthorizationStatus()
+        let speech = permissions.speechRecognitionAuthorizationStatus()
+        guard microphone == .notDetermined || speech == .notDetermined else {
+            refreshTeleprompterPermissionState()
+            return
+        }
+
+        requestTeleprompterPermissions()
+    }
+
+    private func refreshTeleprompterPermissionState() {
+        teleprompterPermissionRefresh += 1
     }
 
     private var calendarLookaheadRow: some View {
