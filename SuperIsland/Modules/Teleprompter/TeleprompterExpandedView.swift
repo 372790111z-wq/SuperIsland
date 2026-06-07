@@ -193,7 +193,7 @@ private struct TeleprompterExpandedInner: View {
 
             GeometryReader { geo in
                 if manager.hasScript {
-                    TeleprompterScrollingTextView(containerHeight: geo.size.height)
+                    TeleprompterTextSurface(containerHeight: geo.size.height)
                 } else {
                     addScriptPrompt(size: 12)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -205,7 +205,8 @@ private struct TeleprompterExpandedInner: View {
                 iconButton("arrow.counterclockwise", size: 12) { manager.reset() }
                 iconButton(
                     manager.isPlaying || manager.isCountingDown ? "pause.fill" : "play.fill",
-                    size: 14, bold: true
+                    size: 14, bold: true,
+                    annotationID: "teleprompter-play-control"
                 ) { manager.togglePlayPause() }
             }
         }
@@ -224,25 +225,13 @@ private struct TeleprompterFullExpandedInner: View {
             // ── Full-height scrolling text ────────────────────────────────
             GeometryReader { geo in
                 if manager.hasScript {
-                    TeleprompterScrollingTextView(containerHeight: geo.size.height)
+                    TeleprompterTextSurface(containerHeight: geo.size.height)
                 } else {
                     addScriptPrompt(size: 14)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // ── Scroll-wheel catcher (transparent to clicks) ──────────────
-            if manager.hasScript {
-                TeleprompterScrollWheelCatcher { deltaY, isPrecise in
-                    let pxPerLine = manager.fontSize * 1.4
-                    // Direction: scroll UP = rewind, scroll DOWN = fast-forward.
-                    let nudge: CGFloat = isPrecise
-                        ? -deltaY * 1.2
-                        : -deltaY * pxPerLine
-                    manager.nudgeOffset(by: nudge)
-                }
-            }
 
             // ── 3-2-1 Countdown overlay ───────────────────────────────────
             if let n = manager.countdownValue {
@@ -298,7 +287,8 @@ private struct TeleprompterFullExpandedInner: View {
                 iconButton("arrow.counterclockwise", size: 15) { manager.reset() }
                 iconButton(
                     manager.isPlaying || manager.isCountingDown ? "pause.circle.fill" : "play.circle.fill",
-                    size: 26, bold: true
+                    size: 26, bold: true,
+                    annotationID: "teleprompter-play-control"
                 ) { manager.togglePlayPause() }
             }
 
@@ -348,6 +338,7 @@ private struct TeleprompterFullExpandedInner: View {
                 }
                 .buttonStyle(.plain)
                 .hoverPointer()
+                .dataAnnotationID("teleprompter-edit-script-button")
             }
         }
     }
@@ -387,6 +378,7 @@ private func addScriptPrompt(size: CGFloat) -> some View {
     }
     .buttonStyle(.plain)
     .hoverPointer()
+    .dataAnnotationID("teleprompter-edit-script-button")
 }
 
 @ViewBuilder
@@ -394,15 +386,132 @@ private func iconButton(
     _ icon: String,
     size: CGFloat,
     bold: Bool = false,
+    annotationID: String? = nil,
     action: @escaping () -> Void
 ) -> some View {
-    Button(action: action) {
+    let button = Button(action: action) {
         Image(systemName: icon)
             .font(.system(size: size, weight: bold ? .bold : .regular))
             .foregroundColor(.white.opacity(bold ? 1.0 : 0.55))
     }
     .buttonStyle(.plain)
     .hoverPointer()
+
+    if let annotationID {
+        button.dataAnnotationID(annotationID)
+    } else {
+        button
+    }
+}
+
+private struct TeleprompterTextSurface: View {
+    let containerHeight: CGFloat
+
+    @ObservedObject private var manager = TeleprompterManager.shared
+
+    var body: some View {
+        Group {
+            if manager.listeningMode == .wordTracking {
+                TeleprompterWordTrackingTextView(containerHeight: containerHeight)
+            } else {
+                TeleprompterScrollingTextView(containerHeight: containerHeight)
+            }
+        }
+        .overlay {
+            TeleprompterScrollWheelCatcher { deltaY, isPrecise in
+                manager.nudgeOffset(by: scrollNudge(deltaY: deltaY, isPrecise: isPrecise))
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            TeleprompterSpeechStatus()
+                .padding(.bottom, 2)
+        }
+    }
+
+    private func scrollNudge(deltaY: CGFloat, isPrecise: Bool) -> CGFloat {
+        let pxPerLine = manager.fontSize * 1.4
+        // Direction: scroll UP = rewind, scroll DOWN = fast-forward.
+        return isPrecise ? -deltaY * 1.2 : -deltaY * pxPerLine
+    }
+}
+
+private struct TeleprompterSpeechStatus: View {
+    @ObservedObject private var manager = TeleprompterManager.shared
+    @ObservedObject private var speech = TeleprompterManager.shared.speechRecognizer
+
+    var body: some View {
+        if manager.listeningMode == .wordTracking {
+            HStack(spacing: 5) {
+                Image(systemName: statusIcon)
+                    .font(.system(size: 9, weight: .medium))
+                if manager.isPlaying, speech.isListening {
+                    levelMeter
+                }
+                Text(statusText)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundColor(statusColor)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule(style: .continuous).fill(.black.opacity(0.28)))
+            .dataAnnotationID("teleprompter-speech-status")
+        }
+    }
+
+    private var statusText: String {
+        if let error = speech.error, !error.isEmpty { return error }
+        if manager.isCountingDown { return "Starting soon" }
+        if manager.isPlaying, speech.isListening {
+            if !speech.lastSpokenText.isEmpty {
+                let spoken = speech.lastSpokenText.trimmingCharacters(in: .whitespacesAndNewlines)
+                return "Heard: \(spoken.prefix(18)) · \(diagnosticLabel)"
+            }
+            return speech.inputLevel > 0.006
+                ? "Listening · \(diagnosticLabel)"
+                : "Waiting for voice · \(diagnosticLabel)"
+        }
+        return "Word Tracking"
+    }
+
+    private var statusIcon: String {
+        if speech.error != nil { return "exclamationmark.triangle.fill" }
+        if manager.isPlaying, speech.isListening { return "waveform" }
+        return "text.word.spacing"
+    }
+
+    private var statusColor: Color {
+        if speech.error != nil { return .orange.opacity(0.9) }
+        if speech.matchConfidenceLabel.hasPrefix("Weak") || speech.matchConfidenceLabel.hasPrefix("No") {
+            return .orange.opacity(0.72)
+        }
+        if manager.isPlaying, speech.inputLevel > 0.006 { return .white.opacity(0.62) }
+        return .white.opacity(0.42)
+    }
+
+    private var diagnosticLabel: String {
+        speech.matchConfidenceLabel.isEmpty ? progressLabel : speech.matchConfidenceLabel
+    }
+
+    private var progressLabel: String {
+        let total = max(manager.wordTrackingDisplayText.count, 1)
+        let clamped = min(max(speech.recognizedCharCount, 0), total)
+        return "\(Int((Double(clamped) / Double(total)) * 100))%"
+    }
+
+    private var levelMeter: some View {
+        GeometryReader { geometry in
+            Capsule(style: .continuous)
+                .fill(.white.opacity(0.12))
+                .overlay(alignment: .leading) {
+                    Capsule(style: .continuous)
+                        .fill(.white.opacity(0.56))
+                        .frame(width: max(2, geometry.size.width * min(max(speech.inputLevel, 0), 1)))
+                }
+        }
+        .frame(width: 18, height: 3)
+    }
 }
 
 // MARK: - Public entry point

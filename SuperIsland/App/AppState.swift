@@ -314,6 +314,7 @@ final class AppState: ObservableObject {
     private var hoverActivationWorkItem: DispatchWorkItem?
     private var systemEmojiInteractionWorkItem: DispatchWorkItem?
     private var systemEmojiInteractionExpiry: Date?
+    private var presentationHoldModule: ActiveModule?
     private var lastNotchEntryHapticDate: Date = .distantPast
     private init() {}
 
@@ -530,6 +531,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    func holdPresentation(for module: ActiveModule) {
+        presentationHoldModule = module
+        cancelAutoDismiss()
+        cancelFullExpandedDismiss()
+        cancelHoverActivation()
+    }
+
+    func releasePresentationHold(for module: ActiveModule) {
+        guard presentationHoldModule == module else { return }
+        presentationHoldModule = nil
+    }
+
     func handleHoverChange(_ hovering: Bool) {
         let wasHovering = isHovering
         isHovering = hovering
@@ -614,6 +627,7 @@ final class AppState: ObservableObject {
         cancelAutoDismiss()
         guard !isShelfDragActive else { return }
         guard !isSystemEmojiInteractionActive else { return }
+        guard !isPresentationHeld(activeModule) else { return }
         let delay = delayOverride ?? expandedAutoDismissDelay
         guard delay > 0 else { return }
         let workItem = DispatchWorkItem { [weak self] in
@@ -636,6 +650,7 @@ final class AppState: ObservableObject {
         guard !isShelfDragActive else { return }
         guard !(currentState == .fullExpanded && lockFullExpandedInPlace) else { return }
         guard !isSystemEmojiInteractionActive else { return }
+        guard !isPresentationHeld(fullExpandedSelectedModule) else { return }
         let delay = expandedAutoDismissDelay
         guard delay > 0 else { return }
         let workItem = DispatchWorkItem { [weak self] in
@@ -795,6 +810,16 @@ final class AppState: ObservableObject {
 
     private var isHover: Bool {
         isHovering
+    }
+
+    private var fullExpandedSelectedModule: ActiveModule? {
+        guard case .module(let module) = fullExpandedSelectedTab else { return nil }
+        return module
+    }
+
+    private func isPresentationHeld(_ module: ActiveModule?) -> Bool {
+        guard let module, let presentationHoldModule else { return false }
+        return module == presentationHoldModule
     }
 
     private func handleStateTransition(from oldValue: IslandState, to newValue: IslandState) {
