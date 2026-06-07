@@ -1,7 +1,9 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 import Carbon.HIToolbox
 import Combine
+import Speech
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -126,6 +128,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if state.notificationsEnabled {
             _ = NotificationManager.shared
+        }
+        if state.teleprompterEnabled {
+            _ = TeleprompterManager.shared
+            let permissions = PermissionsManager.shared
+            if permissions.microphoneAuthorizationStatus() == .notDetermined ||
+                permissions.speechRecognitionAuthorizationStatus() == .notDetermined {
+                permissions.requestTeleprompterWordTrackingAccess()
+            }
         }
 
         let extensions = ExtensionManager.shared
@@ -414,7 +424,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .calendar: AppState.shared.calendarEnabled = newState
         case .weather: AppState.shared.weatherEnabled = newState
         case .notifications: AppState.shared.notificationsEnabled = newState
-        case .teleprompter: AppState.shared.teleprompterEnabled = newState
+        case .teleprompter:
+            AppState.shared.teleprompterEnabled = newState
+            if newState {
+                PermissionsManager.shared.requestTeleprompterWordTrackingAccess()
+            }
         }
         sender.state = newState ? .on : .off
         rebuildStatusMenu()
