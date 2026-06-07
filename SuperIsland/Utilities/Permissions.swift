@@ -4,6 +4,7 @@ import CoreBluetooth
 import CoreGraphics
 import CoreLocation
 import EventKit
+import Speech
 import UserNotifications
 
 enum PermissionType: CaseIterable {
@@ -12,6 +13,7 @@ enum PermissionType: CaseIterable {
     case calendar
     case notifications
     case microphone
+    case speechRecognition
     case location
     case bluetooth
 
@@ -22,6 +24,7 @@ enum PermissionType: CaseIterable {
         case .calendar: return "Calendar"
         case .notifications: return "Notifications"
         case .microphone: return "Microphone"
+        case .speechRecognition: return "Speech Recognition"
         case .location: return "Location"
         case .bluetooth: return "Bluetooth"
         }
@@ -34,6 +37,7 @@ enum PermissionType: CaseIterable {
         case .calendar: return "Show upcoming events in the Super Island"
         case .notifications: return "Show supported notification sources in the Super Island"
         case .microphone: return "Audio visualization for the spectrogram"
+        case .speechRecognition: return "Follow along with Teleprompter scripts as you read"
         case .location: return "Provide weather information for your location"
         case .bluetooth: return "Show connected device notifications"
         }
@@ -46,6 +50,7 @@ enum PermissionType: CaseIterable {
         case .calendar: return "calendar"
         case .notifications: return "bell.badge.fill"
         case .microphone: return "mic.fill"
+        case .speechRecognition: return "text.word.spacing"
         case .location: return "location.fill"
         case .bluetooth: return "wave.3.right.circle.fill"
         }
@@ -55,7 +60,7 @@ enum PermissionType: CaseIterable {
         switch self {
         case .accessibility, .screenRecording:
             return true
-        case .calendar, .notifications, .microphone, .location, .bluetooth:
+        case .calendar, .notifications, .microphone, .speechRecognition, .location, .bluetooth:
             return false
         }
     }
@@ -95,6 +100,8 @@ final class PermissionsManager {
             return false
         case .microphone:
             return checkMicrophone()
+        case .speechRecognition:
+            return checkSpeechRecognition()
         case .location:
             return checkLocation()
         case .bluetooth:
@@ -114,6 +121,8 @@ final class PermissionsManager {
             Task { _ = await requestNotificationAccess() }
         case .microphone:
             requestMicrophoneAccess()
+        case .speechRecognition:
+            requestSpeechRecognitionAccess()
         case .location:
             requestLocationAccess()
         case .bluetooth:
@@ -209,8 +218,86 @@ final class PermissionsManager {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
-    func requestMicrophoneAccess() {
-        AVCaptureDevice.requestAccess(for: .audio) { _ in }
+    func microphoneAuthorizationStatus() -> AVAuthorizationStatus {
+        AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    func requestMicrophoneAccess(completion: ((Bool) -> Void)? = nil) {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        if status == .authorized {
+            completion?(true)
+            return
+        }
+        if status == .denied || status == .restricted {
+            openMicrophoneSettings()
+            completion?(false)
+            return
+        }
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                DispatchQueue.main.async {
+                    completion?(granted)
+                }
+            }
+        }
+    }
+
+    // MARK: - Speech Recognition
+
+    func checkSpeechRecognition() -> Bool {
+        SFSpeechRecognizer.authorizationStatus() == .authorized
+    }
+
+    func speechRecognitionAuthorizationStatus() -> SFSpeechRecognizerAuthorizationStatus {
+        SFSpeechRecognizer.authorizationStatus()
+    }
+
+    func requestSpeechRecognitionAccess(completion: ((Bool) -> Void)? = nil) {
+        let status = SFSpeechRecognizer.authorizationStatus()
+        if status == .authorized {
+            completion?(true)
+            return
+        }
+        if status == .denied || status == .restricted {
+            openSpeechRecognitionSettings()
+            completion?(false)
+            return
+        }
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            SFSpeechRecognizer.requestAuthorization { status in
+                DispatchQueue.main.async {
+                    completion?(status == .authorized)
+                }
+            }
+        }
+    }
+
+    func requestTeleprompterWordTrackingAccess(completion: ((Bool) -> Void)? = nil) {
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+
+            let requestGroup = DispatchGroup()
+            var microphoneGranted = self.checkMicrophone()
+            var speechGranted = self.checkSpeechRecognition()
+
+            requestGroup.enter()
+            self.requestMicrophoneAccess { granted in
+                microphoneGranted = granted
+                requestGroup.leave()
+            }
+
+            requestGroup.enter()
+            self.requestSpeechRecognitionAccess { granted in
+                speechGranted = granted
+                requestGroup.leave()
+            }
+
+            requestGroup.notify(queue: .main) {
+                completion?(microphoneGranted && speechGranted)
+            }
+        }
     }
 
     // MARK: - Location
@@ -295,6 +382,11 @@ final class PermissionsManager {
 
     func openMicrophoneSettings() {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
+        NSWorkspace.shared.open(url)
+    }
+
+    func openSpeechRecognitionSettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")!
         NSWorkspace.shared.open(url)
     }
 

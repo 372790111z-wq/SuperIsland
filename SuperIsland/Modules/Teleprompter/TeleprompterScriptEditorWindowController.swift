@@ -1,4 +1,5 @@
 import AppKit
+import Speech
 import SwiftUI
 
 final class TeleprompterScriptEditorWindowController {
@@ -48,6 +49,7 @@ struct TeleprompterScriptEditorView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
+            controlsBar
             editor
             bottomBar
         }
@@ -109,6 +111,18 @@ struct TeleprompterScriptEditorView: View {
         .background(Color(white: 0.095))
     }
 
+    private var modeControl: some View {
+        Picker("", selection: $manager.listeningMode) {
+            ForEach(TeleprompterListeningMode.allCases) { mode in
+                Text(mode.label).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 176)
+        .dataAnnotationID("teleprompter-listening-mode-control")
+    }
+
     private var speedControl: some View {
         HStack(spacing: 6) {
             Image(systemName: "tortoise.fill")
@@ -127,6 +141,75 @@ struct TeleprompterScriptEditorView: View {
         }
     }
 
+    private var controlsBar: some View {
+        HStack(spacing: 12) {
+            labeledControl("Size") {
+                HStack(spacing: 6) {
+                    styleButton("textformat.size.smaller") {
+                        manager.fontSize = max(12, manager.fontSize - 2)
+                    }
+                    Text("\(Int(manager.fontSize))")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundColor(.white.opacity(0.42))
+                        .frame(width: 24)
+                    styleButton("textformat.size.larger") {
+                        manager.fontSize = min(40, manager.fontSize + 2)
+                    }
+                }
+            }
+
+            Divider()
+                .frame(height: 22)
+                .opacity(0.2)
+
+            labeledControl("Align") {
+                Picker("", selection: $manager.textAlignmentIndex) {
+                    Image(systemName: "text.alignleft").tag(0)
+                    Image(systemName: "text.aligncenter").tag(1)
+                    Image(systemName: "text.alignright").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 108)
+            }
+
+            Divider()
+                .frame(height: 22)
+                .opacity(0.2)
+
+            labeledControl("Speed") {
+                speedControl
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+        .background(Color(white: 0.082))
+        .dataAnnotationID("teleprompter-style-controls")
+    }
+
+    private func labeledControl<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white.opacity(0.30))
+            content()
+        }
+    }
+
+    private func styleButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white.opacity(0.48))
+                .frame(width: 26, height: 24)
+                .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
+        .hoverPointer()
+    }
+
     // MARK: Text area
 
     private var editor: some View {
@@ -142,19 +225,40 @@ struct TeleprompterScriptEditorView: View {
     // MARK: Bottom bar
 
     private var bottomBar: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 8) {
             Image(systemName: "info.circle")
                 .font(.system(size: 10))
                 .foregroundColor(.white.opacity(0.18))
-                .padding(.trailing, 5)
-            Text("Text scrolls upward in the island as you speak.")
+            Text(bottomHelpText)
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.22))
             Spacer()
+            if manager.listeningMode == .wordTracking {
+                speechLocaleControl
+            }
+            modeControl
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 8)
         .background(Color(white: 0.095))
+    }
+
+    private var speechLocaleControl: some View {
+        Picker("", selection: $manager.speechLocale) {
+            ForEach(speechLocaleOptions, id: \.identifier) { locale in
+                Text(speechLocaleLabel(locale))
+                    .tag(locale.identifier)
+            }
+        }
+        .labelsHidden()
+        .frame(width: 136)
+        .dataAnnotationID("teleprompter-speech-locale-control")
+    }
+
+    private var speechLocaleOptions: [Locale] {
+        SFSpeechRecognizer.supportedLocales().sorted {
+            speechLocaleLabel($0) < speechLocaleLabel($1)
+        }
     }
 
     // MARK: Helpers
@@ -179,8 +283,21 @@ struct TeleprompterScriptEditorView: View {
             : "\(words) word\(words == 1 ? "" : "s")"
     }
 
+    private var bottomHelpText: String {
+        switch manager.listeningMode {
+        case .classic:
+            return "Classic scrolls upward at a steady speed."
+        case .wordTracking:
+            return "Word Tracking follows your speech after Teleprompter permissions are granted."
+        }
+    }
+
     private func applyAndClose() {
         manager.setScript(draftText)
         NSApp.windows.first(where: { $0.title == "Teleprompter Script" })?.close()
+    }
+
+    private func speechLocaleLabel(_ locale: Locale) -> String {
+        Locale.current.localizedString(forIdentifier: locale.identifier) ?? locale.identifier
     }
 }
