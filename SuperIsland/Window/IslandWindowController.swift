@@ -419,9 +419,12 @@ final class IslandWindowController {
         }
     }
 
-    /// Returns true when any on-screen window from another process exactly
-    /// covers the given screen's frame — the classic signature of a native
-    /// macOS fullscreen app.
+    /// Returns true when another process effectively covers the given screen.
+    ///
+    /// Most fullscreen apps expose one layer-0 window that covers the display.
+    /// Some browsers and video players split fullscreen content across several
+    /// layer-0 windows from the same process, so we also evaluate per-process
+    /// combined coverage.
     private static func isFullscreenWindowPresent(on screen: NSScreen) -> Bool {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let info = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
@@ -429,11 +432,16 @@ final class IslandWindowController {
         }
 
         let ourPID = Int(ProcessInfo.processInfo.processIdentifier)
-        let screenFrame = screen.frame
+        let screenFrame = cgDisplayBounds(for: screen) ?? screen.frame
+        let screenArea = max(screenFrame.width * screenFrame.height, 1)
+        let edgeTolerance: CGFloat = 3
+        let coverageThreshold: CGFloat = 0.985
+        let frontmostPID = NSWorkspace.shared.frontmostApplication.map { Int($0.processIdentifier) }
+        var windowsByOwner: [Int: [CGRect]] = [:]
 
         for window in info {
             // Skip windows owned by SuperIsland itself.
-            if let pid = window[kCGWindowOwnerPID as String] as? Int, pid == ourPID {
+            guard let pid = window[kCGWindowOwnerPID as String] as? Int, pid != ourPID else {
                 continue
             }
             // Only consider windows in the normal content layer. The menu
@@ -441,18 +449,127 @@ final class IslandWindowController {
             if let layer = window[kCGWindowLayer as String] as? Int, layer != 0 {
                 continue
             }
+            if let alpha = window[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue <= 0.05 {
+                continue
+            }
             guard let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
                   let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
                 continue
             }
-            // CGWindow bounds use pixel sizes; compare width/height with a
-            // small tolerance to guard against rounding on Retina screens.
-            if abs(rect.width - screenFrame.width) < 1.5
-                && abs(rect.height - screenFrame.height) < 1.5 {
+
+            let clipped = rect.intersection(screenFrame)
+            guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { continue }
+
+            let coverage = (clipped.width * clipped.height) / screenArea
+            if coverage >= coverageThreshold && touchesAllEdges(clipped, of: screenFrame, tolerance: edgeTolerance) {
+                return true
+            }
+            if pid == frontmostPID && coversFullscreenLikeArea(clipped, of: screenFrame, tolerance: edgeTolerance) {
+                return true
+            }
+            if coverage >= 0.02 {
+                windowsByOwner[pid, default: []].append(clipped)
+            }
+        }
+
+        for (pid, rects) in windowsByOwner where rects.count > 1 {
+            let union = rects.reduce(CGRect.null) { $0.union($1) }
+            let coverage = coveredArea(rects, within: screenFrame) / screenArea
+
+            if pid == frontmostPID,
+               coverage >= 0.93,
+               coversFullscreenLikeArea(union, of: screenFrame, tolerance: edgeTolerance) {
+                return true
+            }
+
+            guard touchesAllEdges(union, of: screenFrame, tolerance: edgeTolerance) else {
+                continue
+            }
+            let largestWindowCoverage = rects
+                .map { ($0.width * $0.height) / screenArea }
+                .max() ?? 0
+            let hasDominantTopSurface = rects.contains { rect in
+                let rectCoverage = (rect.width * rect.height) / screenArea
+                return rectCoverage >= 0.5
+                    && touchesHorizontalEdges(rect, of: screenFrame, tolerance: edgeTolerance)
+                    && abs(rect.minY - screenFrame.minY) <= edgeTolerance
+            }
+
+            if coverage >= coverageThreshold && largestWindowCoverage >= 0.5 && hasDominantTopSurface {
                 return true
             }
         }
         return false
+    }
+
+    private static func cgDisplayBounds(for screen: NSScreen) -> CGRect? {
+        guard let id = ScreenDetector.displayIDString(for: screen),
+              let displayID = CGDirectDisplayID(id) else {
+            return nil
+        }
+        return CGDisplayBounds(displayID)
+    }
+
+    private static func touchesAllEdges(_ rect: CGRect, of screen: CGRect, tolerance: CGFloat) -> Bool {
+        abs(rect.minX - screen.minX) <= tolerance
+            && abs(rect.maxX - screen.maxX) <= tolerance
+            && abs(rect.minY - screen.minY) <= tolerance
+            && abs(rect.maxY - screen.maxY) <= tolerance
+    }
+
+    private static func touchesHorizontalEdges(_ rect: CGRect, of screen: CGRect, tolerance: CGFloat) -> Bool {
+        abs(rect.minX - screen.minX) <= tolerance
+            && abs(rect.maxX - screen.maxX) <= tolerance
+    }
+
+    private static func coversFullscreenLikeArea(_ rect: CGRect, of screen: CGRect, tolerance: CGFloat) -> Bool {
+        let topInset = rect.minY - screen.minY
+        let maximumMenuBarInset = min(max(screen.height * 0.08, 56), 96)
+        let heightCoverage = rect.height / max(screen.height, 1)
+
+        return touchesHorizontalEdges(rect, of: screen, tolerance: tolerance)
+            && abs(rect.maxY - screen.maxY) <= tolerance
+            && topInset >= -tolerance
+            && topInset <= maximumMenuBarInset
+            && heightCoverage >= 0.93
+    }
+
+    private static func coveredArea(_ rects: [CGRect], within screen: CGRect) -> CGFloat {
+        let clipped = rects
+            .map { $0.intersection(screen) }
+            .filter { !$0.isNull && $0.width > 0 && $0.height > 0 }
+        guard !clipped.isEmpty else { return 0 }
+
+        let xs = Set(clipped.flatMap { [$0.minX, $0.maxX] }).sorted()
+        guard xs.count > 1 else { return 0 }
+
+        var area: CGFloat = 0
+        for index in 0..<(xs.count - 1) {
+            let x0 = xs[index]
+            let x1 = xs[index + 1]
+            guard x1 > x0 else { continue }
+
+            var intervals: [(CGFloat, CGFloat)] = []
+            for rect in clipped where rect.minX < x1 && rect.maxX > x0 {
+                intervals.append((rect.minY, rect.maxY))
+            }
+            guard !intervals.isEmpty else { continue }
+
+            intervals.sort { $0.0 < $1.0 }
+            var coveredHeight: CGFloat = 0
+            var current = intervals[0]
+            for interval in intervals.dropFirst() {
+                if interval.0 <= current.1 {
+                    current.1 = max(current.1, interval.1)
+                } else {
+                    coveredHeight += current.1 - current.0
+                    current = interval
+                }
+            }
+            coveredHeight += current.1 - current.0
+            area += (x1 - x0) * coveredHeight
+        }
+        return area
     }
 
     deinit {
