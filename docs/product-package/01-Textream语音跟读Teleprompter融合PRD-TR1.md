@@ -127,6 +127,7 @@
 - 触控板手势一旦在本次 gesture 内被判定为纵向滚动，就必须整段锁定为纵向，不得因为后续向下回滚、惯性滚动或横向噪声残留而切换模块/tab。
 - 外层 island 或 full expanded 的双指横向滑动必须保持原有顺滑切换手感；只要横向明确占优且未被纵向轴锁定，就应快速触发模块/tab 切换，不得因为轻微纵向抖动变钝。
 - 同一次双指横向滑动只能触发一次模块/tab 切换，切换步长固定为相邻一个模块或 tab；手势结束后的惯性滚动不得继续触发连跳。
+- full expanded 横向滑动切换顺序必须与左侧可见 tab 顺序一致；Notifications 已作为右侧独立铃铛按钮呈现时，不得在 Weather 与 Teleprompter 之间作为隐藏中间 tab 被滑动选中。
 
 ### 6. 边界
 
@@ -139,6 +140,7 @@
 - 手势冲突：字幕稿区域的纵向滚动优先级高于外层 island/tab 切换手势；只有明确横向占优且未被纵向轴锁定的触控板手势才可切换模块。
 - 横向手感：外层 island/tab 切换不能为了保护纵向滚动而把横向判定门槛调得过高；轻微斜向手势仍应在横向占优时顺滑切换。
 - 横向步进：一次双指左右滑动只允许从当前 tab 切到前一个或后一个 tab，不得因为触控板惯性或连续 scrollWheel 事件一次跳过多个 tab。
+- 隐藏 tab：full expanded 中被移到右侧独立控制区的 Notifications 不参与左侧 tab 的横向滑动循环；用户从 Weather 横向切到 Teleprompter 时不得先进入 Notifications。
 - 方向反转：用户先向上滚动再向下滚动时仍属于同一纵向滚动意图，外层 tab 切换不得利用纵向 delta 抵消后的横向残留触发。
 - 呈现冲突：如果其他模块刚触发 HUD 或 auto-dismiss，点击 Teleprompter 播放后以 Teleprompter 播放呈现优先，避免开始后看不到口播稿。
 
@@ -159,6 +161,7 @@
 - [ ] 用户在字幕稿区域双指向上后再向下滑动，仍只滚动字幕稿，不切换 tab。
 - [ ] 用户在外层 island 或 full expanded 区域双指左右滑动时，仍能顺滑切换模块或 tab。
 - [ ] 用户在外层 island 或 full expanded 区域双指左右滑动一次时，只切换到相邻一个模块或 tab。
+- [ ] 用户在 full expanded 从 Weather 横向切换到 Teleprompter 时，会按左侧可见顺序直接进入 Teleprompter，不会先进入右侧 Notifications。
 - [ ] Classic 模式保持现有定速滚动、暂停、重置、滚轮校准能力。
 - [ ] Word Tracking 模式能在权限完整时启动语音识别。
 - [ ] 切换模式不会清空脚本文本。

@@ -29,6 +29,7 @@ final class IslandWindowController {
     private var screenObserver: Any?
     private var defaultsObserver: Any?
     private var activeSpaceObserver: Any?
+    private var presentationHoldObserver: Any?
     private var fullscreenPollTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var shrinkWorkItem: DispatchWorkItem?
@@ -41,6 +42,7 @@ final class IslandWindowController {
         setupDidChangeStateHook()
         observeScreenChanges()
         observeSettingsChanges()
+        observePresentationHoldChanges()
         observeStateChanges()
         observeCompactLayoutChanges()
         observeFullscreenChanges()
@@ -353,6 +355,18 @@ final class IslandWindowController {
         }
     }
 
+    private func observePresentationHoldChanges() {
+        presentationHoldObserver = NotificationCenter.default.addObserver(
+            forName: .islandPresentationHoldDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateFullscreenVisibility()
+            }
+        }
+    }
+
     // MARK: - Fullscreen hiding
     //
     // When the user opts in via Settings we hide each panel individually
@@ -387,7 +401,7 @@ final class IslandWindowController {
     }
 
     private func updateFullscreenVisibility() {
-        let shouldConsider = appState.hideOnFullscreen
+        let shouldConsider = appState.hideOnFullscreen && !appState.isTeleprompterPresentationHeld
 
         for (id, panel) in panels {
             guard let screen = ScreenDetector.screen(withIDString: id) else { continue }
@@ -450,6 +464,9 @@ final class IslandWindowController {
         }
         if let observer = activeSpaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        if let observer = presentationHoldObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
         fullscreenPollTimer?.invalidate()
         cancellables.removeAll()

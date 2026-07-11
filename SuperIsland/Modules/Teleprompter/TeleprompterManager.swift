@@ -107,6 +107,7 @@ final class TeleprompterManager: ObservableObject {
     // MARK: - Private
 
     private var countdownTimer: Timer?
+    private var isRequestingWordTrackingPermissions = false
 
     private init() {
         self.scriptText   = UserDefaults.standard.string(forKey: "teleprompter.script") ?? ""
@@ -147,6 +148,7 @@ final class TeleprompterManager: ObservableObject {
 
     func play() {
         guard hasScript else { return }
+        guard ensureWordTrackingPermissionsIfNeeded() else { return }
         presentTeleprompter()
         if pendingCountdown {
             pendingCountdown = false
@@ -216,6 +218,50 @@ final class TeleprompterManager: ObservableObject {
             }
         }
         isPlaying = true
+    }
+
+    private func ensureWordTrackingPermissionsIfNeeded() -> Bool {
+        guard listeningMode == .wordTracking else { return true }
+
+        let permissions = PermissionsManager.shared
+        guard !permissions.checkMicrophone() || !permissions.checkSpeechRecognition() else {
+            speechRecognizer.error = nil
+            return true
+        }
+
+        guard !isRequestingWordTrackingPermissions else { return false }
+        isRequestingWordTrackingPermissions = true
+        speechRecognizer.error = wordTrackingPermissionError()
+
+        permissions.requestTeleprompterWordTrackingAccess { [weak self] granted in
+            guard let self else { return }
+            self.isRequestingWordTrackingPermissions = false
+            if granted {
+                self.speechRecognizer.error = nil
+                self.play()
+            } else {
+                self.isPlaying = false
+                self.pendingCountdown = true
+                self.speechRecognizer.error = self.wordTrackingPermissionError()
+                self.releaseTeleprompterPresentation()
+            }
+        }
+
+        return false
+    }
+
+    private func wordTrackingPermissionError() -> String {
+        let permissions = PermissionsManager.shared
+        let microphoneMissing = !permissions.checkMicrophone()
+        let speechMissing = !permissions.checkSpeechRecognition()
+
+        if microphoneMissing && speechMissing {
+            return "Microphone and Speech Recognition access are required for Word Tracking."
+        }
+        if speechMissing {
+            return "Speech Recognition access is required for Word Tracking."
+        }
+        return "Microphone access is required for Word Tracking."
     }
 
     private func cancelCountdown() {
