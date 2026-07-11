@@ -31,6 +31,11 @@ private final class _ScrollWheelNSView: NSView {
     var onScroll: ((CGFloat, Bool) -> Void)?
 
     override func scrollWheel(with event: NSEvent) {
+        let deltaX = abs(event.scrollingDeltaX)
+        let deltaY = abs(event.scrollingDeltaY)
+        if deltaY >= max(2, deltaX * 0.8) {
+            IslandSurfaceSwipeSuppression.suppress(eventTimestamp: event.timestamp)
+        }
         onScroll?(event.scrollingDeltaY, event.hasPreciseScrollingDeltas)
     }
 

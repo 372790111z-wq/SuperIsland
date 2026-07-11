@@ -1,6 +1,20 @@
 import AppKit
 import SwiftUI
 
+enum IslandSurfaceSwipeSuppression {
+    private static var suppressedUntil: TimeInterval = 0
+
+    static func suppress(for duration: TimeInterval = 0.6, eventTimestamp: TimeInterval? = nil) {
+        let baseline = max(eventTimestamp ?? 0, ProcessInfo.processInfo.systemUptime)
+        suppressedUntil = max(suppressedUntil, baseline + duration)
+    }
+
+    static func isActive(at eventTimestamp: TimeInterval) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        return eventTimestamp <= suppressedUntil || now <= suppressedUntil
+    }
+}
+
 struct SwipeDetector: ViewModifier {
     let onSwipe: (SwipeDirection) -> Void
     var minimumDistance: CGFloat = 20
@@ -108,6 +122,11 @@ final class TrackpadSwipeView: NSView {
     private func handleScroll(_ event: NSEvent) {
         guard let window, event.window == window,
               event.hasPreciseScrollingDeltas else { return }
+
+        if IslandSurfaceSwipeSuppression.isActive(at: event.timestamp) {
+            resetGesture()
+            return
+        }
 
         let now = event.timestamp
         if now - lastScrollEventTime > gestureTimeout {

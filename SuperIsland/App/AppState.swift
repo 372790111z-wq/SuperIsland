@@ -2,6 +2,10 @@ import Combine
 import SwiftUI
 import AppKit
 
+extension Notification.Name {
+    static let islandPresentationHoldDidChange = Notification.Name("islandPresentationHoldDidChange")
+}
+
 // MARK: - Temperature Unit
 enum TemperatureUnit: String {
     case celsius
@@ -536,11 +540,13 @@ final class AppState: ObservableObject {
         cancelAutoDismiss()
         cancelFullExpandedDismiss()
         cancelHoverActivation()
+        NotificationCenter.default.post(name: .islandPresentationHoldDidChange, object: nil)
     }
 
     func releasePresentationHold(for module: ActiveModule) {
         guard presentationHoldModule == module else { return }
         presentationHoldModule = nil
+        NotificationCenter.default.post(name: .islandPresentationHoldDidChange, object: nil)
     }
 
     func handleHoverChange(_ hovering: Bool) {
@@ -822,6 +828,10 @@ final class AppState: ObservableObject {
         return module == presentationHoldModule
     }
 
+    var isTeleprompterPresentationHeld: Bool {
+        isPresentationHeld(.builtIn(.teleprompter))
+    }
+
     private func handleStateTransition(from oldValue: IslandState, to newValue: IslandState) {
         guard oldValue != newValue else { return }
 
@@ -960,6 +970,15 @@ final class AppState: ObservableObject {
         var tabs: [FullExpandedTab] = [.home]
         tabs.append(contentsOf: fullExpandedModules.map(FullExpandedTab.module))
         return tabs
+    }
+
+    private var fullExpandedSwipeTabs: [FullExpandedTab] {
+        fullExpandedTabs.filter { tab in
+            if case .module(.builtIn(.notifications)) = tab {
+                return false
+            }
+            return true
+        }
     }
 
     var hasFullExpandedShoulderBarSpace: Bool {
@@ -1374,7 +1393,7 @@ final class AppState: ObservableObject {
     }
 
     private func cycleFullExpandedTab(forward: Bool) {
-        let tabs = fullExpandedTabs
+        let tabs = fullExpandedSwipeTabs
         guard !tabs.isEmpty else { return }
 
         let currentTab = tabs.contains(fullExpandedSelectedTab) ? fullExpandedSelectedTab : .home
