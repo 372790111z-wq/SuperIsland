@@ -1,13 +1,13 @@
 {
   "id": "superisland.ai-usage",
-  "name": "AI Usage Rings",
+  "name": "AI 用量环",
   "version": "1.0.0",
   "minAppVersion": "1.0.0",
   "main": "index.js",
   "author": {
     "name": "SuperIsland"
   },
-  "description": "Codex and Claude usage in the notch with ring indicators.",
+  "description": "在刘海区域用环形指示器显示 Codex 和 Claude 用量。",
   "icon": "icon.svg",
   "license": "MIT",
   "categories": ["developer", "productivity"],

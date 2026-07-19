@@ -747,16 +747,16 @@ function setupStatusCard() {
         lineLimit: 2,
         multilineTextAlignment: "center"
       }),
-      chipButton(authConnected() ? "Reconnect Last.fm" : "Connect Last.fm", "auth", {
+      chipButton(authConnected() ? "重新连接 Last.fm" : "连接 Last.fm", "auth", {
         style: "caption",
         icon: "link.badge.plus",
         textColor: "white",
         fillColor: subtleRedFillColor()
       }),
       View.text(
-        "Account: " + (pending
-          ? "waiting for approval"
-          : (authConnected() ? ("connected as " + (state.auth.username || "Last.fm user")) : "not connected")),
+        "账户：" + (pending
+          ? "等待授权"
+          : (authConnected() ? ("已连接为 " + (state.auth.username || "Last.fm 用户")) : "未连接")),
         {
           style: "caption",
           color: authConnected() ? successTextColor() : secondaryTextColor(),
@@ -770,7 +770,7 @@ function setupStatusCard() {
             lineLimit: 3,
             multilineTextAlignment: "center"
           })
-        : View.text("Playback will appear here once the account is connected.", {
+        : View.text("账户连接后，播放状态会显示在这里。", {
             style: "footnote",
             color: mutedTextColor(),
             lineLimit: 2,
@@ -784,48 +784,48 @@ function setupStatusCard() {
 function trackStatusSummary(session) {
   if (!session) {
     return {
-      label: "Idle",
+      label: "空闲",
       tone: "warning",
-      detail: "Start playback to create a scrobble session."
+      detail: "开始播放后会创建记录会话。"
     };
   }
 
   if (session.scrobbled || state.history[session.id]) {
     return {
-      label: "Scrobbled",
+      label: "已记录",
       tone: "success",
-      detail: "Scrobbled at " + formatClock(session.scrobbledAtSeconds || session.thresholdSeconds)
+      detail: "已于 " + formatClock(session.scrobbledAtSeconds || session.thresholdSeconds) + " 记录"
     };
   }
 
   if (session.thresholdSeconds === Infinity) {
     return {
-      label: "Too short",
+      label: "太短",
       tone: "warning",
-      detail: "Tracks under 30 seconds are ignored by Last.fm."
+      detail: "Last.fm 会忽略 30 秒以下的曲目。"
     };
   }
 
   if (state.queue.length) {
     return {
-      label: "Queued",
+      label: "排队中",
       tone: "warning",
-      detail: state.queue.length === 1 ? "1 scrobble waiting to send." : state.queue.length + " scrobbles waiting to send."
+      detail: state.queue.length === 1 ? "1 条记录等待发送。" : state.queue.length + " 条记录等待发送。"
     };
   }
 
   if (session.lastPlaybackState !== "playing") {
     return {
-      label: "Paused",
+      label: "已暂停",
       tone: "warning",
-      detail: "Only active playback time counts toward the scrobble."
+      detail: "只有实际播放时间会计入记录。"
     };
   }
 
   return {
-    label: "Tracking",
+    label: "跟踪中",
     tone: "neutral",
-    detail: "Scrobbles at " + formatClock(session.thresholdSeconds) + "."
+    detail: "将在 " + formatClock(session.thresholdSeconds) + " 记录。"
   };
 }
 
@@ -1055,7 +1055,7 @@ async function lastFmRequest(methodName, params, options) {
   if (!apiKey) {
     return {
       error: "missing_api_key",
-      message: "Last.fm API key missing from session. Reconnect Last.fm."
+      message: "会话中缺少 Last.fm API key。请重新连接 Last.fm。"
     };
   }
 
@@ -1064,7 +1064,7 @@ async function lastFmRequest(methodName, params, options) {
   if (signed && !apiSecret) {
     return {
       error: "missing_api_secret",
-      message: "Last.fm signing secret missing from session. Reconnect Last.fm."
+      message: "会话中缺少 Last.fm signing secret。请重新连接 Last.fm。"
     };
   }
 
@@ -1676,8 +1676,8 @@ function currentTrackArtist() {
 
 function currentSourceBadgeLabel() {
   var source = currentSourceLabel();
-  if (source === "No active track") return "Ready";
-  if (source === "Host app update needed") return "Needs update";
+  if (source === "No active track") return "就绪";
+  if (source === "Host app update needed") return "需要更新";
   return source;
 }
 
@@ -1685,7 +1685,7 @@ function mediaBridgeStatusView() {
   return View.frame(
     View.vstack([
       lastFmBadgeNode(18, "warning"),
-      View.text("Last.fm connected", {
+      View.text("Last.fm 已连接", {
         style: "title",
         color: "white",
         lineLimit: 1
@@ -1696,7 +1696,7 @@ function mediaBridgeStatusView() {
         lineLimit: 1,
         multilineTextAlignment: "center"
       }),
-      View.text("Playback data is temporarily unavailable in this app session. Relaunch SuperIsland to restore the media bridge.", {
+      View.text("当前 App 会话暂时无法获取播放数据。请重新启动 SuperIsland 以恢复媒体桥接。", {
         style: "footnote",
         color: warningTextColor(),
         lineLimit: 3,

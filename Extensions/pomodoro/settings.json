@@ -1,12 +1,12 @@
 {
   "sections": [
     {
-      "title": "Timer",
+      "title": "计时器",
       "fields": [
         {
           "type": "slider",
           "key": "workDuration",
-          "label": "Work duration (min)",
+          "label": "工作时长（分钟）",
           "min": 5,
           "max": 90,
           "step": 5,
@@ -15,7 +15,7 @@
         {
           "type": "slider",
           "key": "breakDuration",
-          "label": "Break duration (min)",
+          "label": "休息时长（分钟）",
           "min": 1,
           "max": 30,
           "step": 1,
@@ -24,18 +24,18 @@
       ]
     },
     {
-      "title": "Notifications",
+      "title": "通知",
       "fields": [
         {
           "type": "toggle",
           "key": "notifyOnComplete",
-          "label": "Notify when phase ends",
+          "label": "阶段结束时通知",
           "default": true
         },
         {
           "type": "toggle",
           "key": "playSound",
-          "label": "Play notification sound",
+          "label": "播放通知声音",
           "default": true
         }
       ]

@@ -22,7 +22,7 @@ struct UpdateDialogView: View {
 
             Spacer().frame(height: 14)
 
-            Text("Update Available")
+            Text("有可用更新")
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color.white.opacity(0.92))
 
@@ -53,7 +53,7 @@ struct UpdateDialogView: View {
     private var statusText: some View {
         switch updater.state {
         case .idle:
-            Text("Version \(version) is ready to install.")
+            Text("版本 \(version) 已可安装。")
                 .font(.system(size: 12))
                 .foregroundStyle(Color.white.opacity(0.45))
         case .downloading(let progress):
@@ -62,7 +62,7 @@ struct UpdateDialogView: View {
                     .progressViewStyle(.linear)
                     .tint(Color.white.opacity(0.8))
                     .frame(width: 160)
-                Text("Downloading \(Int(progress * 100))%")
+                Text("正在下载 \(Int(progress * 100))%")
                     .font(.system(size: 11))
                     .foregroundStyle(Color.white.opacity(0.4))
             }
@@ -72,7 +72,7 @@ struct UpdateDialogView: View {
                     .progressViewStyle(.circular)
                     .controlSize(.mini)
                     .tint(Color.white.opacity(0.6))
-                Text("Installing...")
+                Text("正在安装...")
                     .font(.system(size: 12))
                     .foregroundStyle(Color.white.opacity(0.45))
             }
@@ -92,7 +92,7 @@ struct UpdateDialogView: View {
         switch updater.state {
         case .idle:
             HStack(spacing: 8) {
-                Button("Later") { onDismiss() }
+                Button("稍后") { onDismiss() }
                     .buttonStyle(.plain)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Color.white.opacity(hoveringLater ? 0.65 : 0.38))
@@ -109,7 +109,7 @@ struct UpdateDialogView: View {
                         onDismiss()
                     }
                 } label: {
-                    Text("Update")
+                    Text("更新")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Color.black.opacity(0.85))
                         .frame(width: 100, height: 34)
@@ -131,7 +131,7 @@ struct UpdateDialogView: View {
             EmptyView()
 
         case .failed:
-            Button("Open Release Page") {
+            Button("打开发布页面") {
                 NSWorkspace.shared.open(releaseURL)
                 onDismiss()
             }

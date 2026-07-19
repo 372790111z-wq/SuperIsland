@@ -218,7 +218,7 @@ function compactView() {
   if (state.messages.length === 0) {
     return View.hstack([
       View.icon("message.fill", { size: 12, color: "green" }),
-      View.text("Connected", { style: "caption", color: "white", lineLimit: 1 })
+      View.text("已连接", { style: "caption", color: "white", lineLimit: 1 })
     ], { spacing: 6, align: "center" });
   }
 
@@ -343,7 +343,7 @@ function replyComposerView() {
       View.hstack([
         ...headerChildren,
         View.spacer(),
-        View.button(View.text("Close", { style: "caption", color: "gray", lineLimit: 1 }), "close-reply")
+        View.button(View.text("关闭", { style: "caption", color: "gray", lineLimit: 1 }), "close-reply")
       ], { spacing: 8, align: "top" }),
       mediaPreviewSection(),
       renderInputComposer({
@@ -370,8 +370,8 @@ function expandedView() {
 
   if (replyComposer) {
     return View.vstack([
-      View.text(`Replying to ${replyComposer.sender}`, { style: "title", lineLimit: 1 }),
-      View.text("Opened from notification. Expand to send your reply.", {
+      View.text(`正在回复 ${replyComposer.sender}`, { style: "title", lineLimit: 1 }),
+      View.text("已从通知打开。展开后可发送回复。", {
         style: "caption",
         color: "gray",
         lineLimit: 2
@@ -382,7 +382,7 @@ function expandedView() {
   if (!state.loggedIn) {
     return View.vstack([
       View.text("WhatsApp Web", { style: "title", lineLimit: 1 }),
-      View.text("Login required. Open Extensions settings and scan QR.", {
+      View.text("需要登录。请打开扩展设置并扫描二维码。", {
         style: "caption",
         color: "gray",
         lineLimit: 2
@@ -417,12 +417,12 @@ function fullExpandedView() {
   if (!state.loggedIn) {
     return View.vstack([
       View.text("WhatsApp Web", { style: "title", lineLimit: 1 }),
-      View.text("Scan QR in Extensions settings to connect.", {
+      View.text("在扩展设置中扫描二维码以连接。", {
         style: "caption",
         color: "gray",
         lineLimit: 2
       }),
-      View.button(View.text("Refresh QR", { style: "caption", color: "green", lineLimit: 1 }), "refresh-qr")
+      View.button(View.text("刷新二维码", { style: "caption", color: "green", lineLimit: 1 }), "refresh-qr")
     ], { spacing: 8, align: "leading" });
   }
 

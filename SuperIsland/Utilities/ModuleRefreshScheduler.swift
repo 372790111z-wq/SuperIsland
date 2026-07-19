@@ -10,20 +10,20 @@ enum EnergyMode: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .normal: return "Normal"
-        case .smart: return "Smart"
-        case .lowPower: return "Low Power"
+        case .normal: return "正常"
+        case .smart: return "智能"
+        case .lowPower: return "低电量"
         }
     }
 
     var description: String {
         switch self {
         case .normal:
-            return "Keep refresh behavior responsive."
+            return "保持刷新响应及时。"
         case .smart:
-            return "Reduce background work while collapsed and restore quickly on hover."
+            return "收起时减少后台工作，悬停后快速恢复。"
         case .lowPower:
-            return "Slow non-essential refresh and pause inactive extension work."
+            return "降低非必要刷新频率，并暂停非活动扩展工作。"
         }
     }
 }
@@ -38,15 +38,15 @@ enum ModuleRefreshPolicy: Equatable {
     var label: String {
         switch self {
         case .eventDriven:
-            return "Event driven"
+            return "事件驱动"
         case .interval(let interval, _):
-            return "Every \(Self.format(interval))"
+            return "每 \(Self.format(interval))"
         case .activeOnly(let interval, _):
-            return "Active every \(Self.format(interval))"
+            return "活动时每 \(Self.format(interval))"
         case .visibleOnly(let interval, _):
-            return "Visible every \(Self.format(interval))"
+            return "可见时每 \(Self.format(interval))"
         case .manual:
-            return "Manual"
+            return "手动"
         }
     }
 
@@ -100,7 +100,7 @@ final class ModuleRefreshScheduler: ObservableObject {
         var lastRunDate: Date?
         var lastRunDuration: TimeInterval?
         var lastError: String?
-        var status: String = "Scheduled"
+        var status: String = "已计划"
     }
 
     private var jobs: [String: Job] = [:]
@@ -182,7 +182,7 @@ final class ModuleRefreshScheduler: ObservableObject {
         job.nextFireDate = nil
 
         guard job.enabled() else {
-            job.status = "Disabled"
+            job.status = "已禁用"
             jobs[id] = job
             return
         }
@@ -205,7 +205,7 @@ final class ModuleRefreshScheduler: ObservableObject {
 
         job.timer = timer
         job.nextFireDate = nextFireDate
-        job.status = "Scheduled"
+        job.status = "已计划"
         jobs[id] = job
 
         if runIfNewlyVisible, shouldRunWhenBecomingVisible(job) {
@@ -287,13 +287,13 @@ final class ModuleRefreshScheduler: ObservableObject {
     private func passiveStatus(for job: Job) -> String {
         switch job.policy {
         case .eventDriven:
-            return "Event driven"
+            return "事件驱动"
         case .manual:
-            return "Manual"
+            return "手动"
         case .activeOnly, .visibleOnly:
-            return job.enabled() ? "Paused" : "Disabled"
+            return job.enabled() ? "已暂停" : "已禁用"
         case .interval:
-            return "Paused"
+            return "已暂停"
         }
     }
 

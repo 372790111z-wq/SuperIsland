@@ -12,8 +12,8 @@ struct HomeScreenView: View {
             case 0:
                 HomeEmptyState(
                     icon: "square.grid.2x2",
-                    title: "No home modules enabled",
-                    subtitle: "Enable modules in Settings to show them here.",
+                    title: "未启用首页模块",
+                    subtitle: "在设置中启用模块后会显示在这里。",
                     fillsAvailableSpace: true
                 )
             case 3:
@@ -249,8 +249,8 @@ private struct HomeCalendarPanel: View {
             if upcomingEvents.isEmpty {
                 HomeEmptyState(
                     icon: "calendar",
-                    title: "Nothing coming up",
-                    subtitle: "Your schedule is clear for now."
+                    title: "暂无日程",
+                    subtitle: "目前没有即将开始的安排。"
                 )
             } else {
                 VStack(alignment: .leading, spacing: 9) {
@@ -354,13 +354,13 @@ private struct HomeWeatherPanel: View {
 
                     HStack(spacing: 8) {
                         weatherStat(
-                            title: "High",
+                            title: "高",
                             value: formattedTemp(manager.weather.temperatureHigh),
                             icon: "arrow.up.circle.fill",
                             tint: Color.orange.opacity(0.88)
                         )
                         weatherStat(
-                            title: "Low",
+                            title: "低",
                             value: formattedTemp(manager.weather.temperatureLow),
                             icon: "arrow.down.circle.fill",
                             tint: Color.cyan.opacity(0.88)

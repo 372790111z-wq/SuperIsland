@@ -65,7 +65,7 @@ enum NowPlayingProviderStatus: Equatable {
         case .browserDisabled:
             return "Enable browser media detection for Chrome playback."
         case .permissionNeeded:
-            return "Allow automation access and browser JavaScript from Apple Events."
+            return "请允许自动化访问，并允许浏览器通过 Apple Events 执行 JavaScript。"
         case .unavailable:
             return "Open the app and start playback, then try again."
         }

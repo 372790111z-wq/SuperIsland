@@ -7,7 +7,7 @@
   "author": {
     "name": "SuperIsland"
   },
-  "description": "Pairs with WhatsApp Web via QR and routes incoming messages to the SuperIsland notification feed.",
+  "description": "通过二维码配对 WhatsApp Web，并把新消息送到 SuperIsland 通知流。",
   "icon": "icon.svg",
   "license": "MIT",
   "categories": ["communication", "productivity"],

@@ -17,7 +17,7 @@ struct AppearanceSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
 
             section(
-                title: "Animation",
+                title: "动画",
                 reset: {
                     appState.animationLevel = Defaults.animationLevel
                     appState.reduceMotion = Defaults.reduceMotion
@@ -26,8 +26,8 @@ struct AppearanceSettingsView: View {
             ) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Animation intensity").font(.system(size: 13))
-                        Text("Controls island motion and transition strength")
+                        Text("动画强度").font(.system(size: 13))
+                        Text("控制动态岛运动和过渡强度")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer(minLength: 12)
@@ -44,7 +44,7 @@ struct AppearanceSettingsView: View {
 
                 SettingRowDivider()
                 SettingToggleRow(
-                    title: "Reduce motion",
+                    title: "减少动态效果",
                     description: "Simplify island transitions and content swaps",
                     isOn: $appState.reduceMotion
                 )
@@ -52,8 +52,8 @@ struct AppearanceSettingsView: View {
                 SettingRowDivider()
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Bounce").font(.system(size: 13))
-                        Text("Spring bounce for compact ↔ expanded transitions")
+                        Text("弹性").font(.system(size: 13))
+                        Text("紧凑与展开切换时的弹性强度")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer(minLength: 12)
@@ -67,14 +67,14 @@ struct AppearanceSettingsView: View {
             }
 
             section(
-                title: "Compact Island Size",
+                title: "紧凑动态岛尺寸",
                 reset: {
                     appState.compactIslandWidth = Defaults.compactIslandWidth
                     appState.compactIslandHeight = Defaults.compactIslandHeight
                 }
             ) {
                 sizeRow(
-                    title: "Width",
+                    title: "宽度",
                     description: "Pill width on notched Macs",
                     value: $appState.compactIslandWidth,
                     step: 2,
@@ -83,7 +83,7 @@ struct AppearanceSettingsView: View {
                 )
                 SettingRowDivider()
                 sizeRow(
-                    title: "Height",
+                    title: "高度",
                     description: "Pill height on notched Macs",
                     value: $appState.compactIslandHeight,
                     step: 1,

@@ -17,7 +17,7 @@ struct ShelfCompactView: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
             } else {
-                Text("Shelf")
+                Text("暂存架")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.72))
             }
@@ -47,7 +47,7 @@ struct ShelfExpandedView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Label("Shelf", systemImage: "tray.full.fill")
+                Label("暂存架", systemImage: "tray.full.fill")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
 
@@ -63,10 +63,10 @@ struct ShelfExpandedView: View {
                         .foregroundStyle(.white.opacity(0.78))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Drop onto the island")
+                        Text("拖放到动态岛")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
-                        Text("Items stay here until you remove them.")
+                        Text("项目会保留在这里，直到你移除。")
                             .font(.system(size: 11))
                             .foregroundStyle(.white.opacity(0.56))
                     }
@@ -157,7 +157,7 @@ private struct AirDropDropPane: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
 
-                Text("Drop to share")
+                Text("拖放以分享")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.white.opacity(0.46))
             }
@@ -214,7 +214,7 @@ private struct TrayDropPane: View {
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.82))
 
-                    Text("Drop files here")
+                    Text("将文件拖到这里")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.78))
                 }
@@ -222,7 +222,7 @@ private struct TrayDropPane: View {
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Shelf")
+                        Text("暂存架")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.72))
 
@@ -249,12 +249,12 @@ private struct TrayDropPane: View {
                             )
 
                         Menu("Clear") {
-                            Button("Clear Unpinned") {
+                            Button("清除未固定") {
                                 shelf.clearUnpinned()
                             }
                             .disabled(!shelf.items.contains { !$0.isPinned })
 
-                            Button("Clear All") {
+                            Button("全部清除") {
                                 shelf.clear()
                             }
                         }
@@ -270,7 +270,7 @@ private struct TrayDropPane: View {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 17, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.64))
-                            Text("No matches")
+                            Text("无匹配结果")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.68))
                         }
@@ -478,19 +478,19 @@ private struct ShelfItemActionsMenu: View {
         }
 
         if !item.isMissing {
-            Button("Open") {
+            Button("打开") {
                 shelf.open(item)
             }
         }
 
         if item.canQuickLook {
-            Button("Quick Look") {
+            Button("快速查看") {
                 shelf.quickLook(item)
             }
         }
 
         if item.isFileBacked && !item.isMissing {
-            Button("Show in Finder") {
+            Button("在 Finder 中显示") {
                 shelf.reveal(item)
             }
         }
@@ -504,7 +504,7 @@ private struct ShelfItemActionsMenu: View {
         }
 
         if item.isFileBacked {
-            Button("Copy Path") {
+            Button("复制路径") {
                 shelf.copyPath(item)
             }
         }
@@ -512,18 +512,18 @@ private struct ShelfItemActionsMenu: View {
         if !item.isMissing || !item.isFileBacked {
             Divider()
 
-            Button("Share...") {
+            Button("分享...") {
                 shelf.share(items: [item])
             }
 
-            Button("Share via AirDrop") {
+            Button("通过 AirDrop 分享") {
                 shelf.shareViaAirDrop(items: [item])
             }
         }
 
         Divider()
 
-        Button("Remove") {
+        Button("移除") {
             shelf.remove(item)
         }
     }

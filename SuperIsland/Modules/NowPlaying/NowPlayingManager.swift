@@ -1307,7 +1307,7 @@ final class NowPlayingManager: ObservableObject {
         browserDetectionTestMessage = "Checking browser media..."
         guard browserDetectionEnabled else {
             providerStatus = .browserDisabled
-            browserDetectionTestMessage = "Enable browser media detection first."
+            browserDetectionTestMessage = "请先启用浏览器媒体检测。"
             return
         }
 
@@ -1318,16 +1318,16 @@ final class NowPlayingManager: ObservableObject {
             }
 
             guard let snapshot else {
-                self.providerStatus = .permissionNeeded("Browser media")
-                self.browserDetectionTestMessage = "No browser media found. Check Automation permission and browser JavaScript from Apple Events."
+                self.providerStatus = .permissionNeeded("浏览器媒体")
+                self.browserDetectionTestMessage = "未找到浏览器媒体。请检查自动化权限，以及浏览器是否允许 Apple Events 执行 JavaScript。"
                 return
             }
 
             self.applySnapshot(snapshot)
             self.fetchArtworkIfNeeded(for: snapshot)
             self.browserDetectionTestMessage = snapshot.isPlaying
-                ? "Detected media in \(snapshot.sourceName)."
-                : "Detected paused media in \(snapshot.sourceName)."
+                ? "已在 \(snapshot.sourceName) 检测到媒体。"
+                : "已在 \(snapshot.sourceName) 检测到暂停的媒体。"
         }
     }
 

@@ -64,7 +64,7 @@ struct SystemHUDExpandedView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     HStack {
-                        Text("System Volume")
+                        Text("系统音量")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.white)
                         Spacer()
@@ -84,12 +84,12 @@ struct SystemHUDExpandedView: View {
             Divider()
                 .overlay(.white.opacity(0.15))
 
-            Text("Media Apps")
+            Text("媒体 App")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.white.opacity(0.8))
 
             if volumeManager.mediaAppVolumes.isEmpty {
-                Text("No supported media apps are currently playing.")
+                Text("当前没有支持的媒体 App 正在播放。")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.5))
                     .frame(maxWidth: .infinity, alignment: .leading)

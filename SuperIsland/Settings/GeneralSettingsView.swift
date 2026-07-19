@@ -96,10 +96,10 @@ struct GeneralSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
 
             // Startup
-            SettingSectionLabel(title: "Startup")
+            SettingSectionLabel(title: "启动")
             SettingGroup {
                 HStack {
-                    Text("Launch at login").font(.system(size: 13))
+                    Text("登录时启动").font(.system(size: 13))
                     Spacer()
                     Toggle("", isOn: $launchAtLogin)
                         .labelsHidden()
@@ -110,29 +110,29 @@ struct GeneralSettingsView: View {
                 .padding(.horizontal, 16).padding(.vertical, 11)
 
                 SettingRowDivider()
-                SettingToggleRow(title: "Show menu bar icon", isOn: $appState.showMenuBarIcon)
+                SettingToggleRow(title: "显示菜单栏图标", isOn: $appState.showMenuBarIcon)
                 SettingRowDivider()
-                SettingToggleRow(title: "Show in screen recordings", isOn: $appState.showInScreenRecordings)
+                SettingToggleRow(title: "在屏幕录制中显示", isOn: $appState.showInScreenRecordings)
             }
 
             // Display
-            SettingSectionLabel(title: "Display")
+            SettingSectionLabel(title: "显示")
             SettingGroup {
-                SettingToggleRow(title: "Show on all Spaces", isOn: $appState.showOnAllSpaces)
+                SettingToggleRow(title: "在所有空间显示", isOn: $appState.showOnAllSpaces)
                 if appState.presentationHasNotch {
                     SettingRowDivider()
-                    SettingToggleRow(title: "Hide side slots", isOn: $appState.hideSideSlots)
+                    SettingToggleRow(title: "隐藏侧边槽位", isOn: $appState.hideSideSlots)
                 }
                 SettingRowDivider()
-                SettingToggleRow(title: "Hide on fullscreen", isOn: $appState.hideOnFullscreen)
+                SettingToggleRow(title: "全屏时隐藏", isOn: $appState.hideOnFullscreen)
                 SettingRowDivider()
                 HStack {
-                    Text("Animation Speed").font(.system(size: 13))
+                    Text("动画速度").font(.system(size: 13))
                     Spacer()
                     Picker("", selection: $appState.animationSpeed) {
-                        Text("Normal").tag(1.0)
-                        Text("Reduced").tag(1.5)
-                        Text("Minimal").tag(2.0)
+                        Text("正常").tag(1.0)
+                        Text("降低").tag(1.5)
+                        Text("最小").tag(2.0)
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
@@ -142,11 +142,11 @@ struct GeneralSettingsView: View {
             }
 
             // Power
-            SettingSectionLabel(title: "Power")
+            SettingSectionLabel(title: "电源")
             SettingGroup {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Power mode").font(.system(size: 13))
+                        Text("电源模式").font(.system(size: 13))
                         Text(appState.energyMode.description)
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
@@ -164,21 +164,21 @@ struct GeneralSettingsView: View {
 
                 SettingRowDivider()
                 SettingToggleRow(
-                    title: "Reduce animations",
+                    title: "减少动画",
                     description: "Use simpler motion for island transitions and visual effects.",
                     isOn: $appState.reduceAnimations
                 )
 
                 SettingRowDivider()
                 SettingToggleRow(
-                    title: "Pause background extension refresh",
+                    title: "暂停后台扩展刷新",
                     description: "Keep inactive extensions quiet until they are visible or selected.",
                     isOn: $appState.disableBackgroundExtensionRefresh
                 )
 
                 SettingRowDivider()
                 SettingToggleRow(
-                    title: "Low Power suggestions",
+                    title: "低电量建议",
                     description: "Offer Low Power mode when the Mac switches to battery or refresh work stays busy.",
                     isOn: lowPowerSuggestionBinding
                 )
@@ -187,12 +187,12 @@ struct GeneralSettingsView: View {
             .onChange(of: appState.disableBackgroundExtensionRefresh) { _, _ in appState.refreshEnergyState() }
 
             // Behavior
-            SettingSectionLabel(title: "Behavior")
+            SettingSectionLabel(title: "行为")
             SettingGroup {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Expanded collapse delay").font(.system(size: 13))
-                        Text("How long expanded content stays visible")
+                        Text("展开后收起延迟").font(.system(size: 13))
+                        Text("展开内容保持可见的时间")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer(minLength: 12)
@@ -207,8 +207,8 @@ struct GeneralSettingsView: View {
                 SettingRowDivider()
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Hover expand delay").font(.system(size: 13))
-                        Text("How long to hover the notch before it peeks open")
+                        Text("悬停展开延迟").font(.system(size: 13))
+                        Text("悬停在刘海区域多久后预览展开")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer(minLength: 12)
@@ -222,14 +222,14 @@ struct GeneralSettingsView: View {
             }
 
             // Interaction
-            SettingSectionLabel(title: "Interaction")
+            SettingSectionLabel(title: "交互")
             SettingGroup {
-                SettingToggleRow(title: "Island surface swipes", isOn: $appState.islandSurfaceSwipeEnabled)
+                SettingToggleRow(title: "动态岛表面滑动", isOn: $appState.islandSurfaceSwipeEnabled)
                 SettingRowDivider()
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Notch haptic intensity").font(.system(size: 13))
-                        Text("Feedback strength when entering the notch")
+                        Text("刘海触觉反馈强度").font(.system(size: 13))
+                        Text("进入刘海区域时的反馈强度")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer(minLength: 12)
@@ -246,34 +246,34 @@ struct GeneralSettingsView: View {
 
                 SettingRowDivider()
                 SettingToggleRow(
-                    title: "Allow Command+Q to quit",
+                    title: "允许 Command+Q 退出",
                     description: "Turn this off to prevent accidental quits while interacting with the notch.",
                     isOn: $appState.allowQuitHotkey
                 )
             }
 
             // Permissions
-            SettingSectionLabel(title: "Permissions")
+            SettingSectionLabel(title: "权限")
             SettingGroup {
                 permissionRow(.accessibility,
-                    title: "Accessibility", icon: "figure.stand",
+                    title: "辅助功能", icon: "figure.stand",
                     description: "Gesture detection and system events")
                 SettingRowDivider()
                 permissionRow(.calendar,
-                    title: "Calendar", icon: "calendar",
+                    title: "日历", icon: "calendar",
                     description: "Show upcoming events in the island")
                 SettingRowDivider()
                 permissionRow(.location,
-                    title: "Location", icon: "location.fill",
+                    title: "定位", icon: "location.fill",
                     description: "Weather information for your location")
                 SettingRowDivider()
                 permissionRow(.bluetooth,
-                    title: "Bluetooth", icon: "wave.3.right.circle.fill",
+                    title: "蓝牙", icon: "wave.3.right.circle.fill",
                     description: "Connected device notifications")
             }
 
             // Mascot
-            SettingSectionLabel(title: "Mascot")
+            SettingSectionLabel(title: "吉祥物")
             SettingGroup {
                 MascotGridPicker()
                     .padding(14)
@@ -288,7 +288,7 @@ struct GeneralSettingsView: View {
                 }
 
                 SettingRowDivider()
-                SettingToggleRow(title: "Show mascot in Pomodoro", isOn: $mascotManager.showInPomodoro)
+                SettingToggleRow(title: "在番茄钟中显示吉祥物", isOn: $mascotManager.showInPomodoro)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -318,11 +318,11 @@ struct GeneralSettingsView: View {
             Spacer()
 
             if permissionGranted(permission) {
-                Label("Granted", systemImage: "checkmark.circle.fill")
+                Label("已授权", systemImage: "checkmark.circle.fill")
                     .font(.system(size: 11))
                     .foregroundColor(.green)
             } else {
-                Button("Grant Access") { requestPermission(permission) }
+                Button("授权") { requestPermission(permission) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
             }

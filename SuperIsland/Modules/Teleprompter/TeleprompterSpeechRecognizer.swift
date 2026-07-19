@@ -57,13 +57,13 @@ final class TeleprompterSpeechRecognizer: ObservableObject {
         guard !sourceText.isEmpty else { return }
 
         guard PermissionsManager.shared.checkMicrophone() else {
-            error = "Microphone access is required for Word Tracking."
+            error = "语音跟读需要麦克风权限。"
             PermissionsManager.shared.requestTeleprompterWordTrackingAccess()
             return
         }
 
         guard PermissionsManager.shared.checkSpeechRecognition() else {
-            error = "Speech Recognition access is required for Word Tracking."
+            error = "语音跟读需要语音识别权限。"
             PermissionsManager.shared.requestTeleprompterWordTrackingAccess()
             return
         }
@@ -97,7 +97,7 @@ final class TeleprompterSpeechRecognizer: ObservableObject {
 
         speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: localeIdentifier))
         guard let speechRecognizer, speechRecognizer.isAvailable else {
-            error = "Speech recognizer is not available for the selected language."
+            error = "所选语言暂不可用语音识别。"
             isListening = false
             return
         }
@@ -152,7 +152,7 @@ final class TeleprompterSpeechRecognizer: ObservableObject {
                         self.retryCount += 1
                         self.scheduleRestart(localeIdentifier: localeIdentifier, after: min(Double(self.retryCount) * 0.4, 1.5))
                     } else {
-                        self.error = "Speech recognition stopped unexpectedly."
+                        self.error = "语音识别意外停止。"
                         self.isListening = false
                     }
                 }
@@ -165,7 +165,7 @@ final class TeleprompterSpeechRecognizer: ObservableObject {
             isListening = true
             startPreemptiveRestart(localeIdentifier: localeIdentifier)
         } catch {
-            self.error = "Audio engine failed: \(error.localizedDescription)"
+            self.error = "音频引擎启动失败：\(error.localizedDescription)"
             isListening = false
         }
     }
@@ -348,8 +348,8 @@ final class TeleprompterSpeechRecognizer: ObservableObject {
 
         guard candidate > recognizedSourceOffset else {
             matchConfidenceLabel = recognizedSourceOffset > 0
-                ? "Matched \(progressLabel(for: recognizedSourceOffset))"
-                : "No script match"
+                ? "已匹配 \(progressLabel(for: recognizedSourceOffset))"
+                : "未匹配稿件"
             return
         }
 
@@ -369,10 +369,10 @@ final class TeleprompterSpeechRecognizer: ObservableObject {
             recognizedSourceOffset = candidate
             recognizedCharCount = sourceDisplayOffsets.displayOffset(forSpeechOffset: candidate)
             matchConfidenceLabel = step > 72
-                ? "Confirmed \(progressLabel(for: candidate))"
-                : "Matched \(progressLabel(for: candidate))"
+                ? "已确认 \(progressLabel(for: candidate))"
+                : "已匹配 \(progressLabel(for: candidate))"
         } else {
-            matchConfidenceLabel = "Weak match"
+            matchConfidenceLabel = "弱匹配"
         }
     }
 

@@ -1,13 +1,13 @@
 {
   "id": "superisland.linear-mentions",
-  "name": "Linear Mentions",
+  "name": "Linear 提及",
   "version": "1.0.0",
   "minAppVersion": "1.0.0",
   "main": "index.js",
   "author": {
     "name": "SuperIsland"
   },
-  "description": "Watches Linear issue mentions and comment mentions, surfaces them in Super Island, and lets you reply inline.",
+  "description": "监听 Linear issue 和评论中的提及，把它们显示在 SuperIsland 中，并支持行内回复。",
   "icon": "icon.svg",
   "license": "MIT",
   "categories": ["productivity", "communication"],

@@ -794,7 +794,7 @@ SuperIsland.registerModule({
     },
     trailing: function () {
       if (!bridgeOnline) {
-        return View.text(activationFailed ? "setup" : "—", { style: "monospacedSmall", color: stateAccent(currentState, false) });
+        return View.text(activationFailed ? "设置" : "—", { style: "monospacedSmall", color: stateAccent(currentState, false) });
       }
       return workingCountView();
     },
@@ -811,7 +811,7 @@ SuperIsland.registerModule({
   // -- compact (non-notched) --
   compact: function () {
     if (!bridgeOnline) {
-      var off = activationFailed ? "setup" : "offline";
+      var off = activationFailed ? "设置" : "离线";
       return View.hstack([
         pixelBox(currentState, false, 26),
         View.text(off, { style: "caption", color: stateAccent(currentState, false) })
@@ -820,16 +820,16 @@ SuperIsland.registerModule({
     var counts = countsByEffectiveState();
     var label, labelColor;
     if (counts.Working > 0) {
-      label = counts.Working + " working";
+      label = counts.Working + " 工作中";
       labelColor = COLORS.Working;
     } else if (counts.Done > 0) {
-      label = counts.Done + " done";
+      label = counts.Done + " 已完成";
       labelColor = COLORS.Done;
     } else if (sessions.length > 0) {
-      label = sessions.length === 1 ? "Idle" : (sessions.length + " idle");
+      label = sessions.length === 1 ? "空闲" : (sessions.length + " 空闲");
       labelColor = stateAccent(currentState, true);
     } else {
-      label = "No sessions";
+      label = "没有会话";
       labelColor = WHITE_50;
     }
     return View.hstack([
@@ -855,7 +855,7 @@ SuperIsland.registerModule({
       rows.push(sessionRow(sessions[i], 22, false, isSessionFocusable(sessions[i])));
     }
     if (sessions.length > 2) {
-      rows.push(View.text("+" + (sessions.length - 2) + " more", {
+      rows.push(View.text("还有 " + (sessions.length - 2) + " 个", {
         style: "footnote", color: WHITE_40
       }));
     }
@@ -892,15 +892,15 @@ SuperIsland.registerModule({
 function heroView() {
   var accent = stateAccent(currentState, bridgeOnline);
   var headline = bridgeOnline
-    ? "No active sessions"
-    : (activationFailed ? "Setup required" : "Offline");
+    ? "没有活动会话"
+    : (activationFailed ? "需要设置" : "离线");
   var sub = bridgeOnline
-    ? "Start Claude Code or Codex to see it here"
+    ? "启动 Claude Code 或 Codex 后会显示在这里"
     : stateDescription(currentState, false);
   return View.hstack([
     pixelBox(currentState, bridgeOnline, 48),
     View.vstack([
-      View.text("Agents Status", { style: "headline", color: "white" }),
+      View.text("Agent 状态", { style: "headline", color: "white" }),
       View.text(headline, { style: "caption", color: accent }),
       View.text(sub, { style: "footnote", color: WHITE_50, lineLimit: 2 })
     ], { spacing: 3, align: "leading" }),

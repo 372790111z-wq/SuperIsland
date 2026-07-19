@@ -32,10 +32,10 @@ struct WeatherExpandedView: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("H:\(temp(manager.weather.temperatureHigh))")
+                    Text("高：\(temp(manager.weather.temperatureHigh))")
                         .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.6))
-                    Text("L:\(temp(manager.weather.temperatureLow))")
+                    Text("低：\(temp(manager.weather.temperatureLow))")
                         .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.6))
                 }
@@ -88,13 +88,13 @@ struct WeatherExpandedView: View {
     private var weatherDetailsGrid: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 16) {
-                weatherDetailCell(icon: "thermometer.medium", title: "Feels Like", value: temp(manager.weather.feelsLike))
-                weatherDetailCell(icon: "humidity.fill", title: "Humidity", value: "\(manager.weather.humidity)%")
+                weatherDetailCell(icon: "thermometer.medium", title: "体感", value: temp(manager.weather.feelsLike))
+                weatherDetailCell(icon: "humidity.fill", title: "湿度", value: "\(manager.weather.humidity)%")
                 weatherDetailCell(icon: "aqi.medium", title: "AQI", value: aqiLabel)
             }
             HStack(spacing: 16) {
-                weatherDetailCell(icon: "wind", title: "Wind", value: "\(Int(manager.weather.windSpeed)) mph")
-                weatherDetailCell(icon: "sun.max.trianglebadge.exclamationmark.fill", title: "UV Index", value: uvLabel)
+                weatherDetailCell(icon: "wind", title: "风速", value: "\(Int(manager.weather.windSpeed)) mph")
+                weatherDetailCell(icon: "sun.max.trianglebadge.exclamationmark.fill", title: "紫外线", value: uvLabel)
                 Spacer()
             }
         }
@@ -122,11 +122,11 @@ struct WeatherExpandedView: View {
         let uv = manager.weather.uvIndex
         let level: String
         switch uv {
-        case ..<3: level = "Low"
-        case ..<6: level = "Mod"
-        case ..<8: level = "High"
-        case ..<11: level = "Very High"
-        default: level = "Extreme"
+        case ..<3: level = "低"
+        case ..<6: level = "中"
+        case ..<8: level = "高"
+        case ..<11: level = "很高"
+        default: level = "极高"
         }
         return "\(Int(uv)) \(level)"
     }
@@ -136,12 +136,12 @@ struct WeatherExpandedView: View {
         if aqi == 0 { return "—" }
         let level: String
         switch aqi {
-        case ..<51: level = "Good"
-        case ..<101: level = "Moderate"
-        case ..<151: level = "Unhealthy*"
-        case ..<201: level = "Unhealthy"
-        case ..<301: level = "Very Poor"
-        default: level = "Hazardous"
+        case ..<51: level = "优"
+        case ..<101: level = "良"
+        case ..<151: level = "轻度污染"
+        case ..<201: level = "中度污染"
+        case ..<301: level = "重度污染"
+        default: level = "严重污染"
         }
         return "\(aqi) \(level)"
     }
