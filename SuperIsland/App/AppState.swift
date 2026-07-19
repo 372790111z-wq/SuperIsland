@@ -34,15 +34,15 @@ enum ModuleType: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .nowPlaying: return "Now Playing"
-        case .volumeHUD: return "Volume"
-        case .battery: return "Battery"
-        case .shelf: return "Shelf"
-        case .connectivity: return "Connectivity"
-        case .calendar: return "Calendar"
-        case .weather: return "Weather"
-        case .notifications: return "Notifications"
-        case .teleprompter: return "Teleprompter"
+        case .nowPlaying: return "正在播放"
+        case .volumeHUD: return "音量"
+        case .battery: return "电池"
+        case .shelf: return "暂存架"
+        case .connectivity: return "连接"
+        case .calendar: return "日历"
+        case .weather: return "天气"
+        case .notifications: return "通知"
+        case .teleprompter: return "提词器"
         }
     }
 
@@ -71,10 +71,10 @@ enum NotchHapticIntensity: Int, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .off: return "Off"
-        case .subtle: return "Subtle"
-        case .medium: return "Medium"
-        case .strong: return "Strong"
+        case .off: return "关闭"
+        case .subtle: return "轻微"
+        case .medium: return "中等"
+        case .strong: return "强"
         }
     }
 
@@ -214,7 +214,7 @@ enum FullExpandedTab: Hashable, Identifiable {
     var title: String {
         switch self {
         case .home:
-            return "Home"
+            return "首页"
         case .module(let module):
             return module.displayName
         }

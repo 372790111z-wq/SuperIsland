@@ -734,7 +734,7 @@ final class WhatsAppWebBridge: ObservableObject {
             performBridgeUpdate {
                 connectionState = .error
                 statusText = "WhatsApp provider unavailable"
-                lastError = "Missing provider script at \(providerScriptURL.path)"
+                lastError = "缺少 provider 脚本：\(providerScriptURL.path)"
             }
             return
         }

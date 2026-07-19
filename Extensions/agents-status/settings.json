@@ -8,38 +8,38 @@
           "key": "hooksClaudeCode",
           "label": "Claude Code",
           "default": true,
-          "description": "Install hooks into ~/.claude/settings.json to track Claude Code session state (Working / Waiting / Idle / Error)."
+          "description": "将 hooks 安装到 ~/.claude/settings.json，用于跟踪 Claude Code 会话状态（工作中 / 等待中 / 空闲 / 错误）。"
         },
         {
           "type": "toggle",
           "key": "hooksCodex",
           "label": "Codex CLI",
           "default": true,
-          "description": "Enable official Codex hooks by setting features.codex_hooks in ~/.codex/config.toml and installing command hooks in ~/.codex/hooks.json for Working / Idle / Error tracking."
+          "description": "通过在 ~/.codex/config.toml 设置 features.codex_hooks，并在 ~/.codex/hooks.json 安装命令 hooks，启用官方 Codex hooks 以跟踪工作中 / 空闲 / 错误状态。"
         }
       ]
     },
     {
-      "title": "Sound Alerts",
+      "title": "声音提醒",
       "fields": [
         {
           "type": "toggle",
           "key": "soundAlert",
-          "label": "Alert on state change",
+          "label": "状态变化时提醒",
           "default": false,
-          "description": "Play a cue when an agent starts working, needs your input, or finishes a task. Also expands the Agents Status island briefly on completion."
+          "description": "当 Agent 开始工作、需要你输入或完成任务时播放提示音；完成时也会短暂展开 Agent 状态动态岛。"
         },
         {
           "type": "picker",
           "key": "soundPack",
-          "label": "Sound pack",
+          "label": "声音包",
           "default": "8bit",
           "options": [
             { "value": "8bit",    "label": "8-bit" },
-            { "value": "crystal", "label": "Crystal" },
-            { "value": "soft",    "label": "Soft" }
+            { "value": "crystal", "label": "水晶" },
+            { "value": "soft",    "label": "柔和" }
           ],
-          "description": "Which bundled sound pack to use for start / needs-input / task-complete cues."
+          "description": "选择开始 / 需要输入 / 任务完成提示使用的内置声音包。"
         }
       ]
     }

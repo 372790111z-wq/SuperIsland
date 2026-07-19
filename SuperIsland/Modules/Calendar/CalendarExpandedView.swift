@@ -32,7 +32,7 @@ struct CalendarExpandedView: View {
                     .font(.system(size: 14, weight: .bold))
                     .foregroundColor(.white)
                 Spacer()
-                Text("\(manager.todayEvents.count) events")
+                Text("\(manager.todayEvents.count) 个日程")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.5))
             }
@@ -59,7 +59,7 @@ struct CalendarExpandedView: View {
 
                         if let url = manager.joinURL(for: event) {
                             Button(action: { NSWorkspace.shared.open(url) }) {
-                                Text("Join")
+                                Text("加入")
                                     .font(.system(size: 10, weight: .semibold))
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 8)
@@ -71,7 +71,7 @@ struct CalendarExpandedView: View {
                         }
                     }
                 } else {
-                    Text("No more events today")
+                    Text("今天没有更多日程")
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.5))
                 }
@@ -126,7 +126,7 @@ struct CalendarExpandedView: View {
                     Spacer(minLength: 4)
 
                     if !isCurrentMonthVisible {
-                        Button("Today") {
+                        Button("今天") {
                             manager.resetDisplayedMonthToCurrent()
                             manager.selectDate(Date())
                         }
@@ -188,7 +188,7 @@ struct CalendarExpandedView: View {
 
             if manager.selectedDateEvents.isEmpty {
                 Spacer()
-                Text("No events")
+                Text("没有日程")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.white.opacity(0.4))
                     .frame(maxWidth: .infinity)
@@ -210,14 +210,14 @@ struct CalendarExpandedView: View {
 
     private var upcomingPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Upcoming")
+            Text("即将到来")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(.white)
                 .padding(.bottom, 8)
 
             if manager.upcomingWeekEvents.isEmpty {
                 Spacer()
-                Text("Nothing this week")
+                Text("本周没有安排")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.white.opacity(0.4))
                     .frame(maxWidth: .infinity)
@@ -255,7 +255,7 @@ struct CalendarExpandedView: View {
                     Spacer(minLength: 0)
 
                     if event.isAllDay {
-                        Text("All Day")
+                        Text("全天")
                             .font(.system(size: 9, weight: .medium))
                             .foregroundColor(.white.opacity(0.35))
                     } else {
@@ -267,7 +267,7 @@ struct CalendarExpandedView: View {
             }
 
             if events.count > 3 {
-                Text("+\(events.count - 3) more")
+                Text("还有 \(events.count - 3) 个")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundColor(.white.opacity(0.3))
                     .padding(.leading, 8)
@@ -296,7 +296,7 @@ struct CalendarExpandedView: View {
                     .lineLimit(1)
 
                 if event.isAllDay {
-                    Text("All Day")
+                    Text("全天")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.white.opacity(0.45))
                 } else {
@@ -321,20 +321,20 @@ struct CalendarExpandedView: View {
                         eventActionIcon("video.fill")
                     }
                     .buttonStyle(.plain)
-                    .help("Open meeting link")
+                    .help("打开会议链接")
 
                     Button { copy(url: url) } label: {
                         eventActionIcon("doc.on.doc")
                     }
                     .buttonStyle(.plain)
-                    .help("Copy meeting link")
+                    .help("复制会议链接")
                 }
 
                 Button { manager.hideCalendar(for: event) } label: {
                     eventActionIcon("eye.slash")
                 }
                 .buttonStyle(.plain)
-                .help("Hide this calendar")
+                .help("隐藏此日历")
             }
             .padding(.top, 4)
         }

@@ -333,7 +333,7 @@ private struct TeleprompterFullExpandedInner: View {
                     HStack(spacing: 3) {
                         Image(systemName: "pencil")
                             .font(.system(size: 9, weight: .semibold))
-                        Text("Edit")
+                        Text("编辑")
                             .font(.system(size: 11, weight: .medium))
                     }
                     .foregroundColor(.white.opacity(0.38))
@@ -375,7 +375,7 @@ private func addScriptPrompt(size: CGFloat) -> some View {
     Button { TeleprompterScriptEditorWindowController.show() } label: {
         HStack(spacing: 5) {
             Image(systemName: "plus.circle")
-            Text("Add script")
+            Text("添加稿件")
                 .font(.system(size: size, weight: .medium))
         }
         .font(.system(size: size))
@@ -422,6 +422,7 @@ private struct TeleprompterTextSurface: View {
                 TeleprompterScrollingTextView(containerHeight: containerHeight)
             }
         }
+        .dataAnnotationID("app-localization-teleprompter-ui")
         .overlay {
             TeleprompterScrollWheelCatcher { deltaY, isPrecise in
                 manager.nudgeOffset(by: scrollNudge(deltaY: deltaY, isPrecise: isPrecise))
@@ -467,17 +468,17 @@ private struct TeleprompterSpeechStatus: View {
 
     private var statusText: String {
         if let error = speech.error, !error.isEmpty { return error }
-        if manager.isCountingDown { return "Starting soon" }
+        if manager.isCountingDown { return "即将开始" }
         if manager.isPlaying, speech.isListening {
             if !speech.lastSpokenText.isEmpty {
                 let spoken = speech.lastSpokenText.trimmingCharacters(in: .whitespacesAndNewlines)
-                return "Heard: \(spoken.prefix(18)) · \(diagnosticLabel)"
+                return "听到：\(spoken.prefix(18)) · \(diagnosticLabel)"
             }
             return speech.inputLevel > 0.006
-                ? "Listening · \(diagnosticLabel)"
-                : "Waiting for voice · \(diagnosticLabel)"
+                ? "正在听 · \(diagnosticLabel)"
+                : "等待声音 · \(diagnosticLabel)"
         }
-        return "Word Tracking"
+        return "语音跟读"
     }
 
     private var statusIcon: String {
@@ -488,7 +489,7 @@ private struct TeleprompterSpeechStatus: View {
 
     private var statusColor: Color {
         if speech.error != nil { return .orange.opacity(0.9) }
-        if speech.matchConfidenceLabel.hasPrefix("Weak") || speech.matchConfidenceLabel.hasPrefix("No") {
+        if speech.matchConfidenceLabel.hasPrefix("弱") || speech.matchConfidenceLabel.hasPrefix("未") {
             return .orange.opacity(0.72)
         }
         if manager.isPlaying, speech.inputLevel > 0.006 { return .white.opacity(0.62) }

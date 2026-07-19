@@ -35,12 +35,12 @@ struct NotificationExpandedView: View {
                 .font(.system(size: 18))
                 .foregroundColor(.white.opacity(0.4))
 
-            Text("No Notifications")
+            Text("没有通知")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.5))
 
             if appState.currentState == .fullExpanded {
-                Text("Supported sources will appear here")
+                Text("支持的来源会显示在这里")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.3))
             }
@@ -120,7 +120,7 @@ struct NotificationExpandedView: View {
             Spacer(minLength: 0)
 
             Button(action: { manager.clearAll() }) {
-                Text("Clear All")
+                Text("全部清除")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundColor(.white.opacity(0.58))
             }

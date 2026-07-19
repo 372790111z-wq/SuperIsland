@@ -99,9 +99,9 @@ enum ScreenDetector {
     }
 
     static func availableScreenOptions() -> [ScreenOption] {
-        var options: [ScreenOption] = [ScreenOption(id: "", name: "Automatic")]
+        var options: [ScreenOption] = [ScreenOption(id: "", name: "自动")]
         if NSScreen.screens.count > 1 {
-            options.append(ScreenOption(id: allDisplaysIdentifier, name: "All Displays"))
+            options.append(ScreenOption(id: allDisplaysIdentifier, name: "所有显示器"))
         }
         for screen in NSScreen.screens {
             guard let id = displayIDString(for: screen) else { continue }
@@ -110,9 +110,9 @@ enum ScreenDetector {
                 name = screen.localizedName
             } else {
                 let size = screen.frame.size
-                name = "Display (\(Int(size.width))×\(Int(size.height)))"
+                name = "显示器 (\(Int(size.width))×\(Int(size.height)))"
             }
-            let suffix = hasNotch(screen: screen) ? " — notch" : ""
+            let suffix = hasNotch(screen: screen) ? " — 刘海" : ""
             options.append(ScreenOption(id: id, name: name + suffix))
         }
         return options

@@ -251,7 +251,7 @@ struct FullExpandedTopBarView: View {
         }
         .buttonStyle(.plain)
         .hoverPointer()
-        .help("Settings")
+        .help("设置")
     }
 
     private var batteryButton: some View {
@@ -279,7 +279,7 @@ struct FullExpandedTopBarView: View {
         }
         .buttonStyle(.plain)
         .hoverPointer()
-        .help("Battery")
+        .help("电池")
     }
 
     private var lockButton: some View {
@@ -356,7 +356,7 @@ struct FullExpandedTopBarView: View {
         }
         .buttonStyle(.plain)
         .hoverPointer()
-        .help("Notifications")
+        .help("通知")
     }
 
     private var notificationCountBadge: some View {

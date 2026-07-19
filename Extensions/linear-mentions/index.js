@@ -710,14 +710,14 @@ function replyComposerView() {
   if (replyComposer.issueURL || replyComposer.commentURL) {
     controls.push(
       View.button(
-        View.text("Open in Linear", { style: "caption", color: "blue", lineLimit: 1 }),
+        View.text("在 Linear 中打开", { style: "caption", color: "blue", lineLimit: 1 }),
         "open-in-linear"
       )
     );
   }
   controls.push(
     View.button(
-      View.text("Close", { style: "caption", color: "gray", lineLimit: 1 }),
+      View.text("关闭", { style: "caption", color: "gray", lineLimit: 1 }),
       "close-reply"
     )
   );
@@ -818,8 +818,8 @@ function expandedView() {
 
   if (replyComposer) {
     return View.vstack([
-      View.text(`Replying in ${replyComposer.issueIdentifier || "Linear"}`, { style: "title", lineLimit: 1 }),
-      View.text("Opened from notification. Expand to send your reply.", {
+      View.text(`正在回复 ${replyComposer.issueIdentifier || "Linear"}`, { style: "title", lineLimit: 1 }),
+      View.text("已从通知打开。展开后可发送回复。", {
         style: "caption",
         color: "gray",
         lineLimit: 2
@@ -829,8 +829,8 @@ function expandedView() {
 
   if (!oauth.connected) {
     return View.vstack([
-      View.text("Linear Mentions", { style: "title", lineLimit: 1 }),
-      View.text(oauth.expired ? "Your Linear login expired. Reconnect to continue." : "Connect Linear to start watching mentions.", {
+      View.text("Linear 提及", { style: "title", lineLimit: 1 }),
+      View.text(oauth.expired ? "Linear 登录已过期，请重新连接。" : "连接 Linear 后开始监听提及。", {
         style: "caption",
         color: "gray",
         lineLimit: 2
@@ -840,7 +840,7 @@ function expandedView() {
 
   const rows = state.mentions.slice(0, 2).map((mention) => mentionRow(mention, false));
   return View.vstack([
-    View.text("Linear Mentions", { style: "title", lineLimit: 1 }),
+    View.text("Linear 提及", { style: "title", lineLimit: 1 }),
     View.text(statusFooterText(), {
       style: "caption",
       color: state.error ? "red" : "gray",
@@ -860,7 +860,7 @@ function fullExpandedView() {
   if (!oauth.connected) {
     const buttons = [
       View.button(
-        View.text(oauth.expired ? "Reconnect Linear" : "Login with Linear", {
+        View.text(oauth.expired ? "重新连接 Linear" : "登录 Linear", {
           style: "caption",
           color: "blue",
           lineLimit: 1
@@ -872,15 +872,15 @@ function fullExpandedView() {
     if (oauth.session) {
       buttons.push(
         View.button(
-          View.text("Disconnect", { style: "caption", color: "gray", lineLimit: 1 }),
+          View.text("断开连接", { style: "caption", color: "gray", lineLimit: 1 }),
           "disconnect-linear"
         )
       );
     }
 
     return View.vstack([
-      View.text("Linear Mentions", { style: "title", lineLimit: 1 }),
-      View.text(oauth.expired ? "Your saved Linear session expired. Start OAuth again." : "Authorize Linear to receive mentions in Super Island.", {
+      View.text("Linear 提及", { style: "title", lineLimit: 1 }),
+      View.text(oauth.expired ? "保存的 Linear 会话已过期，请重新开始 OAuth。" : "授权 Linear 后可在 SuperIsland 中接收提及。", {
         style: "caption",
         color: "gray",
         lineLimit: 2
@@ -892,7 +892,7 @@ function fullExpandedView() {
   const rows = state.mentions.length > 0
     ? state.mentions.slice(0, 4).map((mention) => mentionRow(mention, true))
     : [
-        View.text("No recent mentions.", {
+        View.text("暂无最近提及。", {
           style: "caption",
           color: "gray",
           lineLimit: 1
@@ -901,15 +901,15 @@ function fullExpandedView() {
 
   return View.vstack([
     View.hstack([
-      View.text("Linear Mentions", { style: "title", lineLimit: 1 }),
+      View.text("Linear 提及", { style: "title", lineLimit: 1 }),
       View.spacer(),
       View.text(pollIntervalLabel(), { style: "footnote", color: "gray", lineLimit: 1 }),
       View.button(
-        View.text("Refresh", { style: "caption", color: "blue", lineLimit: 1 }),
+        View.text("刷新", { style: "caption", color: "blue", lineLimit: 1 }),
         "refresh-now"
       ),
       View.button(
-        View.text("Resync (notify all)", { style: "caption", color: "orange", lineLimit: 1 }),
+        View.text("重新同步（通知全部）", { style: "caption", color: "orange", lineLimit: 1 }),
         "resync-notify-all"
       )
     ], { spacing: 8, align: "center" }),

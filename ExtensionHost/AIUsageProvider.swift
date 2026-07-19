@@ -277,7 +277,7 @@ enum AIUsageProvider {
         var payload: [String: Any] = [
             "available": true,
             "status": status,
-            "statusLabel": "From Claude OAuth API",
+            "statusLabel": "来自 Claude OAuth API",
             "hoursTillReset": hoursTillReset ?? NSNull(),
             "resetAt": resetAt ?? NSNull(),
             "model": model ?? NSNull(),
@@ -315,7 +315,7 @@ enum AIUsageProvider {
             var payload: [String: Any] = [
                 "available": true,
                 "status": isFresh ? "allowed" : "allowed_warning",
-                "statusLabel": isFresh ? "From local Claude stats cache" : "Claude stats cache may be stale",
+                "statusLabel": isFresh ? "来自本地 Claude 统计缓存" : "Claude 统计缓存可能已过期",
                 "hoursTillReset": NSNull(),
                 "resetAt": NSNull(),
                 "model": preferredClaudeModel(from: object) ?? NSNull(),
@@ -630,7 +630,7 @@ enum AIUsageProvider {
     private static func loadClaudeAccessTokenFromKeychain(allowUserInteraction: Bool) -> String? {
         let context = LAContext()
         context.interactionNotAllowed = !allowUserInteraction
-        context.localizedReason = "Access Claude Code credentials for AI usage status."
+        context.localizedReason = "访问 Claude Code 凭据以显示 AI 用量状态。"
 
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

@@ -332,7 +332,7 @@ SuperIsland.registerModule({
     const claude = claudeModel(usage);
 
     return View.vstack([
-      View.text("AI Usage", { style: "title", color: "white" }),
+      View.text("AI 用量", { style: "title", color: "white" }),
       View.hstack([
         View.vstack([
           View.circularProgress(codex.progress, { total: 1, lineWidth: 6, color: codex.color }),

@@ -106,7 +106,7 @@ struct BatteryExpandedView: View {
             Spacer(minLength: 12)
 
             VStack(alignment: .leading, spacing: 5) {
-                Text("Battery Trend")
+                Text("电池趋势")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(.white.opacity(0.82))
 
@@ -167,7 +167,7 @@ private struct BatteryHistorySparkline: View {
                         .frame(width: 4, height: 4)
                         .position(lastPoint(in: proxy.size))
                 } else {
-                    Text("Need more samples")
+                    Text("需要更多样本")
                         .font(.system(size: 9))
                         .foregroundColor(.white.opacity(0.45))
                 }

@@ -1,35 +1,35 @@
 {
   "sections": [
     {
-      "title": "Behavior",
+      "title": "行为",
       "fields": [
         {
           "type": "toggle",
           "key": "enabled",
-          "label": "Enable auto scrobbling",
+          "label": "启用自动记录",
           "default": true
         },
         {
           "type": "toggle",
           "key": "sendNowPlaying",
-          "label": "Send now playing updates",
+          "label": "发送正在播放更新",
           "default": true
         },
         {
           "type": "toggle",
           "key": "notifyErrors",
-          "label": "Show auth and queue errors",
+          "label": "显示授权和队列错误",
           "default": true
         }
       ]
     },
     {
-      "title": "Sources",
+      "title": "来源",
       "fields": [
         {
           "type": "toggle",
           "key": "allowSpotify",
-          "label": "Spotify desktop",
+          "label": "Spotify 桌面版",
           "default": true
         },
         {
@@ -41,37 +41,37 @@
         {
           "type": "toggle",
           "key": "allowBrowsers",
-          "label": "Browser players",
+          "label": "浏览器播放器",
           "default": true
         },
         {
           "type": "toggle",
           "key": "allowOtherApps",
-          "label": "Other system media apps",
+          "label": "其他系统媒体 App",
           "default": true
         }
       ]
     },
     {
-      "title": "Account Actions",
+      "title": "账户操作",
       "fields": [
         {
           "type": "button",
           "key": "connectLastFm",
-          "label": "Connect Last.fm",
+          "label": "连接 Last.fm",
           "action": "auth",
           "enabledWhen": "uiCanConnect"
         },
         {
           "type": "button",
           "key": "retryQueue",
-          "label": "Retry queued scrobbles",
+          "label": "重试队列中的记录",
           "enabledWhen": "uiCanRetryQueue"
         },
         {
           "type": "button",
           "key": "signOut",
-          "label": "Disconnect Last.fm",
+          "label": "断开 Last.fm",
           "enabledWhen": "uiCanDisconnect"
         }
       ]

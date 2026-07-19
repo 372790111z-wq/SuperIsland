@@ -1,12 +1,12 @@
 {
   "sections": [
     {
-      "title": "Behavior",
+      "title": "行为",
       "fields": [
         {
           "type": "toggle",
           "key": "showConnectionHint",
-          "label": "Show connection hint when not logged in",
+          "label": "未登录时显示连接提示",
           "default": true
         }
       ]

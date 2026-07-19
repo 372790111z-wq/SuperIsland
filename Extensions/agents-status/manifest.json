@@ -1,11 +1,11 @@
 {
   "id": "superisland.agents-status",
-  "name": "Agents Status",
+  "name": "Agent 状态",
   "version": "1.6.0",
   "minAppVersion": "1.0.0",
   "main": "index.js",
   "author": { "name": "yanlin" },
-  "description": "Live Claude Code and Codex CLI session status (Working / Waiting / Idle / Error) as a 5x5 pixel animation, with multi-session focus support.",
+  "description": "以 5x5 像素动画实时显示 Claude Code 与 Codex CLI 会话状态（工作中 / 等待中 / 空闲 / 错误），并支持多会话聚焦。",
   "icon": "icon.svg",
   "license": "MIT",
   "categories": ["productivity", "dev-tools"],

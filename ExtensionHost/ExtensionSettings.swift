@@ -307,7 +307,7 @@ struct ExtensionSettingsRenderer: View {
             }
 
         default:
-            Text("Unsupported setting field: \(field.type)")
+            Text("不支持的设置字段：\(field.type)")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

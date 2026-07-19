@@ -10,17 +10,17 @@ enum TeleprompterListeningMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .classic: return "Classic"
-        case .wordTracking: return "Word Tracking"
+        case .classic: return "匀速滚动"
+        case .wordTracking: return "语音跟读"
         }
     }
 
     var description: String {
         switch self {
         case .classic:
-            return "Auto-scrolls at a constant speed."
+            return "按固定速度自动滚动。"
         case .wordTracking:
-            return "Highlights words as you read aloud."
+            return "朗读时跟随高亮文字。"
         }
     }
 
@@ -256,12 +256,12 @@ final class TeleprompterManager: ObservableObject {
         let speechMissing = !permissions.checkSpeechRecognition()
 
         if microphoneMissing && speechMissing {
-            return "Microphone and Speech Recognition access are required for Word Tracking."
+            return "语音跟读需要麦克风和语音识别权限。"
         }
         if speechMissing {
-            return "Speech Recognition access is required for Word Tracking."
+            return "语音跟读需要语音识别权限。"
         }
-        return "Microphone access is required for Word Tracking."
+        return "语音跟读需要麦克风权限。"
     }
 
     private func cancelCountdown() {

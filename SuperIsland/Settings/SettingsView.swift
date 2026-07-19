@@ -7,11 +7,11 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .general:    "General"
-        case .modules:    "Modules"
-        case .appearance: "Appearance"
-        case .extensions: "Extensions"
-        case .advanced:   "Advanced"
+        case .general:    "通用"
+        case .modules:    "模块"
+        case .appearance: "外观"
+        case .extensions: "扩展"
+        case .advanced:   "高级"
         }
     }
 
@@ -47,6 +47,7 @@ struct SettingsView: View {
         .frame(minWidth: 800, idealWidth: 960, minHeight: 560, idealHeight: 680)
         .background(settingsBg)
         .preferredColorScheme(.dark)
+        .dataAnnotationID("app-localization-settings-ui")
     }
 
     // MARK: - Sidebar
@@ -100,7 +101,7 @@ struct SettingsView: View {
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
                     .frame(width: 18, alignment: .center)
-                Text("Quit")
+                Text("退出")
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
                 Spacer()

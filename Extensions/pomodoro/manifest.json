@@ -1,13 +1,13 @@
 {
   "id": "superisland.pomodoro",
-  "name": "Pomodoro Timer",
+  "name": "番茄钟",
   "version": "1.0.0",
   "minAppVersion": "1.0.0",
   "main": "index.js",
   "author": {
     "name": "SuperIsland"
   },
-  "description": "Focus timer with compact countdown and quick controls.",
+  "description": "带紧凑倒计时和快捷控制的专注计时器。",
   "icon": "icon.svg",
   "license": "MIT",
   "categories": ["productivity", "timer"],

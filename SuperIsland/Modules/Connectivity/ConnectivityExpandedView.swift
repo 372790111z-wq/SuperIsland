@@ -58,23 +58,23 @@ struct ConnectivityExpandedView: View {
         if let device = bluetooth.lastConnectedDevice {
             statusRow(
                 icon: device.deviceType.iconName,
-                status: "Connected",
+                status: "已连接",
                 statusColor: .green,
                 title: device.name,
-                detail: device.batteryLevel.map { "Battery \($0)%" }
+                detail: device.batteryLevel.map { "电量 \($0)%" }
             )
         } else if let disconnectedName = bluetooth.lastDisconnectedDeviceName {
             statusRow(
                 icon: "link.badge.plus",
-                status: "Disconnected",
+                status: "已断开",
                 statusColor: .red,
                 title: disconnectedName,
-                detail: "Bluetooth device"
+                detail: "蓝牙设备"
             )
         } else if wifi.isConnected, let ssid = wifi.ssid {
             statusRow(
                 icon: wifi.signalIconName,
-                status: "Wi-Fi Connected",
+                status: "Wi-Fi 已连接",
                 statusColor: .blue,
                 title: ssid,
                 detail: wifi.signalDescription
@@ -82,10 +82,10 @@ struct ConnectivityExpandedView: View {
         } else {
             statusRow(
                 icon: "wifi.slash",
-                status: "Offline",
+                status: "离线",
                 statusColor: .white.opacity(0.45),
-                title: "No active connection",
-                detail: bluetooth.connectedDevices.isEmpty ? "Wi-Fi and Bluetooth are idle" : "\(bluetooth.connectedDevices.count) Bluetooth device\(bluetooth.connectedDevices.count == 1 ? "" : "s") connected"
+                title: "没有活动连接",
+                detail: bluetooth.connectedDevices.isEmpty ? "Wi-Fi 和蓝牙空闲" : "已连接 \(bluetooth.connectedDevices.count) 个蓝牙设备"
             )
         }
     }

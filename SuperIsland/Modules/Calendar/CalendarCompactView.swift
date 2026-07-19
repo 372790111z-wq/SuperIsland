@@ -15,7 +15,7 @@ struct CalendarCompactView: View {
                     .font(.system(size: 10))
                     .foregroundColor(.white.opacity(0.6))
             } else {
-                Text("No events")
+                Text("没有日程")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.5))
             }
