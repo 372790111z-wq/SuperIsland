@@ -112,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Eagerly initialize all enabled managers so they start monitoring
         if state.nowPlayingEnabled { _ = NowPlayingManager.shared }
-        if state.volumeHUDEnabled { _ = VolumeManager.shared }
+        applyVolumeHUDSetting()
         if state.batteryEnabled { _ = BatteryManager.shared }
         if state.connectivityEnabled {
             _ = WiFiManager.shared
@@ -375,10 +375,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.applyMenuBarVisibility()
+                self?.applyVolumeHUDSetting()
                 ModuleRefreshScheduler.shared.refreshScheduling()
                 ExtensionManager.shared.syncRuntimeEnergyState()
             }
         }
+    }
+
+    private func applyVolumeHUDSetting() {
+        let enabled = AppState.shared.volumeHUDEnabled
+        if enabled {
+            _ = VolumeManager.shared
+        }
+        MediaKeyInterceptor.shared.apply(enabled: enabled)
     }
 
     private func observePowerState() {
@@ -417,7 +426,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let newState = !AppState.shared.isModuleEnabled(module)
         switch module {
         case .nowPlaying: AppState.shared.nowPlayingEnabled = newState
-        case .volumeHUD: AppState.shared.volumeHUDEnabled = newState
+        case .volumeHUD:
+            AppState.shared.volumeHUDEnabled = newState
+            applyVolumeHUDSetting()
         case .battery: AppState.shared.batteryEnabled = newState
         case .shelf: AppState.shared.shelfEnabled = newState
         case .connectivity: AppState.shared.connectivityEnabled = newState

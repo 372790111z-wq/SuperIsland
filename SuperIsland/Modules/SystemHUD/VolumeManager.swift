@@ -27,11 +27,14 @@ final class VolumeManager: ObservableObject {
     @Published var mediaAppVolumes: [MediaAppVolume] = []
 
     private var defaultDeviceID: AudioDeviceID = 0
+    private var monitoredDeviceID: AudioDeviceID = 0
     private var volumeListenerBlock: AudioObjectPropertyListenerBlock?
     private var muteListenerBlock: AudioObjectPropertyListenerBlock?
     private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var mediaRefreshToken: ModuleRefreshToken?
+    private var userInitiatedHUDDeadline: Date?
     private let appleScriptQueue = DispatchQueue(label: "superisland.applescript", qos: .utility)
+    private let userInitiatedHUDGraceInterval: TimeInterval = 1.2
 
     private init() {
         setupDefaultDevice()
@@ -66,7 +69,14 @@ final class VolumeManager: ObservableObject {
     // MARK: - Monitoring
 
     private func startMonitoring() {
-        // Listen for volume changes
+        attachDefaultDeviceListeners()
+        attachSystemDeviceListener()
+    }
+
+    private func attachDefaultDeviceListeners() {
+        detachDefaultDeviceListeners()
+        guard defaultDeviceID != 0 else { return }
+
         var volumeAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
             mScope: kAudioDevicePropertyScopeOutput,
@@ -76,7 +86,7 @@ final class VolumeManager: ObservableObject {
         let volumeBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             DispatchQueue.main.async {
                 self?.updateVolume()
-                AppState.shared.showHUD(module: .volumeHUD)
+                self?.showHUDForUserInitiatedChangeIfNeeded()
             }
         }
         volumeListenerBlock = volumeBlock
@@ -96,7 +106,7 @@ final class VolumeManager: ObservableObject {
         let muteBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             DispatchQueue.main.async {
                 self?.updateMuteState()
-                AppState.shared.showHUD(module: .volumeHUD)
+                self?.showHUDForUserInitiatedChangeIfNeeded()
             }
         }
         muteListenerBlock = muteBlock
@@ -106,7 +116,46 @@ final class VolumeManager: ObservableObject {
             DispatchQueue.main, muteBlock
         )
 
-        // Listen for default device changes
+        monitoredDeviceID = defaultDeviceID
+    }
+
+    private func detachDefaultDeviceListeners() {
+        guard monitoredDeviceID != 0 else { return }
+
+        if let volumeListenerBlock {
+            var volumeAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                monitoredDeviceID,
+                &volumeAddress,
+                DispatchQueue.main,
+                volumeListenerBlock
+            )
+        }
+
+        if let muteListenerBlock {
+            var muteAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyMute,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                monitoredDeviceID,
+                &muteAddress,
+                DispatchQueue.main,
+                muteListenerBlock
+            )
+        }
+
+        volumeListenerBlock = nil
+        muteListenerBlock = nil
+        monitoredDeviceID = 0
+    }
+
+    private func attachSystemDeviceListener() {
         var deviceAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -116,6 +165,7 @@ final class VolumeManager: ObservableObject {
         let deviceBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             DispatchQueue.main.async {
                 self?.setupDefaultDevice()
+                self?.attachDefaultDeviceListeners()
                 self?.updateVolume()
                 self?.updateMuteState()
                 self?.updateDeviceName()
@@ -128,6 +178,19 @@ final class VolumeManager: ObservableObject {
             &deviceAddress,
             DispatchQueue.main, deviceBlock
         )
+    }
+
+    private func showHUDForUserInitiatedChangeIfNeeded() {
+        guard let userInitiatedHUDDeadline else { return }
+        guard Date() <= userInitiatedHUDDeadline else {
+            self.userInitiatedHUDDeadline = nil
+            return
+        }
+        AppState.shared.showHUD(module: .volumeHUD)
+    }
+
+    func noteUserInitiatedVolumeChange() {
+        userInitiatedHUDDeadline = Date().addingTimeInterval(userInitiatedHUDGraceInterval)
     }
 
     private func startMediaMonitoring() {
@@ -200,7 +263,11 @@ final class VolumeManager: ObservableObject {
 
     // MARK: - Volume Control
 
-    func setVolume(_ newVolume: Float) {
+    func setVolume(_ newVolume: Float, showsHUD: Bool = true) {
+        if showsHUD {
+            noteUserInitiatedVolumeChange()
+        }
+
         var vol = max(0, min(1, newVolume))
         let size = UInt32(MemoryLayout<Float32>.size)
         var address = AudioObjectPropertyAddress(
@@ -212,9 +279,18 @@ final class VolumeManager: ObservableObject {
         AudioObjectSetPropertyData(
             defaultDeviceID, &address, 0, nil, size, &vol
         )
+
+        updateVolume()
+        if showsHUD {
+            AppState.shared.showHUD(module: .volumeHUD)
+        }
     }
 
-    func toggleMute() {
+    func toggleMute(showsHUD: Bool = true) {
+        if showsHUD {
+            noteUserInitiatedVolumeChange()
+        }
+
         var muted: UInt32 = isMuted ? 0 : 1
         let size = UInt32(MemoryLayout<UInt32>.size)
         var address = AudioObjectPropertyAddress(
@@ -226,6 +302,11 @@ final class VolumeManager: ObservableObject {
         AudioObjectSetPropertyData(
             defaultDeviceID, &address, 0, nil, size, &muted
         )
+
+        updateMuteState()
+        if showsHUD {
+            AppState.shared.showHUD(module: .volumeHUD)
+        }
     }
 
     // MARK: - Media App Volume
