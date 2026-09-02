@@ -3,6 +3,7 @@ import AVFoundation
 import SwiftUI
 import Carbon.HIToolbox
 import Combine
+import Darwin
 import Speech
 
 @MainActor
@@ -59,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var powerStateObserver: NSObjectProtocol?
     private var quitHotkeyMonitor: Any?
     private var deferredTerminationTask: Task<Void, Never>?
+    private var terminationSignalSource: DispatchSourceSignal?
+    private var isHandlingTerminationSignal = false
     private var didBootstrapApp = false
     private var didInitializeNowPlayingManager = false
     private static var fallbackSettingsWindowController: NSWindowController?
@@ -86,6 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
             ])
             registerURLHandler()
+        } else {
+            installWE1TerminationSignalHandler()
         }
         installQuitHotkeyMonitor()
 
@@ -146,12 +151,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     deinit {
+        terminationSignalSource?.cancel()
         if let quitHotkeyMonitor {
             NSEvent.removeMonitor(quitHotkeyMonitor)
         }
         if let powerStateObserver {
             NotificationCenter.default.removeObserver(powerStateObserver)
         }
+    }
+
+    /// Local package replacement tools commonly stop a test build with
+    /// SIGTERM. AppKit does not promise to call `applicationWillTerminate` for
+    /// that signal, which previously left the MediaRemote Perl stream adopted
+    /// by launchd. Route SIGTERM through normal application termination only
+    /// in the isolated WE1 harness; production keeps its existing lifecycle.
+    private func installWE1TerminationSignalHandler() {
+        guard terminationSignalSource == nil else { return }
+        Darwin.signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(
+            signal: SIGTERM,
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            guard let self, !self.isHandlingTerminationSignal else { return }
+            self.isHandlingTerminationSignal = true
+            // Stop child processes before asking AppKit to terminate. The
+            // delegate callback repeats this idempotently on the normal path.
+            if self.didInitializeNowPlayingManager {
+                NowPlayingManager.shared.shutdownExternalProcesses()
+            }
+            NSApp.terminate(nil)
+        }
+        terminationSignalSource = source
+        source.resume()
     }
 
     private func bootstrapApp() {

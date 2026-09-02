@@ -1394,10 +1394,12 @@ final class WindowDockInteractionMonitor {
             lhsTitle: lhs.captureTitle,
             lhsBounds: lhs.captureBounds,
             lhsIsMinimized: lhs.isMinimized,
+            lhsIsPreferredWindow: lhs.isPreferredWindow,
             rhsPID: pid,
             rhsTitle: rhs.captureTitle,
             rhsBounds: rhs.captureBounds,
-            rhsIsMinimized: rhs.isMinimized
+            rhsIsMinimized: rhs.isMinimized,
+            rhsIsPreferredWindow: rhs.isPreferredWindow
         )
     }
 
@@ -1595,7 +1597,7 @@ private final class DockWindowPreviewController {
             width: DockPreviewLayout.minimumPanelWidth,
             height: DockPreviewLayout.emptyPanelHeight
         )
-        let panel = NSPanel(
+        let panel = WindowPreviewInteractionPanel(
             contentRect: CGRect(origin: .zero, size: initialSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,

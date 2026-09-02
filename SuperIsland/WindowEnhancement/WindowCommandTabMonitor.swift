@@ -40,21 +40,34 @@ enum WindowAXCandidatePolicy {
         lhsTitle: String,
         lhsBounds: CGRect?,
         lhsIsMinimized: Bool,
+        lhsIsPreferredWindow: Bool,
         rhsPID: pid_t,
         rhsTitle: String,
         rhsBounds: CGRect?,
-        rhsIsMinimized: Bool
+        rhsIsMinimized: Bool,
+        rhsIsPreferredWindow: Bool
     ) -> Bool {
         guard lhsPID == rhsPID,
-              !lhsTitle.isEmpty,
-              lhsTitle == rhsTitle,
               lhsIsMinimized == rhsIsMinimized,
               let lhsBounds,
               let rhsBounds else { return false }
-        return abs(lhsBounds.minX - rhsBounds.minX) <= 1
+        let sameBounds = abs(lhsBounds.minX - rhsBounds.minX) <= 1
             && abs(lhsBounds.minY - rhsBounds.minY) <= 1
             && abs(lhsBounds.width - rhsBounds.width) <= 1
             && abs(lhsBounds.height - rhsBounds.height) <= 1
+        guard sameBounds else { return false }
+
+        if !lhsTitle.isEmpty, !rhsTitle.isEmpty {
+            return lhsTitle == rhsTitle
+        }
+
+        // Tahoe commonly returns a sparse focused/main AX proxy for the same
+        // window that AXWindows exposes with a canonical WindowServer ID. The
+        // sparse proxy can omit its title, so requiring two non-empty titles
+        // manufactures a second blank card. Keep the relaxed rule bounded to
+        // focused/main evidence; two anonymous background windows must remain
+        // distinct even if an App initially stacks them at the same geometry.
+        return lhsIsPreferredWindow || rhsIsPreferredWindow
     }
 }
 
@@ -1981,10 +1994,12 @@ final class WindowCommandTabMonitor {
             lhsTitle: lhs.title,
             lhsBounds: lhs.bounds,
             lhsIsMinimized: lhs.isMinimized,
+            lhsIsPreferredWindow: lhs.isPreferredWindow,
             rhsPID: rhs.application.processIdentifier,
             rhsTitle: rhs.title,
             rhsBounds: rhs.bounds,
-            rhsIsMinimized: rhs.isMinimized
+            rhsIsMinimized: rhs.isMinimized,
+            rhsIsPreferredWindow: rhs.isPreferredWindow
         )
     }
 
@@ -3392,7 +3407,7 @@ private final class CommandTabOverlayController {
     }
 
     private let model: CommandTabOverlayModel
-    private let previewPanel: CommandTabInteractionPanel
+    private let previewPanel: WindowPreviewInteractionPanel
     private let previewContentView: CommandTabPanelContentView<CommandTabPreviewView>
     private var presentationScreen: NSScreen?
     private var hoveredWindowSelection: CommandTabPreviewTarget?
@@ -3405,7 +3420,7 @@ private final class CommandTabOverlayController {
         let previewContentView = CommandTabPanelContentView(
             rootView: CommandTabPreviewView(model: model)
         )
-        let previewPanel = CommandTabInteractionPanel(
+        let previewPanel = WindowPreviewInteractionPanel(
             contentRect: CGRect(
                 origin: .zero,
                 size: CGSize(width: Metrics.emptyPreviewWidth, height: Metrics.previewHeight)
@@ -3737,13 +3752,6 @@ private final class CommandTabHostingView<Content: View>: NSHostingView<Content>
     override var needsPanelToBecomeKey: Bool {
         true
     }
-}
-
-/// Receives button mouse-down/up while retaining `.nonactivatingPanel`
-/// behavior, so SuperIsland itself does not become the active application.
-private final class CommandTabInteractionPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
 }
 
 struct CommandTabPreviewTarget: Hashable {

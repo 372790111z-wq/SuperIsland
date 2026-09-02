@@ -30,6 +30,51 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         ))
     }
 
+    func testUntitledPreferredProxyMergesWithSameRealWindow() {
+        XCTAssertTrue(WindowAXCandidatePolicy.areExactProxies(
+            lhsPID: 100,
+            lhsTitle: "Document",
+            lhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
+            lhsIsMinimized: false,
+            lhsIsPreferredWindow: false,
+            rhsPID: 100,
+            rhsTitle: "",
+            rhsBounds: CGRect(x: 40.5, y: 59.5, width: 900, height: 700),
+            rhsIsMinimized: false,
+            rhsIsPreferredWindow: true
+        ))
+    }
+
+    func testUntitledBackgroundWindowsAtSameGeometryRemainDistinct() {
+        XCTAssertFalse(WindowAXCandidatePolicy.areExactProxies(
+            lhsPID: 100,
+            lhsTitle: "",
+            lhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
+            lhsIsMinimized: false,
+            lhsIsPreferredWindow: false,
+            rhsPID: 100,
+            rhsTitle: "",
+            rhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
+            rhsIsMinimized: false,
+            rhsIsPreferredWindow: false
+        ))
+    }
+
+    func testDifferentTitledWindowsAtSameGeometryRemainDistinct() {
+        XCTAssertFalse(WindowAXCandidatePolicy.areExactProxies(
+            lhsPID: 100,
+            lhsTitle: "A",
+            lhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
+            lhsIsMinimized: false,
+            lhsIsPreferredWindow: true,
+            rhsPID: 100,
+            rhsTitle: "B",
+            rhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
+            rhsIsMinimized: false,
+            rhsIsPreferredWindow: false
+        ))
+    }
+
     func testDockGuardTimerRunsOnlyForCommittedActiveRequest() {
         XCTAssertTrue(DockDisplayLockActivityPolicy.shouldRunGuardTimer(
             started: true,
@@ -54,6 +99,21 @@ final class WindowInventoryReconcilerTests: XCTestCase {
             featureEnabled: true,
             requested: true,
             suspendedForSleep: true
+        ))
+    }
+
+    func testOrdinaryDesktopMovementDoesNotScheduleMissionControlAXWork() {
+        XCTAssertFalse(MissionControlInspectionPolicy.shouldSchedule(
+            force: false,
+            missionControlHierarchyObserved: false
+        ))
+        XCTAssertTrue(MissionControlInspectionPolicy.shouldSchedule(
+            force: true,
+            missionControlHierarchyObserved: false
+        ))
+        XCTAssertTrue(MissionControlInspectionPolicy.shouldSchedule(
+            force: false,
+            missionControlHierarchyObserved: true
         ))
     }
 
@@ -108,6 +168,49 @@ final class WindowInventoryReconcilerTests: XCTestCase {
                 "com.tencent.flue.helper.renderer"
             ),
             2
+        )
+    }
+
+    func testVerifiedDescendantDoesNotRequireMatchingBundleIdentifier() {
+        XCTAssertEqual(
+            WindowRendererLineagePolicy.relationshipPenalty(
+                descendantDepth: 2,
+                executableInsideTargetBundle: true,
+                isSiblingProcess: false,
+                sharesBundleNamespace: false,
+                launchDelta: 10
+            ),
+            8
+        )
+    }
+
+    func testUnrelatedRendererCannotUseBundleNamespaceAlone() {
+        XCTAssertNil(WindowRendererLineagePolicy.relationshipPenalty(
+            descendantDepth: nil,
+            executableInsideTargetBundle: false,
+            isSiblingProcess: false,
+            sharesBundleNamespace: true,
+            launchDelta: 0
+        ))
+    }
+
+    func testSameLaunchSiblingStillRequiresSpecificBundleNamespace() {
+        XCTAssertNil(WindowRendererLineagePolicy.relationshipPenalty(
+            descendantDepth: nil,
+            executableInsideTargetBundle: false,
+            isSiblingProcess: true,
+            sharesBundleNamespace: false,
+            launchDelta: 1
+        ))
+        XCTAssertEqual(
+            WindowRendererLineagePolicy.relationshipPenalty(
+                descendantDepth: nil,
+                executableInsideTargetBundle: false,
+                isSiblingProcess: true,
+                sharesBundleNamespace: true,
+                launchDelta: 2
+            ),
+            24
         )
     }
 

@@ -5,6 +5,15 @@ import CoreGraphics
 import Darwin
 import OSLog
 
+enum MissionControlInspectionPolicy {
+    static func shouldSchedule(
+        force: Bool,
+        missionControlHierarchyObserved: Bool
+    ) -> Bool {
+        force || missionControlHierarchyObserved
+    }
+}
+
 private typealias MissionControlAXWindowNumberResolver = @convention(c) (
     AXUIElement,
     UnsafeMutablePointer<CGWindowID>
@@ -2577,6 +2586,13 @@ final class MissionControlInteractionMonitor {
             clearTarget()
             return
         }
+        // Ordinary desktop movement carries no evidence that Mission Control
+        // exists. Expose notifications force the first probe; only a verified
+        // hierarchy may then arm motion-driven AX hit-testing.
+        guard MissionControlInspectionPolicy.shouldSchedule(
+            force: force,
+            missionControlHierarchyObserved: missionControlHierarchyObserved
+        ) else { return }
         let appKitLocation = NSEvent.mouseLocation
         if !force, closePanel.contains(appKitLocation) { return }
 
@@ -2596,13 +2612,7 @@ final class MissionControlInteractionMonitor {
             return
         }
 
-        // Normal desktop traffic is intentionally capped at one bounded Dock
-        // probe per second. The Dock's expose notifications arm the fast 55 ms
-        // path as soon as Mission Control/App Expose opens, so the always-on
-        // monitor does not turn ordinary mouse movement into steady AX work.
-        let minimumInterval: UInt64 = missionControlHierarchyObserved
-            ? 80_000_000
-            : 1_000_000_000
+        let minimumInterval: UInt64 = 80_000_000
         let now = DispatchTime.now().uptimeNanoseconds
         let throttleAnchor = max(
             lastInspectionStartedNanoseconds,

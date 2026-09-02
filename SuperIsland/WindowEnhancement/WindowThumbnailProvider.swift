@@ -119,6 +119,30 @@ enum WindowRendererLineagePolicy {
         }
         return count
     }
+
+    static func relationshipPenalty(
+        descendantDepth: Int?,
+        executableInsideTargetBundle: Bool,
+        isSiblingProcess: Bool,
+        sharesBundleNamespace: Bool,
+        launchDelta: TimeInterval
+    ) -> CGFloat? {
+        let descendantPenalty: CGFloat? = {
+            guard executableInsideTargetBundle,
+                  let descendantDepth,
+                  descendantDepth > 0 else { return nil }
+            return CGFloat(descendantDepth * 4)
+        }()
+        let siblingPenalty: CGFloat? = {
+            guard isSiblingProcess,
+                  sharesBundleNamespace,
+                  launchDelta <= 3 else { return nil }
+            return CGFloat(launchDelta * 12)
+        }()
+        return [descendantPenalty, siblingPenalty]
+            .compactMap { $0 }
+            .min()
+    }
 }
 
 struct WindowThumbnailRequest: Sendable {
@@ -964,11 +988,7 @@ enum WindowThumbnailProvider {
                   window.frame.width >= 80,
                   window.frame.height >= 60,
                   let owner = window.owningApplication,
-                  owner.processID != targetPID,
-                  sharesBundleNamespace(
-                    targetBundleIdentifier,
-                    owner.bundleIdentifier
-                  ) else { continue }
+                  owner.processID != targetPID else { continue }
 
             let snapshot: ProcessSnapshot
             if let cached = snapshots[owner.processID] {
@@ -980,32 +1000,32 @@ enum WindowThumbnailProvider {
                 continue
             }
             let launchDelta = abs(snapshot.startTime - targetSnapshot.startTime)
-            let descendantPenalty: CGFloat? = {
-                guard let targetBundlePath = applicationIdentity.bundlePath,
-                      let executablePath = snapshot.executablePath,
-                      WindowRendererLineagePolicy.executablePath(
-                          executablePath,
-                          isInsideBundleAt: targetBundlePath
-                      ),
-                      let depth = descendantDepth(
-                          candidatePID: snapshot.processIdentifier,
-                          targetPID: targetPID
-                      ) else { return nil }
-                return CGFloat(depth * 4)
-            }()
-            let siblingPenalty: CGFloat? = {
-                guard targetSnapshot.parentProcessIdentifier > 1,
-                      snapshot.parentProcessIdentifier ==
-                        targetSnapshot.parentProcessIdentifier,
-                      launchDelta <= 3,
-                      sharesBundleNamespace(
-                          targetBundleIdentifier,
-                          owner.bundleIdentifier
-                      ) else { return nil }
-                return CGFloat(launchDelta * 12)
-            }()
-            guard let relationshipPenalty = [descendantPenalty, siblingPenalty]
-                .compactMap({ $0 }).min() else { continue }
+            let depth = descendantDepth(
+                candidatePID: snapshot.processIdentifier,
+                targetPID: targetPID
+            )
+            let isInsideTargetBundle = applicationIdentity.bundlePath.flatMap {
+                bundlePath in snapshot.executablePath.map {
+                    WindowRendererLineagePolicy.executablePath(
+                        $0,
+                        isInsideBundleAt: bundlePath
+                    )
+                }
+            } ?? false
+            let isSiblingProcess = targetSnapshot.parentProcessIdentifier > 1
+                && snapshot.parentProcessIdentifier
+                    == targetSnapshot.parentProcessIdentifier
+            guard let relationshipPenalty = WindowRendererLineagePolicy
+                .relationshipPenalty(
+                    descendantDepth: depth,
+                    executableInsideTargetBundle: isInsideTargetBundle,
+                    isSiblingProcess: isSiblingProcess,
+                    sharesBundleNamespace: sharesBundleNamespace(
+                        targetBundleIdentifier,
+                        owner.bundleIdentifier
+                    ),
+                    launchDelta: launchDelta
+                ) else { continue }
 
             let candidateArea = window.frame.width * window.frame.height
             let minimumArea = min(shellArea, candidateArea)
