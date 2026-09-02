@@ -7,6 +7,44 @@ import Speech
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private struct RuntimeDefaultsSnapshot: Equatable {
+        let showMenuBarIcon: Bool
+        let nowPlayingEnabled: Bool
+        let volumeHUDEnabled: Bool
+        let batteryEnabled: Bool
+        let shelfEnabled: Bool
+        let connectivityEnabled: Bool
+        let calendarEnabled: Bool
+        let weatherEnabled: Bool
+        let notificationsEnabled: Bool
+        let teleprompterEnabled: Bool
+        let energyMode: String
+        let disableBackgroundExtensionRefresh: Bool
+
+        init(defaults: UserDefaults = .standard) {
+            func bool(_ key: String, default defaultValue: Bool) -> Bool {
+                guard defaults.object(forKey: key) != nil else { return defaultValue }
+                return defaults.bool(forKey: key)
+            }
+
+            showMenuBarIcon = bool("general.showMenuBarIcon", default: true)
+            nowPlayingEnabled = bool("module.nowPlaying.enabled", default: true)
+            volumeHUDEnabled = bool("module.volumeHUD.enabled", default: true)
+            batteryEnabled = bool("module.battery.enabled", default: true)
+            shelfEnabled = bool("module.shelf.enabled", default: true)
+            connectivityEnabled = bool("module.connectivity.enabled", default: true)
+            calendarEnabled = bool("module.calendar.enabled", default: true)
+            weatherEnabled = bool("module.weather.enabled", default: true)
+            notificationsEnabled = bool("module.notifications.enabled", default: true)
+            teleprompterEnabled = bool("module.teleprompter.enabled", default: false)
+            energyMode = defaults.string(forKey: "energy.mode") ?? EnergyMode.smart.rawValue
+            disableBackgroundExtensionRefresh = bool(
+                "energy.disableBackgroundExtensionRefresh",
+                default: false
+            )
+        }
+    }
+
     private static let linearExtensionID = "superisland.linear-mentions"
     private static let linearOAuthStoreKey = "extensions.\(linearExtensionID).store.oauth"
     private static let lastFmExtensionID = "superisland.lastfm-scrobbler"
@@ -17,20 +55,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateCancellable: AnyCancellable?
     private var statusItem: NSStatusItem?
     private var menuBarDefaultsObserver: NSObjectProtocol?
+    private var runtimeDefaultsSnapshot: RuntimeDefaultsSnapshot?
     private var powerStateObserver: NSObjectProtocol?
     private var quitHotkeyMonitor: Any?
+    private var deferredTerminationTask: Task<Void, Never>?
     private var didBootstrapApp = false
+    private var didInitializeNowPlayingManager = false
     private static var fallbackSettingsWindowController: NSWindowController?
+    private static let settingsInitialContentSize = NSSize(width: 960, height: 680)
+    private static let settingsMinimumContentSize = NSSize(width: 800, height: 560)
+
+    private static var isWE1DebugBundle: Bool {
+        Bundle.main.bundleIdentifier == "com.workview.SuperIsland.WE1Debug"
+    }
+
+    static var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
+            NSClassFromString("XCTestCase") != nil
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Analytics.start()
-        Analytics.track("app_launched", properties: [
-            "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
-            "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
-        ])
-
-        registerURLHandler()
+        guard !Self.isRunningUnitTests else { return }
+        // The WE1 package is an isolated local test harness. It must not report
+        // production analytics or claim the production superisland:// URL
+        // handler while both builds are installed side by side.
+        if !Self.isWE1DebugBundle {
+            Analytics.start()
+            Analytics.track("app_launched", properties: [
+                "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
+                "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+            ])
+            registerURLHandler()
+        }
         installQuitHotkeyMonitor()
+
+        // Do not inherit or present production onboarding in the isolated
+        // window-enhancement test bundle. Its only startup surface is the WE1
+        // settings page, where permissions are requested deliberately.
+        if Self.isWE1DebugBundle {
+            bootstrapApp()
+            return
+        }
 
         // defaults write com.workview.SuperIsland "debug.alwaysShowOnboarding" -bool true
         let shouldShowOnboarding = !AppState.shared.onboardingCompleted || AppState.shared.debugAlwaysShowOnboarding
@@ -42,16 +107,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        guard !Self.isRunningUnitTests else { return }
+        WindowEnhancementController.shared.stop()
+        if didInitializeNowPlayingManager {
+            NowPlayingManager.shared.shutdownExternalProcesses()
+        }
         // Ensure the agents-status Python subprocess exits with us so port 7823
         // is released cleanly and no orphan is inherited by launchd.
-        AgentsStatusBridge.shared.stop()
+        if !Self.isWE1DebugBundle {
+            AgentsStatusBridge.shared.stop()
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !Self.isRunningUnitTests else { return .terminateNow }
+        guard deferredTerminationTask == nil else { return .terminateLater }
+        guard WindowEnhancementController.shared.requiresTerminationPreparation else {
+            return .terminateNow
+        }
+
+        deferredTerminationTask = Task { @MainActor [weak self] in
+            let safeToTerminate = await WindowEnhancementController.shared.prepareForTermination()
+            self?.deferredTerminationTask = nil
+            sender.reply(toApplicationShouldTerminate: safeToTerminate)
+        }
+        return .terminateLater
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard !Self.isRunningUnitTests else { return }
         AppState.shared.setAppActive(true)
+        WindowEnhancementController.shared.refreshSystemIntegrations()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
+        guard !Self.isRunningUnitTests else { return }
         AppState.shared.setAppActive(false)
     }
 
@@ -67,6 +157,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func bootstrapApp() {
         guard !didBootstrapApp else { return }
         didBootstrapApp = true
+
+        // The WE1 bundle remains isolated from production analytics, updates,
+        // URL handling, and extension subprocesses, but its island must use the
+        // real SuperIsland content and interaction state machine. Window
+        // enhancement is an added capability, not a replacement island UI.
+        if Self.isWE1DebugBundle {
+            setupIslandWindow()
+            // The debug bundle exposes the original General settings, so its
+            // menu-bar switch must remain a real local shell behavior. This
+            // does not enable analytics, URL handling, extension discovery or
+            // update checks, which stay gated below.
+            applyMenuBarVisibility()
+            observeMenuBarSetting()
+            observePowerState()
+            initializeManagers()
+            DispatchQueue.main.async {
+                Self.showSettingsWindow(initialPane: .windowEnhancement)
+            }
+            return
+        }
+
         setupIslandWindow()
         applyMenuBarVisibility()
         observeMenuBarSetting()
@@ -111,7 +222,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let state = AppState.shared
 
         // Eagerly initialize all enabled managers so they start monitoring
-        if state.nowPlayingEnabled { _ = NowPlayingManager.shared }
+        if state.nowPlayingEnabled {
+            _ = NowPlayingManager.shared
+            didInitializeNowPlayingManager = true
+        }
         applyVolumeHUDSetting()
         if state.batteryEnabled { _ = BatteryManager.shared }
         if state.connectivityEnabled {
@@ -123,13 +237,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.calendarEnabled, PermissionsManager.shared.check(.calendar) {
             _ = CalendarManager.shared
         }
-        if state.weatherEnabled {
+        // The isolated WE1 harness must not request unrelated Location access
+        // at launch. Its real weather page remains available and will construct
+        // WeatherManager only when the user deliberately opens that module.
+        if state.weatherEnabled, !Self.isWE1DebugBundle {
             _ = WeatherManager.shared
         }
         if state.notificationsEnabled {
             _ = NotificationManager.shared
         }
-        if state.teleprompterEnabled {
+        // WE1 Debug is a window-enhancement harness. Keep the Teleprompter UI
+        // available, but do not initialize Speech or request unrelated privacy
+        // access during launch merely because an old local preference is on.
+        // Production behavior is unchanged; WE1 can initialize the manager
+        // when the user deliberately enters the Teleprompter flow.
+        if state.teleprompterEnabled, !Self.isWE1DebugBundle {
             _ = TeleprompterManager.shared
             let permissions = PermissionsManager.shared
             if permissions.microphoneAuthorizationStatus() == .notDetermined ||
@@ -138,14 +260,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        let extensions = ExtensionManager.shared
-        extensions.discoverExtensions()
-        extensions.activateDiscoveredExtensions()
-        rebuildStatusMenu()
+        // Keep side-by-side WE1 testing isolated from production extension
+        // subprocesses and update checks. Built-in managers above still run so
+        // the original compact, expanded, and full-expanded island pages are
+        // real and interactive.
+        if !Self.isWE1DebugBundle {
+            let extensions = ExtensionManager.shared
+            extensions.discoverExtensions()
+            extensions.activateDiscoveredExtensions()
+            rebuildStatusMenu()
+        }
         state.refreshEnergyState()
 
-        UpdateChecker.shared.checkIfDue()
-        observeUpdateState()
+        if !Self.isWE1DebugBundle {
+            UpdateChecker.shared.checkIfDue()
+            observeUpdateState()
+        }
+        WindowEnhancementController.shared.start()
     }
 
     private func observeUpdateState() {
@@ -276,8 +407,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Island Window
 
-    private func setupIslandWindow() {
-        islandWindowController = IslandWindowController()
+    private func setupIslandWindow(contentMode: IslandContentMode = .production) {
+        islandWindowController = IslandWindowController(contentMode: contentMode)
         islandWindowController?.showIsland()
     }
 
@@ -297,7 +428,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: Constants.menuBarIconName, accessibilityDescription: "SuperIsland")
+            let appName = Self.isWE1DebugBundle ? "SuperIsland WE1 Debug" : "SuperIsland"
+            button.image = NSImage(systemSymbolName: Constants.menuBarIconName, accessibilityDescription: appName)
+            button.toolTip = appName
         }
 
         item.menu = buildStatusMenu()
@@ -368,14 +501,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func observeMenuBarSetting() {
         guard menuBarDefaultsObserver == nil else { return }
+        runtimeDefaultsSnapshot = RuntimeDefaultsSnapshot()
         menuBarDefaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.applyMenuBarVisibility()
-                self?.applyVolumeHUDSetting()
+                guard let self else { return }
+                let nextSnapshot = RuntimeDefaultsSnapshot()
+                guard nextSnapshot != self.runtimeDefaultsSnapshot else { return }
+                self.runtimeDefaultsSnapshot = nextSnapshot
+
+                self.applyMenuBarVisibility()
+                self.applyVolumeHUDSetting()
                 ModuleRefreshScheduler.shared.refreshScheduling()
                 ExtensionManager.shared.syncRuntimeEnergyState()
             }
@@ -466,28 +605,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    static func showSettingsWindow() {
+    static func showSettingsWindow(initialPane: SettingsPane = .general) {
         // Avoid opening the SwiftUI Settings scene via AppKit selectors in menu-bar mode.
         // macOS may reject those calls with a "use SettingsLink" warning.
-        showFallbackSettingsWindow()
+        showFallbackSettingsWindow(initialPane: initialPane)
     }
 
-    private static func showFallbackSettingsWindow() {
+    private static func showFallbackSettingsWindow(initialPane: SettingsPane = .general) {
         if let window = fallbackSettingsWindowController?.window {
+            configureSettingsWindow(window, restoreInitialSizeIfNeeded: true)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(
+                name: .superIslandSettingsPaneRequested,
+                object: initialPane.rawValue
+            )
             return
         }
 
-        let rootView = SettingsView()
+        let rootView = SettingsView(initialPane: initialPane)
             .environmentObject(AppState.shared)
         let hostingController = NSHostingController(rootView: rootView)
+        // AppKit owns the settings-window frame. Do not let the SwiftUI
+        // controller feed its transient fitting size back into NSWindow.
+        hostingController.sizingOptions = []
 
         let window = NSWindow(contentViewController: hostingController)
-        window.title = "SuperIsland Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 960, height: 680))
-        window.minSize = NSSize(width: 800, height: 560)
+        window.title = Self.isWE1DebugBundle ? "SuperIsland WE1 Debug Settings" : "SuperIsland Settings"
+        configureSettingsWindow(window, restoreInitialSizeIfNeeded: true)
         window.isReleasedWhenClosed = false
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -495,6 +640,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         fallbackSettingsWindowController = NSWindowController(window: window)
         fallbackSettingsWindowController?.showWindow(nil)
+    }
+
+    private static func configureSettingsWindow(
+        _ window: NSWindow,
+        restoreInitialSizeIfNeeded: Bool
+    ) {
+        window.styleMask.formUnion([.titled, .closable, .miniaturizable, .resizable])
+        window.contentMinSize = settingsMinimumContentSize
+
+        guard restoreInitialSizeIfNeeded else { return }
+        let currentContentSize = window.contentLayoutRect.size
+        guard currentContentSize.width < settingsMinimumContentSize.width ||
+                currentContentSize.height < settingsMinimumContentSize.height else { return }
+
+        window.setContentSize(settingsInitialContentSize)
+        window.center()
     }
 
     @objc private func quitApp() {

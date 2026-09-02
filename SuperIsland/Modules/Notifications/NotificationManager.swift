@@ -65,7 +65,6 @@ enum NotificationFeedSource: String, CaseIterable, Identifiable {
 
 @MainActor
 final class NotificationManager: ObservableObject {
-    private static let accessibilityPromptedDefaultsKey = "notifications.accessibilityPrompted"
     private static let whatsappExtensionID = "superisland.whatsapp-web"
 
     private struct WhatsAppLogEvent {
@@ -103,10 +102,6 @@ final class NotificationManager: ObservableObject {
     private let dismissedNotificationRetention: TimeInterval = 300
     private let lowInformationSuppressionWindow: TimeInterval = 10
     private var dismissedNotifications: [DismissedNotificationRecord] = []
-    private var hasRequestedAccessibilityPrompt = UserDefaults.standard.bool(
-        forKey: NotificationManager.accessibilityPromptedDefaultsKey
-    )
-
     private init() {
         checkPermission()
         startMonitoring()
@@ -170,15 +165,6 @@ final class NotificationManager: ObservableObject {
 
         startWhatsAppLogMonitor()
         startDeliveredNotificationMonitor()
-        ensureAccessibilityPromptIfNeeded()
-    }
-
-    private func ensureAccessibilityPromptIfNeeded() {
-        guard !AXIsProcessTrusted(), !hasRequestedAccessibilityPrompt else { return }
-        hasRequestedAccessibilityPrompt = true
-        UserDefaults.standard.set(true, forKey: Self.accessibilityPromptedDefaultsKey)
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
     }
 
     @objc private func handleDistributedNotification(_ notification: Notification) {

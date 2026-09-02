@@ -1,5 +1,7 @@
 import AppKit
 import Combine
+import Darwin
+import ImageIO
 
 // MARK: - MediaRemote Function Types
 private typealias MRMediaRemoteRegisterForNowPlayingNotificationsFunction = @convention(c) (DispatchQueue) -> Void
@@ -84,6 +86,7 @@ final class NowPlayingManager: ObservableObject {
     }
     private var currentAlbumArtist: String = ""
     private var currentArtworkURL: String?
+    private var currentArtworkIdentity: String?
     private var currentTrackIdentifier: String = ""
     private var currentTrackIsLocalFile = false
 
@@ -111,6 +114,10 @@ final class NowPlayingManager: ObservableObject {
     private var recentTrackChangeDate: Date = .distantPast
     private var lastKnownSnapshot: NowPlayingSnapshot?
     private var providerRefreshTask: Task<Void, Never>?
+    private var artworkDownloadTask: URLSessionDownloadTask?
+    private var pendingArtworkIdentity: String?
+    private var artworkLoadGeneration: UInt64 = 0
+    private var albumArtColorGeneration: UInt64 = 0
     private var adapterProcess: Process?
     private var adapterPipeHandler: JSONLinesPipeHandler?
     private var adapterStreamTask: Task<Void, Never>?
@@ -211,24 +218,46 @@ final class NowPlayingManager: ObservableObject {
 
     private func observeAlbumArtColor() {
         $albumArt
-            .removeDuplicates { $0?.tiffRepresentation == $1?.tiffRepresentation }
+            .removeDuplicates { previous, next in
+                switch (previous, next) {
+                case (nil, nil):
+                    return true
+                case let (previous?, next?):
+                    return previous === next
+                default:
+                    return false
+                }
+            }
             .sink { [weak self] image in
                 guard let self else { return }
+                self.albumArtColorGeneration &+= 1
+                let generation = self.albumArtColorGeneration
+
                 guard let image else {
-                    self.albumArtColor = nil
+                    if self.albumArtColor != nil {
+                        self.albumArtColor = nil
+                    }
                     return
                 }
-                image.averageColor { color in
-                    guard let color else { return }
+
+                image.averageColor { [weak self, weak image] color in
+                    guard let self,
+                          let image,
+                          generation == self.albumArtColorGeneration,
+                          self.albumArt === image,
+                          let color else { return }
                     let rgb = color.usingColorSpace(.sRGB) ?? color
                     var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
                     rgb.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-                    self.albumArtColor = NSColor(
+                    let adjustedColor = NSColor(
                         hue: h,
                         saturation: min(max(s * 1.15, 0.55), 1.0),
                         brightness: min(max(b * 1.18, 0.72), 1.0),
                         alpha: a
                     )
+                    if self.albumArtColor?.isEqual(adjustedColor) != true {
+                        self.albumArtColor = adjustedColor
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -272,25 +301,40 @@ final class NowPlayingManager: ObservableObject {
 
             if !newTitle.isEmpty {
                 let newIsPlaying = newPlaybackRate > 0
+                let newArtist = info[kMRMediaRemoteNowPlayingInfoArtist] as? String ?? ""
+                let newAlbum = info[kMRMediaRemoteNowPlayingInfoAlbum] as? String ?? ""
+                let newDuration = info[kMRMediaRemoteNowPlayingInfoDuration] as? TimeInterval ?? 0
+                let newElapsedTime = info[kMRMediaRemoteNowPlayingInfoElapsedTime] as? TimeInterval ?? 0
+                let playbackAnchorChanged =
+                    self.title != newTitle ||
+                    self.isPlaying != newIsPlaying ||
+                    self.duration != newDuration ||
+                    self.elapsedTime != newElapsedTime ||
+                    self.playbackRate != newPlaybackRate
+
                 self.mediaRemoteActive = true
                 self.currentChromeTabURL = ""
                 self.currentBundleIdentifier = ""
                 self.currentAlbumArtist = ""
+                self.cancelPendingArtworkLoad()
                 self.currentArtworkURL = nil
                 self.currentTrackIdentifier = ""
                 self.currentTrackIsLocalFile = false
-                self.title = newTitle
-                self.artist = info[kMRMediaRemoteNowPlayingInfoArtist] as? String ?? ""
-                self.album = info[kMRMediaRemoteNowPlayingInfoAlbum] as? String ?? ""
-                self.duration = info[kMRMediaRemoteNowPlayingInfoDuration] as? TimeInterval ?? 0
-                self.elapsedTime = info[kMRMediaRemoteNowPlayingInfoElapsedTime] as? TimeInterval ?? 0
-                self.playbackRate = newPlaybackRate
-                self.isPlaying = newIsPlaying
-                self.sourceName = "System Media"
-                self.providerStatus = newIsPlaying ? .playing("System Media") : .paused("System Media")
+                self.assignIfChanged(newTitle, to: \NowPlayingManager.title)
+                self.assignIfChanged(newArtist, to: \NowPlayingManager.artist)
+                self.assignIfChanged(newAlbum, to: \NowPlayingManager.album)
+                self.assignIfChanged(newDuration, to: \NowPlayingManager.duration)
+                self.assignIfChanged(newElapsedTime, to: \NowPlayingManager.elapsedTime)
+                self.assignIfChanged(newPlaybackRate, to: \NowPlayingManager.playbackRate)
+                self.assignIfChanged(newIsPlaying, to: \NowPlayingManager.isPlaying)
+                self.assignIfChanged("System Media", to: \NowPlayingManager.sourceName)
+                self.assignIfChanged(
+                    newIsPlaying ? .playing("System Media") : .paused("System Media"),
+                    to: \NowPlayingManager.providerStatus
+                )
 
                 if let artworkData = info[kMRMediaRemoteNowPlayingInfoArtworkData] as? Data {
-                    self.albumArt = NSImage(data: artworkData)
+                    self.applyInlineArtworkData(artworkData)
                 }
 
                 self.rememberCurrentSnapshot(providerID: "system")
@@ -300,7 +344,7 @@ final class NowPlayingManager: ObservableObject {
                     self.lastDetectedTitle = newTitle
                     AppState.shared.setActiveModule(.nowPlaying)
                 }
-                self.updatePlaybackTimer()
+                self.updatePlaybackTimer(resetTickBaseline: playbackAnchorChanged)
             } else {
                 self.mediaRemoteActive = false
                 if !self.showLastKnownSnapshotIfUseful() {
@@ -313,9 +357,12 @@ final class NowPlayingManager: ObservableObject {
     private func fetchPlaybackState() {
         getIsPlayingFunc?(DispatchQueue.main) { [weak self] playing in
             guard let self else { return }
-            self.isPlaying = playing
-            self.providerStatus = playing ? .playing(self.sourceName) : .paused(self.sourceName)
-            self.updatePlaybackTimer()
+            let playbackStateChanged = self.assignIfChanged(playing, to: \NowPlayingManager.isPlaying)
+            self.assignIfChanged(
+                playing ? .playing(self.sourceName) : .paused(self.sourceName),
+                to: \NowPlayingManager.providerStatus
+            )
+            self.updatePlaybackTimer(resetTickBaseline: playbackStateChanged)
         }
     }
 
@@ -330,7 +377,7 @@ final class NowPlayingManager: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
-        process.arguments = [resources.scriptURL.path, resources.frameworkURL.path, "stream"]
+        process.arguments = [resources.scriptURL.path, resources.frameworkURL.path, "stream", "--debounce=250"]
 
         let pipeHandler = JSONLinesPipeHandler()
         process.standardOutput = await pipeHandler.getPipe()
@@ -373,6 +420,8 @@ final class NowPlayingManager: ObservableObject {
         let payload = update.payload
         let diff = update.diff ?? false
         let previousElapsedTime = elapsedTime
+        let previousDuration = duration
+        let previousIsPlaying = isPlaying
         let previousPlaybackRate = playbackRate
         let previousPlaybackUpdateDate = lastPlaybackUpdateDate
         let incomingBundleIdentifier = payload.parentApplicationBundleIdentifier ?? payload.bundleIdentifier ?? ""
@@ -440,23 +489,9 @@ final class NowPlayingManager: ObservableObject {
             return
         }
 
-        mediaRemoteActive = !resolvedTitle.isEmpty || !bundleIdentifier.isEmpty
-        currentBundleIdentifier = bundleIdentifier
-        currentAlbumArtist = resolvedAlbumArtist
-        currentTrackIdentifier = resolvedTrackIdentifier
-        currentTrackIsLocalFile = resolvedIsLocalFile
-        lastPlaybackUpdateDate = resolvedUpdateDate
-        title = resolvedTitle
-        artist = resolvedArtist
-        album = resolvedAlbum
-        duration = resolvedDuration
-        playbackRate = resolvedPlaybackRate
-        isPlaying = resolvedIsPlaying
-        sourceName = resolvedSourceName
-        providerStatus = resolvedIsPlaying ? .playing(resolvedSourceName) : .paused(resolvedSourceName)
-
         if trackChanged {
             recentTrackChangeDate = Date()
+            cancelPendingArtworkLoad()
         }
 
         let shouldResetSuspiciousElapsedTime =
@@ -464,8 +499,33 @@ final class NowPlayingManager: ObservableObject {
             resolvedElapsedTime > 3 &&
             resolvedDuration > 0 &&
             resolvedElapsedTime < resolvedDuration
+        let publishedElapsedTime = shouldResetSuspiciousElapsedTime ? 0 : resolvedElapsedTime
+        let playbackAnchorChanged =
+            trackChanged ||
+            previousIsPlaying != resolvedIsPlaying ||
+            previousDuration != resolvedDuration ||
+            previousPlaybackRate != resolvedPlaybackRate ||
+            previousElapsedTime != publishedElapsedTime
 
-        elapsedTime = shouldResetSuspiciousElapsedTime ? 0 : resolvedElapsedTime
+        mediaRemoteActive = !resolvedTitle.isEmpty || !bundleIdentifier.isEmpty
+        currentBundleIdentifier = bundleIdentifier
+        currentAlbumArtist = resolvedAlbumArtist
+        currentTrackIdentifier = resolvedTrackIdentifier
+        currentTrackIsLocalFile = resolvedIsLocalFile
+        lastPlaybackUpdateDate = resolvedUpdateDate
+        assignIfChanged(resolvedTitle, to: \NowPlayingManager.title)
+        assignIfChanged(resolvedArtist, to: \NowPlayingManager.artist)
+        assignIfChanged(resolvedAlbum, to: \NowPlayingManager.album)
+        assignIfChanged(resolvedDuration, to: \NowPlayingManager.duration)
+        assignIfChanged(resolvedPlaybackRate, to: \NowPlayingManager.playbackRate)
+        assignIfChanged(resolvedIsPlaying, to: \NowPlayingManager.isPlaying)
+        assignIfChanged(resolvedSourceName, to: \NowPlayingManager.sourceName)
+        assignIfChanged(
+            resolvedIsPlaying ? .playing(resolvedSourceName) : .paused(resolvedSourceName),
+            to: \NowPlayingManager.providerStatus
+        )
+
+        assignIfChanged(publishedElapsedTime, to: \NowPlayingManager.elapsedTime)
 
         if isChromeBundleIdentifier(bundleIdentifier) {
             if !resolvedIsPlaying && !currentChromeTabURL.isEmpty {
@@ -477,12 +537,11 @@ final class NowPlayingManager: ObservableObject {
         }
 
         if let artworkDataString = payload.artworkData,
-           let artworkData = Data(base64Encoded: artworkDataString.trimmingCharacters(in: .whitespacesAndNewlines)),
-           let image = NSImage(data: artworkData) {
-            albumArt = image
+           let artworkData = Data(base64Encoded: artworkDataString.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            applyInlineArtworkData(artworkData)
             currentArtworkURL = nil
         } else if resolvedTitle.isEmpty {
-            albumArt = nil
+            clearAlbumArt()
             currentArtworkURL = nil
         }
 
@@ -495,7 +554,7 @@ final class NowPlayingManager: ObservableObject {
             lastDetectedTitle = ""
         }
 
-        updatePlaybackTimer()
+        updatePlaybackTimer(resetTickBaseline: playbackAnchorChanged)
     }
 
     private func mediaRemoteAdapterResources() -> (scriptURL: URL, frameworkURL: URL)? {
@@ -545,7 +604,10 @@ final class NowPlayingManager: ObservableObject {
 
     private func refreshPreferredSource() {
         if adapterDidDeliverUpdate, !title.isEmpty {
-            providerStatus = isPlaying ? .playing(sourceName) : .paused(sourceName)
+            assignIfChanged(
+                isPlaying ? .playing(sourceName) : .paused(sourceName),
+                to: \NowPlayingManager.providerStatus
+            )
             return
         }
 
@@ -561,7 +623,7 @@ final class NowPlayingManager: ObservableObject {
 
         for provider in scriptProviders(preferredSourceName: preferredSourceName) {
             guard !Task.isCancelled else { return }
-            providerStatus = .checking(provider.displayName)
+            assignIfChanged(.checking(provider.displayName), to: \NowPlayingManager.providerStatus)
             guard let snapshot = await provider.currentSnapshot() else { continue }
 
             if snapshot.isPlaying {
@@ -587,7 +649,10 @@ final class NowPlayingManager: ObservableObject {
             return
         }
 
-        providerStatus = browserDetectionEnabled ? .idle : .browserDisabled
+        assignIfChanged(
+            browserDetectionEnabled ? .idle : .browserDisabled,
+            to: \NowPlayingManager.providerStatus
+        )
         fetchNowPlayingInfo()
     }
 
@@ -742,18 +807,8 @@ final class NowPlayingManager: ObservableObject {
             return artwork url of current track
         end tell
         """
-        guard let urlString = runAppleScript(script), let url = URL(string: urlString) else { return }
-
-        DispatchQueue.main.async { [weak self] in
-            self?.currentArtworkURL = urlString
-        }
-
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let data, let image = NSImage(data: data) else { return }
-            DispatchQueue.main.async {
-                self?.albumArt = image
-            }
-        }.resume()
+        guard let urlString = runAppleScript(script), URL(string: urlString) != nil else { return }
+        fetchRemoteArtwork(from: urlString)
     }
 
     nonisolated private func fetchMusicViaAppleScript(allowPausedFallback: Bool = true) -> Bool {
@@ -961,21 +1016,32 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private func applySnapshot(_ snapshot: NowPlayingSnapshot, stale: Bool = false) {
+        let resolvedIsPlaying = stale ? false : snapshot.isPlaying
+        let resolvedProviderStatus: NowPlayingProviderStatus = stale
+            ? .stale(snapshot.sourceName)
+            : (snapshot.isPlaying ? .playing(snapshot.sourceName) : .paused(snapshot.sourceName))
+        let playbackAnchorChanged =
+            title != snapshot.title ||
+            duration != snapshot.duration ||
+            elapsedTime != snapshot.elapsedTime ||
+            playbackRate != snapshot.playbackRate ||
+            isPlaying != resolvedIsPlaying
+
         currentChromeTabURL = snapshot.browserTabURL
         currentBundleIdentifier = snapshot.bundleIdentifier
         currentAlbumArtist = snapshot.albumArtist
         currentTrackIdentifier = snapshot.trackIdentifier
         currentTrackIsLocalFile = snapshot.isLocalFile
         currentArtworkURL = snapshot.artworkURL
-        title = snapshot.title
-        artist = snapshot.artist
-        album = snapshot.album
-        duration = snapshot.duration
-        elapsedTime = snapshot.elapsedTime
-        playbackRate = snapshot.playbackRate
-        isPlaying = stale ? false : snapshot.isPlaying
-        sourceName = snapshot.sourceName
-        providerStatus = stale ? .stale(snapshot.sourceName) : (snapshot.isPlaying ? .playing(snapshot.sourceName) : .paused(snapshot.sourceName))
+        assignIfChanged(snapshot.title, to: \NowPlayingManager.title)
+        assignIfChanged(snapshot.artist, to: \NowPlayingManager.artist)
+        assignIfChanged(snapshot.album, to: \NowPlayingManager.album)
+        assignIfChanged(snapshot.duration, to: \NowPlayingManager.duration)
+        assignIfChanged(snapshot.elapsedTime, to: \NowPlayingManager.elapsedTime)
+        assignIfChanged(snapshot.playbackRate, to: \NowPlayingManager.playbackRate)
+        assignIfChanged(resolvedIsPlaying, to: \NowPlayingManager.isPlaying)
+        assignIfChanged(snapshot.sourceName, to: \NowPlayingManager.sourceName)
+        assignIfChanged(resolvedProviderStatus, to: \NowPlayingManager.providerStatus)
 
         if snapshot.browserTabURL.isEmpty {
             lastPausedChromeTabURL = ""
@@ -985,8 +1051,9 @@ final class NowPlayingManager: ObservableObject {
 
         if snapshot.title != lastDetectedTitle {
             lastDetectedTitle = snapshot.title
+            cancelPendingArtworkLoad()
             if snapshot.providerID == "browser" {
-                albumArt = nil
+                clearAlbumArt()
             }
             if snapshot.isPlaying, !stale {
                 AppState.shared.setActiveModule(.nowPlaying)
@@ -997,7 +1064,7 @@ final class NowPlayingManager: ObservableObject {
             lastKnownSnapshot = snapshot
         }
 
-        updatePlaybackTimer()
+        updatePlaybackTimer(resetTickBaseline: playbackAnchorChanged)
     }
 
     private func fetchArtworkIfNeeded(for snapshot: NowPlayingSnapshot) {
@@ -1081,14 +1148,165 @@ final class NowPlayingManager: ObservableObject {
     }
 
     nonisolated private func fetchRemoteArtwork(from urlString: String) {
-        guard let url = URL(string: urlString) else { return }
+        Task { @MainActor [weak self] in
+            self?.beginRemoteArtworkLoad(from: urlString)
+        }
+    }
 
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let data, let image = NSImage(data: data) else { return }
-            DispatchQueue.main.async {
-                self?.albumArt = image
+    private func beginRemoteArtworkLoad(from urlString: String) {
+        let normalizedURLString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: normalizedURLString) else { return }
+
+        let identity = "url:\(url.absoluteString)"
+        currentArtworkURL = normalizedURLString
+
+        if currentArtworkIdentity == identity {
+            if pendingArtworkIdentity != nil, pendingArtworkIdentity != identity {
+                cancelPendingArtworkLoad()
             }
-        }.resume()
+            return
+        }
+
+        guard pendingArtworkIdentity != identity else { return }
+
+        cancelPendingArtworkLoad()
+        artworkLoadGeneration &+= 1
+        let generation = artworkLoadGeneration
+        pendingArtworkIdentity = identity
+
+        let task = URLSession.shared.downloadTask(with: url) { [weak self] location, _, _ in
+            let image = location.flatMap {
+                Self.decodeArtworkImage(fromFileURL: $0)
+            }
+            Task { @MainActor [weak self] in
+                self?.completeRemoteArtworkLoad(
+                    image: image,
+                    identity: identity,
+                    generation: generation
+                )
+            }
+        }
+        artworkDownloadTask = task
+        task.resume()
+    }
+
+    private func completeRemoteArtworkLoad(image: NSImage?, identity: String, generation: UInt64) {
+        guard generation == artworkLoadGeneration,
+              pendingArtworkIdentity == identity else { return }
+
+        pendingArtworkIdentity = nil
+        artworkDownloadTask = nil
+
+        guard let image else { return }
+        commitAlbumArt(image, identity: identity)
+    }
+
+    private func applyInlineArtworkData(_ data: Data) {
+        let identity = Self.stableArtworkIdentity(for: data)
+
+        if currentArtworkIdentity == identity {
+            if pendingArtworkIdentity != nil, pendingArtworkIdentity != identity {
+                cancelPendingArtworkLoad()
+            }
+            return
+        }
+
+        guard let image = Self.decodeArtworkImage(from: data) else { return }
+        cancelPendingArtworkLoad()
+        commitAlbumArt(image, identity: identity)
+    }
+
+    private func commitAlbumArt(_ image: NSImage, identity: String) {
+        currentArtworkIdentity = identity
+        if albumArt !== image {
+            albumArt = image
+        }
+    }
+
+    private func clearAlbumArt() {
+        cancelPendingArtworkLoad()
+        currentArtworkIdentity = nil
+        if albumArt != nil {
+            albumArt = nil
+        } else {
+            albumArtColorGeneration &+= 1
+            if albumArtColor != nil {
+                albumArtColor = nil
+            }
+        }
+    }
+
+    private func cancelPendingArtworkLoad() {
+        guard artworkDownloadTask != nil || pendingArtworkIdentity != nil else { return }
+        artworkLoadGeneration &+= 1
+        artworkDownloadTask?.cancel()
+        artworkDownloadTask = nil
+        pendingArtworkIdentity = nil
+    }
+
+    nonisolated private static func stableArtworkIdentity(for data: Data) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in data {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return "data:\(data.count):\(String(hash, radix: 16))"
+    }
+
+    /// Decode artwork directly into a bounded thumbnail instead of first
+    /// materializing the source image at its native resolution. Existing UI
+    /// uses at most a 90-point image; 512 pixels keeps Retina detail while
+    /// limiting one decoded BGRA surface to roughly 1 MiB.
+    nonisolated private static func decodeArtworkImage(
+        from data: Data,
+        maximumPixelSize: Int = 512
+    ) -> NSImage? {
+        // Refuse unexpectedly large responses before ImageIO parses them. The
+        // decoded surface is bounded below, but retaining an unbounded network
+        // payload would still allow a malformed artwork URL to spike RSS.
+        guard !data.isEmpty, data.count <= 20 * 1_024 * 1_024 else {
+            return nil
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
+        }
+        return decodeArtworkImage(from: source, maximumPixelSize: maximumPixelSize)
+    }
+
+    nonisolated private static func decodeArtworkImage(
+        fromFileURL fileURL: URL,
+        maximumPixelSize: Int = 512
+    ) -> NSImage? {
+        guard let fileSize = try? fileURL.resourceValues(
+            forKeys: [.fileSizeKey]
+        ).fileSize,
+              fileSize > 0,
+              fileSize <= 20 * 1_024 * 1_024,
+              let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil) else {
+            return nil
+        }
+        return decodeArtworkImage(from: source, maximumPixelSize: maximumPixelSize)
+    }
+
+    nonisolated private static func decodeArtworkImage(
+        from source: CGImageSource,
+        maximumPixelSize: Int
+    ) -> NSImage? {
+        let options: CFDictionary = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ] as CFDictionary
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            options
+        ) else { return nil }
+        return NSImage(
+            cgImage: thumbnail,
+            size: NSSize(width: thumbnail.width, height: thumbnail.height)
+        )
     }
 
     nonisolated private func extractYouTubeVideoID(from urlString: String) -> String? {
@@ -1118,25 +1336,48 @@ final class NowPlayingManager: ObservableObject {
 
     // MARK: - Playback Timer
 
-    private func updatePlaybackTimer() {
+    @discardableResult
+    private func assignIfChanged<Value: Equatable>(
+        _ value: Value,
+        to keyPath: ReferenceWritableKeyPath<NowPlayingManager, Value>
+    ) -> Bool {
+        guard self[keyPath: keyPath] != value else { return false }
+        self[keyPath: keyPath] = value
+        return true
+    }
+
+    private func updatePlaybackTimer(resetTickBaseline: Bool = false) {
+        let shouldRun = isPlaying && duration > 0 && elapsedTime < duration
+
+        if shouldRun {
+            if resetTickBaseline || lastPlaybackTickDate == nil {
+                lastPlaybackTickDate = Date()
+            }
+
+            guard playbackRefreshToken == nil else { return }
+
+            playbackRefreshToken = ModuleRefreshScheduler.shared.register(
+                id: "nowPlaying.progress",
+                name: "Now Playing progress",
+                module: .builtIn(.nowPlaying),
+                policy: .visibleOnly(1, tolerance: 0.2),
+                enabled: { [weak self] in
+                    AppState.shared.nowPlayingEnabled && (self?.isPlaying ?? false)
+                }
+            ) { [weak self] in
+                self?.advancePlaybackProgress()
+            }
+            return
+        }
+
+        guard playbackRefreshToken != nil else {
+            lastPlaybackTickDate = nil
+            return
+        }
+
         ModuleRefreshScheduler.shared.unregister(playbackRefreshToken)
         playbackRefreshToken = nil
         lastPlaybackTickDate = nil
-
-        guard isPlaying, duration > 0 else { return }
-
-        lastPlaybackTickDate = Date()
-        playbackRefreshToken = ModuleRefreshScheduler.shared.register(
-            id: "nowPlaying.progress",
-            name: "Now Playing progress",
-            module: .builtIn(.nowPlaying),
-            policy: .visibleOnly(1, tolerance: 0.2),
-            enabled: { [weak self] in
-                AppState.shared.nowPlayingEnabled && (self?.isPlaying ?? false)
-            }
-        ) { [weak self] in
-            self?.advancePlaybackProgress()
-        }
     }
 
     private func advancePlaybackProgress() {
@@ -1151,7 +1392,7 @@ final class NowPlayingManager: ObservableObject {
 
         elapsedTime += min(max(delta, 0.5), 5) * max(playbackRate, 1)
         if elapsedTime >= duration {
-            elapsedTime = duration
+            assignIfChanged(duration, to: \NowPlayingManager.elapsedTime)
             updatePlaybackTimer()
         }
     }
@@ -1243,8 +1484,8 @@ final class NowPlayingManager: ObservableObject {
 
     func seek(to time: TimeInterval) {
         let clampedTime = max(0, min(time, duration))
-        elapsedTime = clampedTime
-        updatePlaybackTimer()
+        assignIfChanged(clampedTime, to: \NowPlayingManager.elapsedTime)
+        updatePlaybackTimer(resetTickBaseline: true)
 
         if shouldUseMediaRemoteControls {
             setElapsedTimeFunc?(clampedTime)
@@ -1306,7 +1547,7 @@ final class NowPlayingManager: ObservableObject {
     func testBrowserDetection() {
         browserDetectionTestMessage = "Checking browser media..."
         guard browserDetectionEnabled else {
-            providerStatus = .browserDisabled
+            assignIfChanged(.browserDisabled, to: \NowPlayingManager.providerStatus)
             browserDetectionTestMessage = "请先启用浏览器媒体检测。"
             return
         }
@@ -1318,7 +1559,7 @@ final class NowPlayingManager: ObservableObject {
             }
 
             guard let snapshot else {
-                self.providerStatus = .permissionNeeded("浏览器媒体")
+                self.assignIfChanged(.permissionNeeded("浏览器媒体"), to: \NowPlayingManager.providerStatus)
                 self.browserDetectionTestMessage = "未找到浏览器媒体。请检查自动化权限，以及浏览器是否允许 Apple Events 执行 JavaScript。"
                 return
             }
@@ -1580,16 +1821,15 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private func clearCurrentTrack() {
-        title = ""
-        artist = ""
-        album = ""
-        albumArt = nil
-        albumArtColor = nil
-        isPlaying = false
-        duration = 0
-        elapsedTime = 0
-        playbackRate = 0
-        sourceName = ""
+        assignIfChanged("", to: \NowPlayingManager.title)
+        assignIfChanged("", to: \NowPlayingManager.artist)
+        assignIfChanged("", to: \NowPlayingManager.album)
+        clearAlbumArt()
+        assignIfChanged(false, to: \NowPlayingManager.isPlaying)
+        assignIfChanged(0, to: \NowPlayingManager.duration)
+        assignIfChanged(0, to: \NowPlayingManager.elapsedTime)
+        assignIfChanged(0, to: \NowPlayingManager.playbackRate)
+        assignIfChanged("", to: \NowPlayingManager.sourceName)
         currentAlbumArtist = ""
         currentArtworkURL = nil
         currentTrackIdentifier = ""
@@ -1598,14 +1838,46 @@ final class NowPlayingManager: ObservableObject {
         lastPausedChromeTabURL = ""
         currentBundleIdentifier = ""
         lastDetectedTitle = ""
-        providerStatus = browserDetectionEnabled ? .idle : .browserDisabled
-        ModuleRefreshScheduler.shared.unregister(playbackRefreshToken)
-        playbackRefreshToken = nil
-        lastPlaybackTickDate = nil
+        assignIfChanged(
+            browserDetectionEnabled ? .idle : .browserDisabled,
+            to: \NowPlayingManager.providerStatus
+        )
+        updatePlaybackTimer()
+    }
+
+    /// Stop the helper while the owning App is still alive. `shared` is a
+    /// process-lifetime singleton, so relying on `deinit` leaves the Perl
+    /// MediaRemote stream orphaned when AppKit terminates the application.
+    func shutdownExternalProcesses() {
+        adapterStreamTask?.cancel()
+        adapterStreamTask = nil
+        if let adapterProcess {
+            Self.terminateAdapterProcess(adapterProcess)
+        }
+        adapterProcess = nil
+        adapterPipeHandler = nil
+        adapterDidDeliverUpdate = false
+    }
+
+    private nonisolated static func terminateAdapterProcess(_ process: Process) {
+        guard process.isRunning else { return }
+        process.terminationHandler = nil
+        let pid = process.processIdentifier
+        process.terminate()
+        let deadline = Date().addingTimeInterval(0.20)
+        while process.isRunning, Date() < deadline {
+            usleep(10_000)
+        }
+        if process.isRunning {
+            // This PID is the exact child Process instance launched above.
+            // Bound shutdown rather than hanging the host App indefinitely.
+            _ = Darwin.kill(pid, SIGKILL)
+        }
     }
 
     deinit {
         providerRefreshTask?.cancel()
+        artworkDownloadTask?.cancel()
         let sourceToken = sourceRefreshToken
         let playbackToken = playbackRefreshToken
         Task { @MainActor in
@@ -1618,9 +1890,8 @@ final class NowPlayingManager: ObservableObject {
                 await adapterPipeHandler.close()
             }
         }
-        if let adapterProcess, adapterProcess.isRunning {
-            adapterProcess.terminate()
-            adapterProcess.waitUntilExit()
+        if let adapterProcess {
+            Self.terminateAdapterProcess(adapterProcess)
         }
         if let handle {
             dlclose(handle)

@@ -21,6 +21,36 @@ private final class CenteringContainerView: NSView {
 
 @MainActor
 final class IslandWindowController {
+    private struct SettingsSnapshot: Equatable {
+        let showOnAllSpaces: Bool
+        let showInScreenRecordings: Bool
+        let hideSideSlots: Bool
+        let hideOnFullscreen: Bool
+        let displayIdentifier: String
+        let compactIslandWidth: Double
+        let compactIslandHeight: Double
+
+        init(defaults: UserDefaults = .standard) {
+            func bool(_ key: String, default defaultValue: Bool) -> Bool {
+                guard defaults.object(forKey: key) != nil else { return defaultValue }
+                return defaults.bool(forKey: key)
+            }
+
+            showOnAllSpaces = bool("general.showOnAllSpaces", default: true)
+            showInScreenRecordings = bool("general.showInScreenRecordings", default: false)
+            hideSideSlots = bool("general.hideSideSlots", default: false)
+            hideOnFullscreen = bool("general.hideOnFullscreen", default: false)
+            displayIdentifier = defaults.string(forKey: "general.displayIdentifier") ?? ""
+            compactIslandWidth = (defaults.object(forKey: "appearance.compactIslandWidth") as? NSNumber)?.doubleValue ?? 200
+            compactIslandHeight = (defaults.object(forKey: "appearance.compactIslandHeight") as? NSNumber)?.doubleValue ?? 36
+        }
+    }
+
+    /// Used by the window-enhancement controller to decide whether feedback
+    /// can be delivered inside a currently visible island instead of showing
+    /// a second independent HUD.
+    private(set) static var canPresentWindowEnhancementFeedback = false
+
     /// Panels keyed by the display id string they live on.
     private var panels: [String: IslandPanel] = [:]
     /// Screens currently hidden because a fullscreen app is covering them.
@@ -28,23 +58,42 @@ final class IslandWindowController {
     private let appState = AppState.shared
     private var screenObserver: Any?
     private var defaultsObserver: Any?
+    private var settingsSnapshot: SettingsSnapshot?
     private var activeSpaceObserver: Any?
     private var presentationHoldObserver: Any?
     private var fullscreenPollTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var shrinkWorkItem: DispatchWorkItem?
+    private var windowEnhancementFeedbackShrinkWorkItem: DispatchWorkItem?
+    private var isWindowEnhancementFeedbackPresented = false
     private var isShowing = false
+    private let contentMode: IslandContentMode
+
+    init(contentMode: IslandContentMode = .production) {
+        self.contentMode = contentMode
+    }
 
     func showIsland() {
         isShowing = true
         syncPanels(display: true)
 
-        setupDidChangeStateHook()
+        // The WE1 harness presents a fixed compact shell. Do not install the
+        // production state-transition hooks: those size through AppState's
+        // module-aware path and can construct MediaRemote/extensions if some
+        // unrelated UI mutates the shared presentation state.
+        if contentMode == .production {
+            setupDidChangeStateHook()
+            observeStateChanges()
+            observeCompactLayoutChanges()
+            observePresentationHoldChanges()
+        } else {
+            observeWindowEnhancementFeedbackChanges()
+            WindowEnhancementPreferences.shared.publishFeedback(
+                WindowEnhancementPreferences.islandReadyMessage
+            )
+        }
         observeScreenChanges()
         observeSettingsChanges()
-        observePresentationHoldChanges()
-        observeStateChanges()
-        observeCompactLayoutChanges()
         observeFullscreenChanges()
         updateFullscreenVisibility()
     }
@@ -54,6 +103,7 @@ final class IslandWindowController {
         for panel in panels.values {
             panel.orderOut(nil)
         }
+        refreshWindowEnhancementFeedbackAvailability()
     }
 
     // MARK: - Panel lifecycle
@@ -89,16 +139,17 @@ final class IslandWindowController {
             if panels[id] == nil {
                 panels[id] = panel
             }
-            applyFrame(size: appState.windowSize, to: panel, screen: screen, display: display)
-            panel.setVisibleInScreenRecordings(appState.showInScreenRecordings)
+            applyFrame(size: currentWindowSize, to: panel, screen: screen, display: display)
+            applySettings(to: panel)
             if !hiddenForFullscreen.contains(id) {
                 panel.orderFrontRegardless()
             }
         }
+        refreshWindowEnhancementFeedbackAvailability()
     }
 
     private func makePanel() -> IslandPanel {
-        let panel = IslandPanel()
+        let panel = IslandPanel(showOnAllSpaces: appState.showOnAllSpaces)
 
         // The hosting view is set to the MAXIMUM possible size and
         // NEVER resizes. The window acts as a clipping viewport:
@@ -106,11 +157,18 @@ final class IslandWindowController {
         // expanded window → the full surface is revealed.
         // Because the hosting view never changes size, SwiftUI never
         // re-layouts from window changes — no "jump left" on expand.
-        let maxSize = maxWindowSize
+        let maxSize = contentMode == .windowEnhancementShell
+            ? IslandShellMetrics.feedbackSurfaceSize(for: appState)
+            : maxWindowSize
         let hostingView = FirstMouseHostingView(
-            rootView: IslandContainerView()
+            rootView: IslandContainerView(contentMode: contentMode)
                 .environmentObject(appState)
         )
+        // This panel is sized explicitly by IslandWindowController.  Letting
+        // NSHostingView also publish min/max window sizes creates a second
+        // window-sizing authority and can recurse during Space/full-screen
+        // transitions.
+        hostingView.sizingOptions = []
         hostingView.frame = NSRect(x: 0, y: 0, width: maxSize.width, height: maxSize.height)
         hostingView.autoresizingMask = [] // Never resize — container handles positioning.
 
@@ -119,6 +177,17 @@ final class IslandWindowController {
         panel.contentView = containerView
 
         return panel
+    }
+
+    private func applySettings(to panel: IslandPanel) {
+        panel.setShowOnAllSpaces(appState.showOnAllSpaces)
+        panel.setVisibleInScreenRecordings(appState.showInScreenRecordings)
+    }
+
+    private func applySettingsToAllPanels() {
+        for panel in panels.values {
+            applySettings(to: panel)
+        }
     }
 
     /// The set of screens the island should currently be visible on,
@@ -169,7 +238,53 @@ final class IslandWindowController {
         )
     }
 
+    private var currentWindowSize: CGSize {
+        if contentMode == .windowEnhancementShell {
+            return isWindowEnhancementFeedbackPresented
+                ? IslandShellMetrics.feedbackSurfaceSize(for: appState)
+                : IslandShellMetrics.compactSurfaceSize(for: appState)
+        }
+        return appState.windowSize
+    }
+
+    private func observeWindowEnhancementFeedbackChanges() {
+        WindowEnhancementPreferences.shared.$feedbackEvent
+            .compactMap { $0 }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.presentWindowEnhancementFeedback()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func presentWindowEnhancementFeedback() {
+        windowEnhancementFeedbackShrinkWorkItem?.cancel()
+        isWindowEnhancementFeedbackPresented = true
+        applyWindowEnhancementFeedbackFrameToAll(size: currentWindowSize)
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.isWindowEnhancementFeedbackPresented = false
+            self.applyWindowEnhancementFeedbackFrameToAll(size: self.currentWindowSize)
+            self.windowEnhancementFeedbackShrinkWorkItem = nil
+        }
+        windowEnhancementFeedbackShrinkWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.1, execute: workItem)
+    }
+
+    private func applyWindowEnhancementFeedbackFrameToAll(size: CGSize) {
+        let animate = !appState.shouldReduceMotion
+        for (id, panel) in panels {
+            guard let screen = ScreenDetector.screen(withIDString: id) else { continue }
+            panel.setFrame(targetFrame(size: size, screen: screen), display: true, animate: animate)
+        }
+    }
+
     private func applyFrame(size: CGSize, to panel: IslandPanel, screen: NSScreen, display: Bool = true) {
+        panel.setFrame(targetFrame(size: size, screen: screen), display: display)
+    }
+
+    private func targetFrame(size: CGSize, screen: NSScreen) -> NSRect {
         let screenFrame = screen.frame
         let hasNotch = ScreenDetector.hasNotch(screen: screen)
         let notchRect = ScreenDetector.notchRect(screen: screen)
@@ -186,7 +301,7 @@ final class IslandWindowController {
 
         let x = anchorX - size.width / 2
         let y = anchorY - size.height
-        panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: display)
+        return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
 
     /// Apply the given size to every active panel, each sized against its own screen.
@@ -234,6 +349,10 @@ final class IslandWindowController {
             .receive(on: RunLoop.main)
             .sink { [weak self] newState in
                 guard let self, !self.panels.isEmpty else { return }
+                // @Published may deliver the new value before reading the
+                // wrapped property reflects it, so route availability from the
+                // emitted state instead of re-reading a potentially stale one.
+                self.refreshWindowEnhancementFeedbackAvailability(state: newState)
 
                 self.shrinkWorkItem?.cancel()
                 self.shrinkWorkItem = nil
@@ -291,6 +410,8 @@ final class IslandWindowController {
     // MARK: - Compact layout changes
 
     private func observeCompactLayoutChanges() {
+        guard contentMode == .production else { return }
+
         appState.$activeModule
             .removeDuplicates()
             .receive(on: RunLoop.main)
@@ -310,7 +431,7 @@ final class IslandWindowController {
 
     private func updateCompactFrameIfNeeded() {
         guard appState.currentState == .compact else { return }
-        applyFrameToAll(size: appState.windowSize)
+        applyFrameToAll(size: currentWindowSize)
     }
 
     // MARK: - Screen & Settings
@@ -326,14 +447,21 @@ final class IslandWindowController {
                 // Screen topology may have changed (display added/removed) —
                 // reconcile the panel set, then re-apply sizes.
                 self.syncPanels(display: true)
-                let size = self.appState.currentState == .compact
-                    ? self.appState.windowSize : self.maxWindowSize
+                let size: CGSize
+                if self.contentMode == .windowEnhancementShell {
+                    size = self.currentWindowSize
+                } else {
+                    size = self.appState.currentState == .compact
+                        ? self.appState.windowSize : self.maxWindowSize
+                }
                 self.applyFrameToAll(size: size)
             }
         }
     }
 
     private func observeSettingsChanges() {
+        guard defaultsObserver == nil else { return }
+        settingsSnapshot = SettingsSnapshot()
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: nil,
@@ -341,9 +469,13 @@ final class IslandWindowController {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                for panel in self.panels.values {
-                    panel.setVisibleInScreenRecordings(self.appState.showInScreenRecordings)
-                }
+                let nextSnapshot = SettingsSnapshot()
+                guard nextSnapshot != self.settingsSnapshot else { return }
+                self.settingsSnapshot = nextSnapshot
+
+                // Update retained/hidden panels as well as visible ones. A
+                // later showIsland() must not resurrect stale Space behavior.
+                self.applySettingsToAllPanels()
                 // The display identifier may have changed — reconcile the
                 // panel set (handles switching to/from All Displays and
                 // moving between single screens). Also keeps compact frame
@@ -416,6 +548,25 @@ final class IslandWindowController {
                 hiddenForFullscreen.remove(id)
                 panel.orderFrontRegardless()
             }
+        }
+        refreshWindowEnhancementFeedbackAvailability()
+    }
+
+    private func refreshWindowEnhancementFeedbackAvailability(state: IslandState? = nil) {
+        let hasVisiblePanel = isShowing && panels.values.contains(where: \.isVisible)
+        guard hasVisiblePanel else {
+            Self.canPresentWindowEnhancementFeedback = false
+            return
+        }
+
+        switch contentMode {
+        case .windowEnhancementShell:
+            Self.canPresentWindowEnhancementFeedback = true
+        case .production:
+            // Preserve the original compact island completely. Once the user
+            // opens the island, feedback is rendered as a passive overlay over
+            // the real module page; while compact, use the standalone HUD.
+            Self.canPresentWindowEnhancementFeedback = (state ?? appState.currentState) != .compact
         }
     }
 
@@ -573,6 +724,7 @@ final class IslandWindowController {
     }
 
     deinit {
+        windowEnhancementFeedbackShrinkWorkItem?.cancel()
         if let observer = screenObserver {
             NotificationCenter.default.removeObserver(observer)
         }
