@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import SuperIsland
 
@@ -114,13 +115,27 @@ final class WindowPreviewInteractionTests: XCTestCase {
     func testTrackingViewAcceptsFirstClickWithoutActivation() {
         let view = WindowPreviewTrackingView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
         XCTAssertTrue(view.acceptsFirstMouse(for: nil))
-        XCTAssertFalse(view.needsPanelToBecomeKey)
+        XCTAssertTrue(view.needsPanelToBecomeKey)
         view.updateTrackingAreas()
         XCTAssertEqual(view.trackingAreas.count, 1)
         XCTAssertTrue(view.trackingAreas[0].options.contains(.activeAlways))
         XCTAssertTrue(view.trackingAreas[0].options.contains(.mouseMoved))
         view.updateTrackingAreas()
         XCTAssertEqual(view.trackingAreas.count, 1)
+    }
+
+    func testNonactivatingPreviewPanelCanReceiveFirstClick() {
+        let panel = WindowPreviewInteractionPanel(
+            contentRect: CGRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isReleasedWhenClosed = false
+        defer { panel.close() }
+        XCTAssertTrue(panel.canBecomeKey)
+        XCTAssertFalse(panel.canBecomeMain)
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
     }
 
     func testFrameReporterUsesTrackingViewsTopLeftCoordinateSpace() {
@@ -151,6 +166,33 @@ final class WindowPreviewInteractionTests: XCTestCase {
         let reportCountAfterDetach = reports.count
         reporter.layout()
         XCTAssertEqual(reports.count, reportCountAfterDetach)
+    }
+
+    func testSwiftUIBackgroundReporterReceivesActualCardSize() {
+        let panel = NSPanel(
+            contentRect: CGRect(x: 0, y: 0, width: 240, height: 180),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isReleasedWhenClosed = false
+        defer { panel.close() }
+        var reportedFrame: CGRect?
+        let card = Color.clear
+            .frame(width: 120, height: 80)
+            .background(WindowPreviewFrameReporter(target: 7) { _, frame in
+                if let frame { reportedFrame = frame }
+            })
+        let hostingView = NSHostingView(rootView: card)
+        hostingView.frame = CGRect(x: 30, y: 40, width: 120, height: 80)
+        panel.contentView = hostingView
+
+        hostingView.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(reportedFrame?.width ?? 0, 120, accuracy: 0.5)
+        XCTAssertEqual(reportedFrame?.height ?? 0, 80, accuracy: 0.5)
     }
 
     func testRicherNoIDProxyBeatsSparseExactIDProxyForOperations() {

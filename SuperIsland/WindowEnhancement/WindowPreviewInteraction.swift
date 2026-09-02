@@ -91,7 +91,7 @@ final class WindowPreviewTrackingView: NSView {
     private var pointerTrackingArea: NSTrackingArea?
 
     override var isFlipped: Bool { true }
-    override var needsPanelToBecomeKey: Bool { false }
+    override var needsPanelToBecomeKey: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
@@ -122,6 +122,16 @@ final class WindowPreviewTrackingView: NSView {
     private func deliver(_ event: NSEvent, as type: NSEvent.EventType? = nil) {
         onPointer(type ?? event.type, convert(event.locationInWindow, from: nil), event.timestamp)
     }
+}
+
+/// A `.nonactivatingPanel` may become key for mouse delivery without making
+/// SuperIsland the active application. AppKit otherwise drops the first click
+/// for a borderless preview while another App owns the key window, even though
+/// hover tracking still works. Dock and Cmd-Tab must share this exact panel
+/// contract so their visible cards have identical first-click behavior.
+final class WindowPreviewInteractionPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 /// A genuinely blank document is not a phantom. Only strong AX document or
