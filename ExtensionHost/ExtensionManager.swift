@@ -68,8 +68,11 @@ final class ExtensionManager: ObservableObject {
 
         let appSupportBase = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let appSupportDirectoryName = Bundle.main.bundleIdentifier == "com.workview.SuperIsland.WE1Debug"
+            ? "SuperIsland-WE1-Debug"
+            : "SuperIsland"
         installedExtensionsDirectory = appSupportBase
-            .appendingPathComponent("SuperIsland", isDirectory: true)
+            .appendingPathComponent(appSupportDirectoryName, isDirectory: true)
             .appendingPathComponent("Extensions", isDirectory: true)
 
         try? fileManager.createDirectory(at: installedExtensionsDirectory, withIntermediateDirectories: true)

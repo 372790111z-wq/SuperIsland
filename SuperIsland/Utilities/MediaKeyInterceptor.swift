@@ -73,8 +73,10 @@ final class MediaKeyInterceptor {
         guard eventTap == nil else { return }
 
         guard PermissionsManager.shared.checkAccessibility() else {
-            NSLog("[MediaKeyInterceptor] Accessibility permission not granted — requesting.")
-            PermissionsManager.shared.requestAccessibility()
+            // Background retries must stay silent. Re-requesting here causes the
+            // macOS Accessibility dialog to reappear immediately after dismissal.
+            // The user can explicitly request access from Settings instead.
+            NSLog("[MediaKeyInterceptor] Accessibility permission not granted — waiting for explicit user action.")
             return
         }
 

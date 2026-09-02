@@ -49,6 +49,8 @@
     <string>SuperIsland needs location access for weather information.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>SuperIsland needs microphone access for audio visualization and Teleprompter word tracking.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>SuperIsland uses screen capture only to generate local window previews for Dock and Cmd-Tab.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>SuperIsland uses speech recognition to follow along with Teleprompter scripts as you read.</string>
     <key>NSAppleEventsUsageDescription</key>

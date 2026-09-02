@@ -7,6 +7,7 @@ struct AlbumArtView: View {
     var size: CGFloat = 56
     var cornerRadius: CGFloat? = nil
     @State private var averageGlowColor: Color = .clear
+    @State private var colorGeneration: UInt64 = 0
 
     var body: some View {
         ZStack {
@@ -38,9 +39,16 @@ struct AlbumArtView: View {
         .onAppear {
             updateAverageGlowColor()
         }
-        .onChange(of: image?.tiffRepresentation) { _, _ in
+        .onChange(of: imageIdentity) { _, _ in
             updateAverageGlowColor()
         }
+        .onDisappear {
+            colorGeneration &+= 1
+        }
+    }
+
+    private var imageIdentity: ObjectIdentifier? {
+        image.map { ObjectIdentifier($0) }
     }
 
     private var resolvedCornerRadius: CGFloat {
@@ -48,12 +56,16 @@ struct AlbumArtView: View {
     }
 
     private func updateAverageGlowColor() {
+        colorGeneration &+= 1
+        let generation = colorGeneration
+
         guard let image else {
             averageGlowColor = .clear
             return
         }
 
         image.averageColor { color in
+            guard generation == colorGeneration else { return }
             averageGlowColor = color.map { nsColor in
                 let boosted = boostedGlowColor(from: nsColor)
                 return Color(nsColor: boosted)
@@ -98,8 +110,10 @@ extension NSImage {
                 return
             }
 
-            let width = cgImage.width
-            let height = cgImage.height
+            // Average-color analysis never needs the source image's full pixel
+            // buffer. Bound the working set before drawing and scanning it.
+            let width = min(cgImage.width, 32)
+            let height = min(cgImage.height, 32)
             let totalPixels = width * height
 
             guard totalPixels > 0,
@@ -118,6 +132,7 @@ extension NSImage {
                 return
             }
 
+            context.interpolationQuality = .medium
             context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
             guard let data = context.data else {

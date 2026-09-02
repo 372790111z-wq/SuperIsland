@@ -1,13 +1,60 @@
 import SwiftUI
 
+enum IslandContentMode: Equatable {
+    case production
+    case windowEnhancementShell
+}
+
+enum IslandShellMetrics {
+    /// Mirrors AppState's compact shell geometry without consulting
+    /// `compactPresentationModule`, whose production path eagerly creates the
+    /// Now Playing/MediaRemote stack.
+    @MainActor
+    static func compactSurfaceSize(for appState: AppState) -> CGSize {
+        if appState.presentationHasNotch {
+            return CGSize(
+                width: max(Constants.compactNotchMinimumWidth, CGFloat(appState.compactIslandWidth)),
+                height: max(Constants.compactNotchMinimumHeight, CGFloat(appState.compactIslandHeight))
+            )
+        }
+
+        let contentSize = Constants.nonNotchCompactSize
+        let topCornerRadius = min(Constants.compactCornerRadius, contentSize.height / 2)
+        return CGSize(
+            width: contentSize.width + topCornerRadius * 2,
+            height: contentSize.height
+        )
+    }
+
+    /// The real island temporarily expands for readable feedback, then returns
+    /// to the production compact geometry. Extra height keeps the message below
+    /// a physical camera notch instead of creating a permanently large debug UI.
+    @MainActor
+    static func feedbackSurfaceSize(for appState: AppState) -> CGSize {
+        let compactSize = compactSurfaceSize(for: appState)
+        return CGSize(
+            width: max(360, compactSize.width),
+            height: max(56, compactSize.height)
+        )
+    }
+}
+
 struct IslandContainerView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var windowEnhancementPreferences = WindowEnhancementPreferences.shared
     @State private var isHoveringIslandSurface = false
     @State private var isHoveringPreviousButton = false
     @State private var isHoveringNextButton = false
     @State private var isShelfDropTargeted = false
     @State private var shelfDragEndWorkItem: DispatchWorkItem?
+    @State private var windowEnhancementFeedback: WindowEnhancementFeedbackEvent?
+    @State private var windowEnhancementFeedbackDismissWorkItem: DispatchWorkItem?
     private let hoverValidationTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+    let contentMode: IslandContentMode
+
+    init(contentMode: IslandContentMode = .production) {
+        self.contentMode = contentMode
+    }
 
     var body: some View {
         // No GeometryReader — just like NotchDrop. The surface sizes
@@ -30,15 +77,30 @@ struct IslandContainerView: View {
             setCycleButtonHover(false, forward: true)
         }
         .onReceive(hoverValidationTimer) { _ in
+            guard contentMode == .production else { return }
             guard appState.isHovering || appState.currentState != .compact else { return }
             validateHoverState()
+        }
+        .onReceive(windowEnhancementPreferences.$feedbackEvent.compactMap { $0 }) { event in
+            presentWindowEnhancementFeedback(event)
+        }
+        .onDisappear {
+            windowEnhancementFeedbackDismissWorkItem?.cancel()
+            windowEnhancementFeedbackDismissWorkItem = nil
         }
     }
 
     // MARK: - Surface
 
     private var islandSurface: some View {
-        let surfaceSize = appState.currentSize
+        let surfaceSize: CGSize
+        if contentMode == .windowEnhancementShell {
+            surfaceSize = windowEnhancementFeedback == nil
+                ? IslandShellMetrics.compactSurfaceSize(for: appState)
+                : IslandShellMetrics.feedbackSurfaceSize(for: appState)
+        } else {
+            surfaceSize = appState.currentSize
+        }
         return ZStack(alignment: .top) {
             islandShape
                 .fill(
@@ -69,7 +131,7 @@ struct IslandContainerView: View {
             y: keyShadowYOffset
         )
         .overlay {
-            if appState.shelfEnabled && isShelfDropTargeted {
+            if contentMode == .production && appState.shelfEnabled && isShelfDropTargeted {
                 islandShape
                     .stroke(Color.accentColor.opacity(0.92), style: StrokeStyle(lineWidth: 3, dash: [10]))
                     .padding(1)
@@ -77,7 +139,7 @@ struct IslandContainerView: View {
         }
         .contentShape(islandShape)
         .modifier(IslandSurfaceSwipeModifier(
-            enabled: appState.islandSurfaceSwipeEnabled,
+            enabled: contentMode == .production && appState.islandSurfaceSwipeEnabled,
             isCompact: appState.currentState == .compact,
             onTrackpad: { handleHorizontalSwipe($0) },
             onDragEnded: { handleSwipe(value: $0) }
@@ -91,11 +153,15 @@ struct IslandContainerView: View {
         .gesture(
             LongPressGesture(minimumDuration: 0.5)
                 .onEnded { _ in
-                    AppDelegate.showSettingsWindow()
+                    AppDelegate.showSettingsWindow(
+                        initialPane: contentMode == .windowEnhancementShell
+                            ? .windowEnhancement
+                            : .general
+                    )
                 }
         )
         .onDrop(of: ShelfStore.acceptedDropTypes, isTargeted: $isShelfDropTargeted) { providers in
-            guard appState.shelfEnabled else { return false }
+            guard contentMode == .production, appState.shelfEnabled else { return false }
             return ShelfStore.shared.handleDrop(providers: providers) { addedCount in
                 guard addedCount > 0 else { return }
                 shelfDragEndWorkItem?.cancel()
@@ -104,12 +170,33 @@ struct IslandContainerView: View {
             }
         }
         .animation(islandSurfaceAnimation, value: appState.activeModule)
+        .animation(windowEnhancementFeedbackAnimation, value: windowEnhancementFeedback?.id)
     }
 
     // MARK: - Content
 
     @ViewBuilder
     private var islandContent: some View {
+        if contentMode == .windowEnhancementShell {
+            windowEnhancementFeedbackContent
+                .id(windowEnhancementFeedback?.id ?? 0)
+                .transition(windowEnhancementFeedbackTransition)
+        } else {
+            ZStack(alignment: .bottom) {
+                productionIslandContent
+
+                if shouldShowWindowEnhancementFeedback {
+                    windowEnhancementFeedbackContent
+                        .id(windowEnhancementFeedback?.id ?? 0)
+                        .transition(windowEnhancementFeedbackTransition)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var productionIslandContent: some View {
         if appState.currentState == .compact {
             CompactView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -120,6 +207,93 @@ struct IslandContainerView: View {
                 .opacity(compactContentOpacity)
                 .transition(contentTransition(scale: 0.5))
         }
+    }
+
+    private var shouldShowWindowEnhancementFeedback: Bool {
+        contentMode == .production &&
+            appState.currentState != .compact &&
+            windowEnhancementFeedback != nil
+    }
+
+    @ViewBuilder
+    private var windowEnhancementFeedbackContent: some View {
+        let message = windowEnhancementFeedback?.message
+            ?? WindowEnhancementPreferences.islandReadyMessage
+        let content = HStack(spacing: 8) {
+            Circle()
+                .fill(Color(red: 0.20, green: 0.84, blue: 0.49))
+                .frame(width: 7, height: 7)
+                .shadow(color: Color.green.opacity(0.45), radius: 5)
+
+            Text(message)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.94))
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(message)
+
+        if contentMode == .windowEnhancementShell {
+            content
+                .padding(.horizontal, 18)
+                .padding(.bottom, appState.presentationHasNotch ? 7 : 0)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: appState.presentationHasNotch ? .bottom : .center
+                )
+        } else {
+            content
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.10), in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.13), lineWidth: 0.5))
+                .padding(.horizontal, 24)
+                .padding(.bottom, 10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+    }
+
+    private var windowEnhancementFeedbackTransition: AnyTransition {
+        appState.shouldReduceMotion
+            ? .opacity
+            : .scale(scale: 0.94, anchor: .center).combined(with: .opacity)
+    }
+
+    private func presentWindowEnhancementFeedback(_ event: WindowEnhancementFeedbackEvent) {
+        // Compact production islands may be hidden behind a physical notch and
+        // have no room for a readable message. WindowEnhancementController uses
+        // its standalone HUD there. Only expanded production islands consume
+        // the event as a non-interactive overlay over the original module page.
+        guard contentMode == .windowEnhancementShell || (
+            appState.currentState != .compact &&
+            IslandWindowController.canPresentWindowEnhancementFeedback
+        ) else {
+            return
+        }
+        windowEnhancementFeedbackDismissWorkItem?.cancel()
+
+        withAnimation(windowEnhancementFeedbackAnimation) {
+            windowEnhancementFeedback = event
+        }
+
+        let eventID = event.id
+        let workItem = DispatchWorkItem {
+            guard windowEnhancementFeedback?.id == eventID else { return }
+            withAnimation(windowEnhancementFeedbackAnimation) {
+                windowEnhancementFeedback = nil
+            }
+            windowEnhancementFeedbackDismissWorkItem = nil
+        }
+        windowEnhancementFeedbackDismissWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.1, execute: workItem)
+    }
+
+    private var windowEnhancementFeedbackAnimation: Animation {
+        appState.shouldReduceMotion
+            ? .easeOut(duration: 0.10)
+            : .spring(response: 0.24, dampingFraction: 0.88)
     }
 
     // MARK: - Shape
@@ -267,6 +441,10 @@ struct IslandContainerView: View {
     }
 
     private func handleSurfaceTap() {
+        if contentMode == .windowEnhancementShell {
+            AppDelegate.showSettingsWindow(initialPane: .windowEnhancement)
+            return
+        }
         if handleNotificationTapIfNeeded() {
             return
         }
@@ -302,7 +480,7 @@ struct IslandContainerView: View {
     // MARK: - Shelf Drop
 
     private func handleShelfDropTargetChange(_ isTargeted: Bool) {
-        guard appState.shelfEnabled else { return }
+        guard contentMode == .production, appState.shelfEnabled else { return }
 
         if isTargeted {
             shelfDragEndWorkItem?.cancel()
@@ -324,7 +502,9 @@ struct IslandContainerView: View {
     // MARK: - Module Cycler
 
     private var showModuleCycler: Bool {
-        appState.currentState != .compact && enabledModuleCount > 1
+        contentMode == .production &&
+            appState.currentState != .compact &&
+            enabledModuleCount > 1
     }
 
     private var enabledModuleCount: Int {
@@ -384,6 +564,7 @@ struct IslandContainerView: View {
     }
 
     private func handleSurfaceHover(phase: HoverPhase) {
+        guard contentMode == .production else { return }
         switch phase {
         case .active:
             setIslandSurfaceHover(true)

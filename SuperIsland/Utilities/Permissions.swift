@@ -33,7 +33,7 @@ enum PermissionType: CaseIterable {
     var description: String {
         switch self {
         case .accessibility: return "用于手势检测和系统事件监听"
-        case .screenRecording: return "让 SuperIsland 在屏幕录制中正常显示"
+        case .screenRecording: return "用于生成 Dock 和 Cmd-Tab 的本地窗口缩略图"
         case .calendar: return "在 SuperIsland 中显示即将到来的日程"
         case .notifications: return "在 SuperIsland 中显示支持的通知来源"
         case .microphone: return "用于音频可视化和语音跟读"
@@ -58,12 +58,25 @@ enum PermissionType: CaseIterable {
 
     var isRequired: Bool {
         switch self {
-        case .accessibility, .screenRecording:
+        case .accessibility:
             return true
-        case .calendar, .notifications, .microphone, .speechRecognition, .location, .bluetooth:
+        case .screenRecording, .calendar, .notifications, .microphone, .speechRecognition, .location, .bluetooth:
             return false
         }
     }
+}
+
+/// A user-facing authorization state for permissions whose public macOS APIs
+/// only expose a binary preflight result. The persisted prompt/grant markers
+/// let the settings UI distinguish a first request, a rejected request, and a
+/// permission that was granted to this bundle previously but is no longer
+/// available (for example after replacing an ad-hoc signed debug build).
+enum PermissionAuthorizationState: Equatable {
+    case notRequested
+    case denied
+    case grantedRequiresRestart
+    case granted
+    case revoked
 }
 
 private final class LocationDelegate: NSObject, CLLocationManagerDelegate {
@@ -77,12 +90,30 @@ private final class LocationDelegate: NSObject, CLLocationManagerDelegate {
 final class PermissionsManager {
     static let shared = PermissionsManager()
     private static let accessibilityPromptedDefaultsKey = "permissions.accessibilityPrompted"
+    private static let accessibilityGrantedDefaultsKey = "permissions.accessibilityWasGranted"
+    private static let screenRecordingPromptedDefaultsKey = "permissions.screenRecordingPrompted"
+    private static let screenRecordingGrantedDefaultsKey = "permissions.screenRecordingWasGranted"
+    /// ScreenCaptureKit authorization granted after launch does not become
+    /// usable until the process restarts. Keep the launch state separate from
+    /// the live preflight result so settings can explain that transition.
+    let screenRecordingGrantedAtProcessLaunch: Bool
     private var locationManager: CLLocationManager?
     private let locationDelegate = LocationDelegate()
     private var calendarStore: EKEventStore?
     private var bluetoothTrigger: CBCentralManager?
 
-    private init() {}
+    private init() {
+        screenRecordingGrantedAtProcessLaunch = CGPreflightScreenCaptureAccess()
+    }
+
+    /// Permission checks may run repeatedly while settings are visible.
+    /// Avoid broadcasting a defaults change when the one-way marker is
+    /// already true; global settings observers otherwise wake on every poll.
+    private func markDefaultsFlag(_ key: String) {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: key) else { return }
+        defaults.set(true, forKey: key)
+    }
 
     // MARK: - Unified API
 
@@ -134,25 +165,73 @@ final class PermissionsManager {
 
     func checkAccessibility() -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        let granted = AXIsProcessTrustedWithOptions(options)
+        if granted {
+            markDefaultsFlag(Self.accessibilityGrantedDefaultsKey)
+        }
+        return granted
+    }
+
+    func accessibilityAuthorizationState() -> PermissionAuthorizationState {
+        if checkAccessibility() {
+            return .granted
+        }
+
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: Self.accessibilityGrantedDefaultsKey) {
+            return .revoked
+        }
+        if defaults.bool(forKey: Self.accessibilityPromptedDefaultsKey) {
+            return .denied
+        }
+        return .notRequested
     }
 
     func requestAccessibility() {
-        guard !AXIsProcessTrusted() else { return }
-        UserDefaults.standard.set(true, forKey: Self.accessibilityPromptedDefaultsKey)
+        if AXIsProcessTrusted() {
+            markDefaultsFlag(Self.accessibilityGrantedDefaultsKey)
+            return
+        }
+        markDefaultsFlag(Self.accessibilityPromptedDefaultsKey)
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
+        if AXIsProcessTrustedWithOptions(options) {
+            markDefaultsFlag(Self.accessibilityGrantedDefaultsKey)
+        }
     }
 
     // MARK: - Screen Recording
 
     func checkScreenRecording() -> Bool {
-        CGPreflightScreenCaptureAccess()
+        let granted = CGPreflightScreenCaptureAccess()
+        if granted {
+            markDefaultsFlag(Self.screenRecordingGrantedDefaultsKey)
+        }
+        return granted
+    }
+
+    func screenRecordingAuthorizationState() -> PermissionAuthorizationState {
+        if checkScreenRecording() {
+            return screenRecordingGrantedAtProcessLaunch ? .granted : .grantedRequiresRestart
+        }
+
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: Self.screenRecordingGrantedDefaultsKey) {
+            return .revoked
+        }
+        if defaults.bool(forKey: Self.screenRecordingPromptedDefaultsKey) {
+            return .denied
+        }
+        return .notRequested
     }
 
     @discardableResult
     func requestScreenRecordingAccess() -> Bool {
-        CGRequestScreenCaptureAccess()
+        markDefaultsFlag(Self.screenRecordingPromptedDefaultsKey)
+        let granted = CGRequestScreenCaptureAccess()
+        if granted {
+            markDefaultsFlag(Self.screenRecordingGrantedDefaultsKey)
+        }
+        return granted
     }
 
     // MARK: - Calendar

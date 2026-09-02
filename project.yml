@@ -26,6 +26,10 @@ targets:
         excludes:
           - "**/.DS_Store"
           - "**/*.md"
+      - path: prototype/assets/settings-previews
+        buildPhase: resources
+      - path: prototype/assets/settings-layouts
+        buildPhase: resources
     dependencies:
       - package: Aptabase
     settings:
@@ -46,6 +50,8 @@ targets:
         com.apple.security.personal-information.calendars: true
         com.apple.security.personal-information.location: true
         com.apple.security.automation.apple-events: true
+        com.apple.security.device.audio-input: true
+        com.apple.security.personal-information.speech-recognition: true
     postCompileScripts:
       - name: "Copy Built-in Extensions"
         basedOnDependencyAnalysis: false
@@ -76,3 +82,15 @@ targets:
                 "${SRC}/" "${DEST}/${ext}/"
             fi
           done
+  SuperIslandWindowEnhancementTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: SuperIslandTests
+    dependencies:
+      - target: SuperIsland
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.workview.SuperIsland.WindowEnhancementTests
+        GENERATE_INFOPLIST_FILE: true
+        CODE_SIGNING_ALLOWED: false

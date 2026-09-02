@@ -4,6 +4,11 @@ final class IslandPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     private static let showInScreenRecordingsDefaultsKey = "general.showInScreenRecordings"
+    private static let requiredCollectionBehavior: NSWindow.CollectionBehavior = [
+        .fullScreenAuxiliary,
+        .stationary,
+        .ignoresCycle
+    ]
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if QuitHotkeyGuard.shouldBlock(event) {
@@ -13,7 +18,7 @@ final class IslandPanel: NSPanel {
         return super.performKeyEquivalent(with: event)
     }
 
-    init() {
+    init(showOnAllSpaces: Bool) {
         let initialCompactSize = ScreenDetector.primaryScreen
             .flatMap(ScreenDetector.compactIslandMetrics(screen:))?
             .size ?? Constants.compactSize
@@ -30,7 +35,7 @@ final class IslandPanel: NSPanel {
         )
 
         level = .statusBar
-        collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        setShowOnAllSpaces(showOnAllSpaces)
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
@@ -50,5 +55,19 @@ final class IslandPanel: NSPanel {
 
     func setVisibleInScreenRecordings(_ visible: Bool) {
         sharingType = visible ? .readOnly : .none
+    }
+
+    /// Keep the island eligible as an auxiliary full-screen panel without
+    /// forcing it onto every regular Space when the user disables that
+    /// setting. Replacing the option set also prevents stale Space behavior
+    /// from surviving a settings toggle.
+    func setShowOnAllSpaces(_ showOnAllSpaces: Bool) {
+        var behavior = Self.requiredCollectionBehavior
+        if showOnAllSpaces {
+            behavior.insert(.canJoinAllSpaces)
+        }
+        if collectionBehavior != behavior {
+            collectionBehavior = behavior
+        }
     }
 }
