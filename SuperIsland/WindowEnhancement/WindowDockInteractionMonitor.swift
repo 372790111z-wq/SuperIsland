@@ -10,6 +10,76 @@ private struct DockAXHitSnapshot: Sendable {
     let quartzFrame: CGRect?
 }
 
+struct DockApplicationIdentityCandidate: Equatable {
+    let processIdentifier: pid_t
+    let bundleIdentifier: String?
+    let bundlePath: String?
+    let localizedName: String?
+    let isRegular: Bool
+}
+
+/// Resolves a Dock tile to one concrete running process. A copied application
+/// can share its localized name with the original while having a different
+/// bundle identifier and path, so title matching is permitted only when it is
+/// unique. Ambiguity fails closed instead of borrowing the first process's
+/// windows and thumbnails.
+enum DockApplicationIdentityPolicy {
+    static func normalizedApplicationURL(_ url: URL) -> URL? {
+        if url.isFileURL { return url.standardizedFileURL }
+        guard url.scheme == nil else { return nil }
+        let path = url.path.isEmpty ? url.relativeString : url.path
+        guard path.hasPrefix("/") else { return nil }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    static func normalizedApplicationURL(from string: String) -> URL? {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("/") {
+            return URL(fileURLWithPath: trimmed).standardizedFileURL
+        }
+        guard let url = URL(string: trimmed) else { return nil }
+        return normalizedApplicationURL(url)
+    }
+
+    static func selectProcessIdentifier(
+        targetBundleIdentifier: String?,
+        targetBundlePath: String?,
+        title: String,
+        candidates: [DockApplicationIdentityCandidate]
+    ) -> pid_t? {
+        let available = candidates.filter { $0.processIdentifier > 0 && $0.isRegular }
+        if let targetBundlePath {
+            let exact = available.filter { $0.bundlePath == targetBundlePath }
+            if exact.count == 1 { return exact[0].processIdentifier }
+            if exact.count > 1 { return nil }
+        }
+        if let targetBundleIdentifier, !targetBundleIdentifier.isEmpty {
+            let bundleMatches = available.filter {
+                $0.bundleIdentifier?.caseInsensitiveCompare(targetBundleIdentifier)
+                    == .orderedSame
+            }
+            if bundleMatches.count == 1 { return bundleMatches[0].processIdentifier }
+            if bundleMatches.count > 1 { return nil }
+        }
+
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else { return nil }
+        let titleMatches = available.filter { candidate in
+            guard let name = candidate.localizedName?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty else { return false }
+            return name.compare(
+                normalizedTitle,
+                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                range: nil,
+                locale: .current
+            ) == .orderedSame
+        }
+        return titleMatches.count == 1 ? titleMatches[0].processIdentifier : nil
+    }
+}
+
 private final class DockMouseIngress: @unchecked Sendable {
     private let lock = NSLock()
     private var pendingDelivery: (@Sendable () -> Void)?
@@ -118,8 +188,12 @@ private final class DockAXHitResolver: @unchecked Sendable {
             &value
         ) == .success,
         let value else { return nil }
-        if let url = value as? URL { return url }
-        if let string = value as? String { return URL(string: string) }
+        if let url = value as? URL {
+            return DockApplicationIdentityPolicy.normalizedApplicationURL(url)
+        }
+        if let string = value as? String {
+            return DockApplicationIdentityPolicy.normalizedApplicationURL(from: string)
+        }
         return nil
     }
 
@@ -291,7 +365,8 @@ final class WindowDockInteractionMonitor {
         if preferences.isEnabled, preferences.dockPreviewEnabled {
             desiredEventMask.insert(.mouseMoved)
         }
-        if preferences.isEnabled, preferences.dockReverseEnabled {
+        if preferences.isEnabled,
+           preferences.dockPreviewEnabled || preferences.dockReverseEnabled {
             desiredEventMask.formUnion([.leftMouseDown, .leftMouseUp])
         }
         if !desiredEventMask.isEmpty {
@@ -351,12 +426,17 @@ final class WindowDockInteractionMonitor {
                     }
                 }
             } else {
-                DispatchQueue.main.async { [weak self] in
+                // Local monitors run on the AppKit event thread. Route a click
+                // in our non-key preview synchronously and consume it before it
+                // can fall through to the window behind the panel. AX actions
+                // remain deferred by the row closures after the paired release.
+                let consumed = MainActor.assumeIsolated { [weak self] in
                     guard let self,
                           self.monitorGeneration == generation,
-                          self.localMonitor != nil else { return }
-                    self.accept(compactEvent)
+                          self.localMonitor != nil else { return false }
+                    return self.accept(compactEvent)
                 }
+                return consumed ? nil : event
             }
             return event
         }
@@ -414,7 +494,8 @@ final class WindowDockInteractionMonitor {
         )
     }
 
-    private func accept(_ event: MonitoredDockEvent) {
+    @discardableResult
+    private func accept(_ event: MonitoredDockEvent) -> Bool {
         if let previous = lastAcceptedMonitorEvent,
            previous.source != event.source,
            previous.kind == event.kind,
@@ -425,7 +506,7 @@ final class WindowDockInteractionMonitor {
             // App events. If macOS mirrors one native event to both, accept it
             // only once so reverse actions and hover generations do not toggle
             // twice.
-            return
+            return event.kind != .mouseMoved && preview.contains(event.appKitLocation)
         }
         lastAcceptedMonitorEvent = event
 
@@ -435,10 +516,29 @@ final class WindowDockInteractionMonitor {
                 quartzLocation: event.quartzLocation,
                 appKitLocation: event.appKitLocation
             )
+            return false
         case .leftMouseDown:
+            if preview.handleExternalPointer(
+                type: .leftMouseDown,
+                at: event.appKitLocation
+            ) {
+                cancelInspection()
+                cancelScheduledHide()
+                return true
+            }
             handleMouseDown(quartzLocation: event.quartzLocation)
+            return false
         case .leftMouseUp:
+            if preview.handleExternalPointer(
+                type: .leftMouseUp,
+                at: event.appKitLocation
+            ) {
+                cancelInspection()
+                cancelScheduledHide()
+                return true
+            }
             handleMouseUp(quartzLocation: event.quartzLocation)
+            return false
         }
     }
 
@@ -756,16 +856,15 @@ final class WindowDockInteractionMonitor {
         thumbnailResults: [WindowThumbnailResult?],
         applicationPID: pid_t
     ) -> [DockPreviewRow] {
-        windows.enumerated().compactMap { index, window in
+        windows.enumerated().map { index, window in
             let thumbnailResult = thumbnailResults.indices.contains(index)
                 ? thumbnailResults[index]
                 : nil
-            // The WindowServer inventory already proved identity. Pixels are
-            // the final anti-phantom check: an absent, ambiguous, or visually
-            // blank surface must not turn into a selectable placeholder card.
-            guard thumbnailResult?.isEligibleForWindowCard == true else {
-                return nil
-            }
+            // WindowServer/SkyLight reconciliation is the identity boundary.
+            // A screenshot is presentation data only: capture failure must not
+            // delete a real, actionable window from a multi-window application.
+            // Preview-only discovery below remains fail-closed because it lacks
+            // an AX operation identity.
             return DockPreviewRow(
                 id: window.id,
                 title: window.title,
@@ -1167,40 +1266,46 @@ final class WindowDockInteractionMonitor {
         applicationURL: URL?,
         title: String
     ) -> NSRunningApplication? {
-        if let applicationURL,
-           let bundleID = Bundle(url: applicationURL)?.bundleIdentifier {
-            let candidates = NSRunningApplication.runningApplications(
-                withBundleIdentifier: bundleID
-            ).filter { !$0.isTerminated && $0.activationPolicy != .prohibited }
-            let targetPath = applicationURL.standardizedFileURL
-                .resolvingSymlinksInPath().path
-            if let exact = candidates.first(where: {
-                $0.bundleURL?.standardizedFileURL
-                    .resolvingSymlinksInPath().path == targetPath
-            }) {
-                return exact
-            }
-            // Preserve the historical regular-App fallback when LaunchServices
-            // reports a canonicalized URL that differs from Dock's AXURL.
-            if let regular = candidates.first(where: {
-                $0.activationPolicy == .regular
-            }) {
-                return regular
-            }
+        let normalizedURL = applicationURL.flatMap(
+            DockApplicationIdentityPolicy.normalizedApplicationURL
+        )
+        let targetPath = normalizedURL?.resolvingSymlinksInPath().path
+        let targetBundleIdentifier = normalizedURL.flatMap {
+            Bundle(url: $0)?.bundleIdentifier
         }
-        guard !title.isEmpty else { return nil }
-        return NSWorkspace.shared.runningApplications.first(where: {
-            guard $0.activationPolicy == .regular, let name = $0.localizedName else { return false }
-            return name == title || title.hasPrefix(name) || name.hasPrefix(title)
-        })
+        let runningApplications = NSWorkspace.shared.runningApplications.filter {
+            !$0.isTerminated && $0.activationPolicy != .prohibited
+        }
+        let candidates = runningApplications.map { application in
+            DockApplicationIdentityCandidate(
+                processIdentifier: application.processIdentifier,
+                bundleIdentifier: application.bundleIdentifier,
+                bundlePath: application.bundleURL?.standardizedFileURL
+                    .resolvingSymlinksInPath().path,
+                localizedName: application.localizedName,
+                isRegular: application.activationPolicy == .regular
+            )
+        }
+        guard let processIdentifier = DockApplicationIdentityPolicy
+            .selectProcessIdentifier(
+                targetBundleIdentifier: targetBundleIdentifier,
+                targetBundlePath: targetPath,
+                title: title,
+                candidates: candidates
+            ) else { return nil }
+        return NSRunningApplication(processIdentifier: processIdentifier)
     }
 
     private func urlAttribute(_ name: String, of element: AXUIElement) -> URL? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
               let value else { return nil }
-        if let url = value as? URL { return url }
-        if let string = value as? String { return URL(string: string) }
+        if let url = value as? URL {
+            return DockApplicationIdentityPolicy.normalizedApplicationURL(url)
+        }
+        if let string = value as? String {
+            return DockApplicationIdentityPolicy.normalizedApplicationURL(from: string)
+        }
         return nil
     }
 
@@ -1715,6 +1820,22 @@ private final class DockWindowPreviewController {
                 panel.animator().alphaValue = 1
             }
         }
+        // SwiftUI publishes each card's AppKit frame on the next layout pass.
+        // Perform one bounded relayout now and one on the next run-loop turn so
+        // a pointer that entered during presentation is re-evaluated without a
+        // second physical move or click.
+        contentView.layoutSubtreeIfNeeded()
+        let generation = visibilityGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.visibilityGeneration == generation,
+                  self.panel.isVisible else { return }
+            self.contentView.layoutSubtreeIfNeeded()
+            _ = self.handleExternalPointer(
+                type: .mouseMoved,
+                at: NSEvent.mouseLocation
+            )
+        }
     }
 
     func hide(animated: Bool = false) {
@@ -1757,13 +1878,24 @@ private final class DockWindowPreviewController {
     }
 
     func observePointer(at location: CGPoint) {
-        guard panel.isVisible else { return }
+        _ = handleExternalPointer(type: .mouseMoved, at: location)
+    }
+
+    @discardableResult
+    func handleExternalPointer(type: NSEvent.EventType, at location: CGPoint) -> Bool {
+        guard panel.isVisible else { return false }
         guard panel.frame.contains(location) else {
-            contentModel.handlePointer(.mouseExited, at: .zero)
-            return
+            if type == .mouseMoved || type == .mouseExited {
+                contentModel.handlePointer(.mouseExited, at: .zero)
+            }
+            return false
         }
         let point = panel.convertPoint(fromScreen: location)
-        contentModel.handlePointer(.mouseMoved, at: CGPoint(x: point.x, y: contentView.bounds.height - point.y))
+        contentModel.handlePointer(
+            type,
+            at: CGPoint(x: point.x, y: contentView.bounds.height - point.y)
+        )
+        return true
     }
 
     private func rescheduleRecentCacheExpiration() {

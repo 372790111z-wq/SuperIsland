@@ -1014,11 +1014,12 @@ final class WindowCommandTabMonitor {
                         for: self.candidates[captureIndex]
                       ) == captureApplicationIdentities,
                       self.thumbnailCaptureGeneration == captureGeneration else { return }
-                let (validatedWindows, validatedThumbnails) = self
-                    .removingStaleUncorroboratedWindows(
-                        from: self.candidates[captureIndex].windows,
-                        thumbnails: completedThumbnails
-                    )
+                // These candidates already passed AX + WindowServer/SkyLight
+                // reconciliation. Thumbnail capture is presentation data and
+                // cannot remove a real window merely because its pixels are
+                // unavailable, uniform, or temporarily ambiguous.
+                let validatedWindows = self.candidates[captureIndex].windows
+                let validatedThumbnails = completedThumbnails
                 self.candidates[captureIndex] = Candidate(
                     applications: self.candidates[captureIndex].applications,
                     windows: validatedWindows
@@ -1036,23 +1037,6 @@ final class WindowCommandTabMonitor {
                 self.thumbnailCaptureTask = nil
             }
         }
-    }
-
-    private func removingStaleUncorroboratedWindows(
-        from windows: [WindowCandidate],
-        thumbnails: [WindowThumbnailResult?]
-    ) -> ([WindowCandidate], [WindowThumbnailResult?]) {
-        guard windows.count == thumbnails.count else {
-            return (windows, thumbnails)
-        }
-        var validatedWindows: [WindowCandidate] = []
-        var validatedThumbnails: [WindowThumbnailResult?] = []
-        for (window, thumbnail) in zip(windows, thumbnails) {
-            guard thumbnail?.isEligibleForWindowCard == true else { continue }
-            validatedWindows.append(window)
-            validatedThumbnails.append(thumbnail)
-        }
-        return (validatedWindows, validatedThumbnails)
     }
 
     /// AXFocusedWindow/AXMainWindow/AXWindows can all be transiently empty
@@ -3452,6 +3436,7 @@ private final class CommandTabOverlayController {
         onHoverWindow: @escaping (Int, Int) -> Void,
         onCloseWindow: @escaping (Int, Int) -> Void
     ) {
+        interactionGeneration &+= 1
         guard !items.isEmpty,
               let selectedItemIndex = items.firstIndex(where: { $0.id == selectedIndex }),
               let convertedAnchor = appKitFrame(fromAXFrame: anchorAXFrame) else {
@@ -3507,6 +3492,19 @@ private final class CommandTabOverlayController {
         // Dock owns and draws the native application strip. SuperIsland adds
         // only the selected application's window preview above it.
         previewPanel.orderFrontRegardless()
+        previewContentView.layoutSubtreeIfNeeded()
+        let generation = interactionGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.interactionGeneration == generation,
+                  self.previewPanel.isVisible else { return }
+            self.previewContentView.layoutSubtreeIfNeeded()
+            _ = self.handleExternalPointer(
+                type: .mouseMoved,
+                at: NSEvent.mouseLocation,
+                deferAction: true
+            )
+        }
     }
 
     func hide() {

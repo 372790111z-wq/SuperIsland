@@ -955,8 +955,7 @@ enum WindowThumbnailProvider {
     }
 
     private enum RelatedRendererMatch {
-        case matched(RelatedRendererCandidate)
-        case ambiguous
+        case matched([RelatedRendererCandidate])
         case notFound
     }
 
@@ -964,8 +963,9 @@ enum WindowThumbnailProvider {
     /// route requires a child/grandchild process whose executable is sealed
     /// inside the target App bundle. A same-launch sibling with a specific
     /// bundle namespace is retained for older split-process Apps. Both routes
-    /// still require strong WindowServer geometry, and comparable candidates
-    /// are rejected as ambiguous.
+    /// still require strong WindowServer geometry; a bounded set of comparable
+    /// compositor surfaces may be tried because only substantive pixels are
+    /// accepted by the capture boundary.
     private static func relatedRendererMatch(
         for shellWindow: SCWindow,
         applicationIdentity: WindowThumbnailApplicationIdentity,
@@ -1070,13 +1070,16 @@ enum WindowThumbnailProvider {
             return $0.score < $1.score
         }
         guard let best = sorted.first else { return .notFound }
-        if sorted.count > 1 {
-            let runnerUp = sorted[1]
-            let effectivelyTied = runnerUp.score <= best.score + 12 &&
-                abs(runnerUp.overlap - best.overlap) <= 0.04
-            guard !effectivelyTied else { return .ambiguous }
+        // Multi-process UI frameworks can publish several same-geometry child
+        // surfaces for one actionable shell. Every candidate here already has
+        // verified process ancestry, bundle containment, and strong geometry,
+        // so try only the bounded near-best set until one yields substantive
+        // pixels. Treating this normal compositor stack as identity ambiguity
+        // made WeChat and similar Apps permanently unpreviewable.
+        let nearBest = sorted.filter {
+            $0.score <= best.score + 12 && abs($0.overlap - best.overlap) <= 0.04
         }
-        return .matched(best)
+        return .matched(Array(nearBest.prefix(4)))
     }
 
     private static func sharesBundleNamespace(
@@ -1102,35 +1105,32 @@ enum WindowThumbnailProvider {
         switch match {
         case .notFound:
             return nil
-        case .ambiguous:
-            logger.info(
-                "Renderer preview match is ambiguous pid=\(applicationIdentity.processIdentifier, privacy: .public) shell=\(shellWindow.windowID, privacy: .public)"
-            )
-            return .ambiguous
-        case let .matched(candidate):
-            let image = await capture(window: candidate.window)
-            guard !Task.isCancelled,
-                  cacheGenerationSnapshot() == expectedCacheGeneration,
-                  applicationIdentity.matchesCurrentProcess(),
-                  processSnapshot(
+        case let .matched(candidates):
+            for candidate in candidates {
+                guard !Task.isCancelled,
+                      cacheGenerationSnapshot() == expectedCacheGeneration,
+                      applicationIdentity.matchesCurrentProcess() else {
+                    return .captureFailed
+                }
+                guard processSnapshot(
                     of: candidate.processSnapshot.processIdentifier
-                  ) == candidate.processSnapshot else {
-                return .captureFailed
+                ) == candidate.processSnapshot else { continue }
+                switch authorizationState() {
+                case .permissionRequired: return .permissionRequired
+                case .restartRequired: return .restartRequired
+                case .authorized: break
+                }
+                guard let image = await capture(window: candidate.window) else {
+                    continue
+                }
+                // Do not place cross-process fallback pixels in the ordinary
+                // cache. Renderer lifetime is independent of the AX shell.
+                logger.debug(
+                    "Used related Renderer preview targetPID=\(applicationIdentity.processIdentifier, privacy: .public) rendererPID=\(candidate.processSnapshot.processIdentifier, privacy: .public) shell=\(shellWindow.windowID, privacy: .public) renderer=\(candidate.window.windowID, privacy: .public) candidates=\(candidates.count, privacy: .public)"
+                )
+                return .fresh(image)
             }
-            switch authorizationState() {
-            case .permissionRequired: return .permissionRequired
-            case .restartRequired: return .restartRequired
-            case .authorized: break
-            }
-            guard let image else { return .captureFailed }
-            // Do not place cross-process fallback pixels in the ordinary cache.
-            // The Renderer can disappear while its Dock service shell survives;
-            // the persistent preview model already retains this fresh image for
-            // the current hover and releases it when the panel hides.
-            logger.debug(
-                "Used related Renderer preview targetPID=\(applicationIdentity.processIdentifier, privacy: .public) rendererPID=\(candidate.processSnapshot.processIdentifier, privacy: .public) shell=\(shellWindow.windowID, privacy: .public) renderer=\(candidate.window.windowID, privacy: .public)"
-            )
-            return .fresh(image)
+            return .captureFailed
         }
     }
 
