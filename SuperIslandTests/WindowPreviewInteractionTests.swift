@@ -115,7 +115,7 @@ final class WindowPreviewInteractionTests: XCTestCase {
     func testTrackingViewAcceptsFirstClickWithoutActivation() {
         let view = WindowPreviewTrackingView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
         XCTAssertTrue(view.acceptsFirstMouse(for: nil))
-        XCTAssertTrue(view.needsPanelToBecomeKey)
+        XCTAssertFalse(view.needsPanelToBecomeKey)
         view.updateTrackingAreas()
         XCTAssertEqual(view.trackingAreas.count, 1)
         XCTAssertTrue(view.trackingAreas[0].options.contains(.activeAlways))
@@ -124,7 +124,7 @@ final class WindowPreviewInteractionTests: XCTestCase {
         XCTAssertEqual(view.trackingAreas.count, 1)
     }
 
-    func testNonactivatingPreviewPanelCanReceiveFirstClick() {
+    func testNonactivatingPreviewPanelNeverStealsSystemFocus() {
         let panel = WindowPreviewInteractionPanel(
             contentRect: CGRect(x: 0, y: 0, width: 100, height: 100),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -133,7 +133,7 @@ final class WindowPreviewInteractionTests: XCTestCase {
         )
         panel.isReleasedWhenClosed = false
         defer { panel.close() }
-        XCTAssertTrue(panel.canBecomeKey)
+        XCTAssertFalse(panel.canBecomeKey)
         XCTAssertFalse(panel.canBecomeMain)
         XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
     }
@@ -336,6 +336,78 @@ final class WindowPreviewInteractionTests: XCTestCase {
         model.handlePointer(.leftMouseUp, at: closeA)
         XCTAssertNil(model.hoveredRowID)
         XCTAssertEqual(closed, 1)
+    }
+
+    func testDockModelKeepsCanonicalWindowWhenThumbnailCaptureFails() {
+        let model = DockWindowPreviewModel()
+        let row = DockPreviewRow(
+            id: 100,
+            title: "Real window",
+            isMinimized: false,
+            canActivate: true,
+            isPreviewOnly: false,
+            canClose: true,
+            thumbnailResult: .captureFailed,
+            action: {},
+            closeAction: {}
+        )
+        model.update(appName: "Test", icon: nil, rows: [row], canManageWindows: true)
+        XCTAssertEqual(model.content.rows.map(\.id), [100])
+    }
+
+    func testDockIdentityUsesExactPathForSameNamedApplications() {
+        let candidates = [
+            DockApplicationIdentityCandidate(
+                processIdentifier: 10,
+                bundleIdentifier: "com.example.chat",
+                bundlePath: "/Applications/Chat.app",
+                localizedName: "Chat",
+                isRegular: true
+            ),
+            DockApplicationIdentityCandidate(
+                processIdentifier: 20,
+                bundleIdentifier: "com.example.chat.work",
+                bundlePath: "/Applications/Chat-Work.app",
+                localizedName: "Chat",
+                isRegular: true
+            )
+        ]
+        XCTAssertEqual(
+            DockApplicationIdentityPolicy.selectProcessIdentifier(
+                targetBundleIdentifier: "com.example.chat.work",
+                targetBundlePath: "/Applications/Chat-Work.app",
+                title: "Chat",
+                candidates: candidates
+            ),
+            20
+        )
+    }
+
+    func testDockIdentityRejectsAmbiguousSameNameWithoutURL() {
+        let candidates = [10, 20].map {
+            DockApplicationIdentityCandidate(
+                processIdentifier: pid_t($0),
+                bundleIdentifier: "com.example.chat.\($0)",
+                bundlePath: "/Applications/Chat-\($0).app",
+                localizedName: "Chat",
+                isRegular: true
+            )
+        }
+        XCTAssertNil(DockApplicationIdentityPolicy.selectProcessIdentifier(
+            targetBundleIdentifier: nil,
+            targetBundlePath: nil,
+            title: "Chat",
+            candidates: candidates
+        ))
+    }
+
+    func testDockIdentityNormalizesPlainFilesystemPath() {
+        XCTAssertEqual(
+            DockApplicationIdentityPolicy.normalizedApplicationURL(
+                from: "/Applications/Chat-Work.app"
+            )?.path,
+            "/Applications/Chat-Work.app"
+        )
     }
 
     func testPreviewOnlySelectionNeverManufacturesMultipleWindowCards() {
