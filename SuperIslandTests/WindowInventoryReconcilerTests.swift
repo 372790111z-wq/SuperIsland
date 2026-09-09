@@ -4,6 +4,104 @@ import XCTest
 @testable import SuperIsland
 
 final class WindowInventoryReconcilerTests: XCTestCase {
+    func testWindowDescriptionQueryReceivesRawUnsignedWindowIDs() {
+        let ids: [CGWindowID] = [196, 0, 0x8000_0000, .max, 196]
+        var received: [UInt] = []
+        let result = WindowServerWindowDescriptions.copy(for: ids) { array in
+            received = (0..<CFArrayGetCount(array)).map {
+                UInt(bitPattern: CFArrayGetValueAtIndex(array, $0))
+            }
+            return [] as CFArray
+        }
+        XCTAssertEqual(received, ids.map(UInt.init))
+        XCTAssertEqual(result?.count, 0)
+    }
+
+    func testWindowDescriptionQueryPreservesFailureAndSuccessfulEmptyResults() {
+        XCTAssertNil(WindowServerWindowDescriptions.copy(for: [196]) { _ in nil })
+        let empty = WindowServerWindowDescriptions.copy(for: [196]) { _ in [] as CFArray }
+        XCTAssertNotNil(empty)
+        XCTAssertEqual(empty?.count, 0)
+    }
+
+    func testWindowDescriptionQueryAllowsOmittedAndReorderedIDs() {
+        let result = WindowServerWindowDescriptions.copy(for: [196, 197, 198]) { _ in
+            [
+                [kCGWindowNumber as String: NSNumber(value: 198)],
+                [kCGWindowNumber as String: NSNumber(value: 196)]
+            ] as CFArray
+        }
+        XCTAssertEqual(result?.compactMap {
+            ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+        }, [198, 196])
+    }
+
+    func testWindowDescriptionQueryUsesAnEmptyArrayForNoRequestedWindows() {
+        var requestedCount: Int?
+        let result = WindowServerWindowDescriptions.copy(for: []) { array in
+            requestedCount = CFArrayGetCount(array)
+            return [] as CFArray
+        }
+        XCTAssertEqual(requestedCount, 0)
+        XCTAssertEqual(result?.count, 0)
+    }
+
+    @MainActor
+    func testWindowDescriptionQueryFindsAnActualUnshownWindow() async throws {
+        // Allocate a test-owned WindowServer window without ordering it on
+        // screen. This exercises the real API, without user windows or TCC.
+        let window = NSWindow(
+            contentRect: CGRect(x: -16_000, y: -16_000, width: 180, height: 100),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        XCTAssertFalse(window.isVisible)
+        let windowID = try XCTUnwrap(CGWindowID(exactly: window.windowNumber))
+        XCTAssertNotEqual(windowID, kCGNullWindowID)
+        let descriptions = try XCTUnwrap(WindowServerWindowDescriptions.copy(for: [windowID]))
+        XCTAssertEqual(descriptions.count, 1)
+        let description = try XCTUnwrap(descriptions.first)
+        XCTAssertEqual(
+            (description[kCGWindowNumber as String] as? NSNumber)?.uint32Value, windowID
+        )
+        XCTAssertEqual(
+            (description[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, getpid()
+        )
+        XCTAssertFalse(window.isVisible)
+    }
+
+    func testInventoryDiagnosticsAreRestrictedToWE1DebugBundle() {
+        XCTAssertTrue(WindowInventoryDiagnosticGate.isEnabled(
+            bundleIdentifier: "com.workview.SuperIsland.WE1Debug"
+        ))
+        XCTAssertFalse(WindowInventoryDiagnosticGate.isEnabled(
+            bundleIdentifier: "com.workview.SuperIsland"
+        ))
+        XCTAssertFalse(WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: nil))
+    }
+
+    func testInventoryDiagnosticsRateLimitIsDeterministic() {
+        let lastRecordedAt = Date(timeIntervalSince1970: 1_000)
+        XCTAssertFalse(WindowInventoryDiagnosticGate.shouldRecord(
+            now: lastRecordedAt.addingTimeInterval(0.749),
+            lastRecordedAt: lastRecordedAt,
+            minimumInterval: 0.75
+        ))
+        XCTAssertTrue(WindowInventoryDiagnosticGate.shouldRecord(
+            now: lastRecordedAt.addingTimeInterval(0.75),
+            lastRecordedAt: lastRecordedAt,
+            minimumInterval: 0.75
+        ))
+        XCTAssertTrue(WindowInventoryDiagnosticGate.shouldRecord(
+            now: lastRecordedAt,
+            lastRecordedAt: nil,
+            minimumInterval: 0.75
+        ))
+    }
+
     func testHiddenMinimizedAXProxyIsRejected() {
         XCTAssertFalse(WindowAXCandidatePolicy.shouldInclude(
             role: kAXWindowRole as String,
@@ -27,51 +125,6 @@ final class WindowInventoryReconcilerTests: XCTestCase {
             isPreferredWindow: false,
             isHidden: false,
             isVisible: true
-        ))
-    }
-
-    func testUntitledPreferredProxyMergesWithSameRealWindow() {
-        XCTAssertTrue(WindowAXCandidatePolicy.areExactProxies(
-            lhsPID: 100,
-            lhsTitle: "Document",
-            lhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
-            lhsIsMinimized: false,
-            lhsIsPreferredWindow: false,
-            rhsPID: 100,
-            rhsTitle: "",
-            rhsBounds: CGRect(x: 40.5, y: 59.5, width: 900, height: 700),
-            rhsIsMinimized: false,
-            rhsIsPreferredWindow: true
-        ))
-    }
-
-    func testUntitledBackgroundWindowsAtSameGeometryRemainDistinct() {
-        XCTAssertFalse(WindowAXCandidatePolicy.areExactProxies(
-            lhsPID: 100,
-            lhsTitle: "",
-            lhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
-            lhsIsMinimized: false,
-            lhsIsPreferredWindow: false,
-            rhsPID: 100,
-            rhsTitle: "",
-            rhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
-            rhsIsMinimized: false,
-            rhsIsPreferredWindow: false
-        ))
-    }
-
-    func testDifferentTitledWindowsAtSameGeometryRemainDistinct() {
-        XCTAssertFalse(WindowAXCandidatePolicy.areExactProxies(
-            lhsPID: 100,
-            lhsTitle: "A",
-            lhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
-            lhsIsMinimized: false,
-            lhsIsPreferredWindow: true,
-            rhsPID: 100,
-            rhsTitle: "B",
-            rhsBounds: CGRect(x: 40, y: 60, width: 900, height: 700),
-            rhsIsMinimized: false,
-            rhsIsPreferredWindow: false
         ))
     }
 
@@ -397,7 +450,7 @@ final class WindowInventoryReconcilerTests: XCTestCase {
             [surface(id: 10)]
         )
         XCTAssertEqual(result.matches.map(\.token), [0])
-        XCTAssertEqual(result.rejections.last?.reason, .noUniqueSurface)
+        XCTAssertEqual(result.rejections.last?.reason, .duplicateSurface)
     }
 
     func testTwoFuzzyCandidatesMapToDistinctSurfaces() {
@@ -496,20 +549,29 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         XCTAssertEqual(result.matches.first?.windowID, 10)
     }
 
-    func testDifferentTitleCanMatchExactGeometry() {
+    func testDifferentNonemptyTitlesCannotMatchByGeometryAlone() {
         let result = reconcile(
             [candidate(id: nil, title: "AX Title")],
             [surface(id: 10, title: "WindowServer Title")]
         )
-        XCTAssertEqual(result.matches.first?.windowID, 10)
+        XCTAssertTrue(result.matches.isEmpty)
+        XCTAssertEqual(result.rejections.first?.reason, .noUniqueSurface)
     }
 
-    func testExactMinimizedIdentityDoesNotRequireWindowToBeOnScreenOrInASpace() {
-        let result = reconcile(
+    func testExactMinimizedIdentityRequiresValidatedOwnerButNotSpaceMembership() {
+        let unvalidatedOwner = reconcile(
             [candidate(id: 10, minimized: true)],
-            [surface(id: 10, onScreen: false, spaceIDs: [])]
+            [surface(id: 10, onScreen: false, spaceIDs: [7], ownerValidated: false)]
         )
-        XCTAssertEqual(result.matches.first?.windowID, 10)
+        XCTAssertTrue(unvalidatedOwner.matches.isEmpty)
+        XCTAssertEqual(unvalidatedOwner.rejections.first?.reason, .exactWindowMissing)
+
+        let offscreenWithoutSpace = reconcile(
+            [candidate(id: 10, minimized: true)],
+            [surface(id: 10, onScreen: false, spaceIDs: [], ownerValidated: true)]
+        )
+        XCTAssertEqual(offscreenWithoutSpace.matches.first?.windowID, 10)
+        XCTAssertTrue(offscreenWithoutSpace.rejections.isEmpty)
     }
 
     func testExactCrossSpaceIdentityRequiresPrivateSpaceMembership() {
@@ -528,11 +590,34 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         XCTAssertEqual(result.rejections.first?.reason, .exactWindowMissing)
     }
 
-    func testExactOnscreenPrivateSurfaceWithoutSpaceMembershipIsRejected() {
+    func testExactOnscreenPrivateSurfaceDoesNotRequireSpaceMembership() {
         let result = reconcile(
             [candidate(id: 10)],
-            [surface(id: 10, onScreen: true, spaceIDs: [])]
+            [surface(
+                id: 10,
+                bounds: rect(),
+                layer: 0,
+                onScreen: true,
+                alpha: 1,
+                spaceIDs: [],
+                ownerValidated: true
+            )]
         )
+        XCTAssertEqual(result.matches.first?.windowID, 10)
+        XCTAssertTrue(result.rejections.isEmpty)
+    }
+
+    func testExactOffscreenIdentityWithoutValidatedOwnerOrSpaceIsRejected() {
+        let result = reconcile(
+            [candidate(id: 10)],
+            [surface(
+                id: 10,
+                onScreen: false,
+                spaceIDs: [],
+                ownerValidated: false
+            )]
+        )
+        XCTAssertTrue(result.matches.isEmpty)
         XCTAssertEqual(result.rejections.first?.reason, .exactWindowMissing)
     }
 
@@ -545,6 +630,392 @@ final class WindowInventoryReconcilerTests: XCTestCase {
             )
         )
         XCTAssertEqual(result.rejections.first?.reason, .exactWindowMissing)
+    }
+
+    func testPublicFallbackRejectsOnscreenFuzzyIdentity() {
+        let result = WindowInventoryReconciler.reconcile(
+            candidates: [candidate(id: nil)],
+            snapshot: snapshot(
+                [surface(id: 10, source: .publicWindowList)],
+                mode: .publicFallback
+            )
+        )
+        XCTAssertTrue(result.matches.isEmpty)
+        XCTAssertEqual(result.rejections.first?.reason, .noUniqueSurface)
+    }
+
+    func testOnlyAXBackedCanonicalSurfaceBecomesUserFacingResolvedWindow() {
+        let result = resolve(
+            [candidate(token: 41, id: 10)],
+            [surface(id: 10), surface(id: 11), surface(id: 12)]
+        )
+
+        XCTAssertEqual(result.windows.count, 1)
+        XCTAssertEqual(result.windows.first?.surface.windowID, 10)
+        XCTAssertEqual(result.windows.first?.operationToken, 41)
+    }
+
+    func testPreviouslyBoundPrivateSurfaceResolvesAsDisplayOnly() {
+        let result = resolve(
+            [],
+            [surface(id: 11, title: "")],
+            retainedWindowIDs: [11]
+        )
+
+        XCTAssertEqual(result.windows.count, 1)
+        XCTAssertEqual(result.windows.first?.surface.windowID, 11)
+        XCTAssertNil(result.windows.first?.operationToken)
+        XCTAssertEqual(
+            result.windows.first?.confidence,
+            .privateWindowServerEvidence
+        )
+    }
+
+    func testRetainedSurfaceRequiresCompletePrivateLivenessEvidence() {
+        let invalidSurfaces = [
+            surface(id: 10, ownerValidated: false),
+            surface(id: 10, levelValidated: false),
+            surface(id: 10, spaceIDs: []),
+            surface(id: 10, source: .publicWindowList),
+            surface(id: 10, layer: 1),
+            surface(id: 10, alpha: 0),
+            surface(
+                id: 10,
+                bounds: CGRect(x: 0, y: 0, width: 20, height: 20)
+            )
+        ]
+
+        for invalidSurface in invalidSurfaces {
+            let result = resolve(
+                [],
+                [invalidSurface],
+                retainedWindowIDs: [10]
+            )
+            XCTAssertTrue(
+                result.windows.isEmpty,
+                "Unexpected retained surface: \(invalidSurface)"
+            )
+        }
+    }
+
+    func testDuplicateIdenticalSurfaceIsCanonicalizedOnce() {
+        let duplicate = surface(id: 10)
+        let result = resolve(
+            [candidate(id: 10)],
+            [duplicate, duplicate]
+        )
+
+        XCTAssertEqual(result.windows.map(\.surface.windowID), [10])
+    }
+
+    func testConflictingDuplicateSurfaceFailsClosed() {
+        let result = resolve(
+            [candidate(id: 10, pid: 42)],
+            [surface(id: 10, pid: 42), surface(id: 10, pid: 84)]
+        )
+
+        XCTAssertTrue(result.windows.isEmpty)
+        XCTAssertEqual(result.rejections.first?.reason, .exactWindowMissing)
+    }
+
+    func testBindingHistoryIsProcessScopedAndNeedsTwoCompleteMisses() {
+        let history = WindowInventoryBindingHistory()
+        let firstCapture = Date(timeIntervalSinceReferenceDate: 10)
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: "app|start-a|42",
+            confirmedExactWindowIDs: [10, 11],
+            liveValidatedWindowIDs: [10, 11],
+            snapshotCapturedAt: firstCapture,
+            snapshotIsComplete: true
+        )
+
+        XCTAssertEqual(
+            history.windowIDs(for: "app|start-a|42"),
+            Set<CGWindowID>([10, 11])
+        )
+        XCTAssertTrue(history.windowIDs(for: "app|start-b|42").isEmpty)
+        XCTAssertTrue(history.windowIDs(for: "app|start-a|84").isEmpty)
+
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: "app|start-a|42",
+            confirmedExactWindowIDs: [],
+            liveValidatedWindowIDs: [10],
+            snapshotCapturedAt: firstCapture.addingTimeInterval(1),
+            snapshotIsComplete: true
+        )
+        XCTAssertEqual(
+            history.windowIDs(for: "app|start-a|42"),
+            Set<CGWindowID>([10, 11])
+        )
+
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: "app|start-a|42",
+            confirmedExactWindowIDs: [],
+            liveValidatedWindowIDs: [10],
+            snapshotCapturedAt: firstCapture.addingTimeInterval(2),
+            snapshotIsComplete: true
+        )
+        XCTAssertEqual(
+            history.windowIDs(for: "app|start-a|42"),
+            Set<CGWindowID>([10])
+        )
+    }
+
+    func testBindingHistoryDoesNotAgeOnPartialOrRepeatedSnapshot() {
+        let history = WindowInventoryBindingHistory()
+        let firstCapture = Date(timeIntervalSinceReferenceDate: 20)
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: "app|start|42",
+            confirmedExactWindowIDs: [10],
+            liveValidatedWindowIDs: [10],
+            snapshotCapturedAt: firstCapture,
+            snapshotIsComplete: true
+        )
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: "app|start|42",
+            confirmedExactWindowIDs: [],
+            liveValidatedWindowIDs: [],
+            snapshotCapturedAt: firstCapture.addingTimeInterval(1),
+            snapshotIsComplete: false
+        )
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: "app|start|42",
+            confirmedExactWindowIDs: [],
+            liveValidatedWindowIDs: [],
+            snapshotCapturedAt: firstCapture.addingTimeInterval(2),
+            snapshotIsComplete: true
+        )
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: "app|start|42",
+            confirmedExactWindowIDs: [],
+            liveValidatedWindowIDs: [],
+            snapshotCapturedAt: firstCapture.addingTimeInterval(2),
+            snapshotIsComplete: true
+        )
+
+        XCTAssertEqual(
+            history.windowIDs(for: "app|start|42"),
+            Set<CGWindowID>([10])
+        )
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: "app|start|42",
+            confirmedExactWindowIDs: [],
+            liveValidatedWindowIDs: [],
+            snapshotCapturedAt: firstCapture.addingTimeInterval(3),
+            snapshotIsComplete: true
+        )
+        XCTAssertTrue(history.windowIDs(for: "app|start|42").isEmpty)
+    }
+
+    func testBindingHistoryCanRemoveOneTerminatedProcessOrResetAll() {
+        let history = WindowInventoryBindingHistory()
+        let capture = Date(timeIntervalSinceReferenceDate: 30)
+        for (pid, key, windowID) in [(pid_t(42), "a", CGWindowID(10)), (pid_t(84), "b", CGWindowID(20))] {
+            history.recordObservation(
+                processIdentifier: pid,
+                processLifetimeKey: key,
+                confirmedExactWindowIDs: [windowID],
+                liveValidatedWindowIDs: [windowID],
+                snapshotCapturedAt: capture,
+                snapshotIsComplete: true
+            )
+        }
+
+        history.remove(processIdentifier: 42)
+        XCTAssertTrue(history.windowIDs(for: "a").isEmpty)
+        XCTAssertEqual(history.windowIDs(for: "b"), Set<CGWindowID>([20]))
+        history.reset()
+        XCTAssertTrue(history.windowIDs(for: "b").isEmpty)
+    }
+
+    func testSharedAXPreDeduplicatorUsesOnlyOwnerAndExactIdentity() {
+        struct Proxy: Equatable {
+            let ownerPID: pid_t
+            let windowID: CGWindowID?
+            let objectID: Int
+        }
+        let proxies = [
+            Proxy(ownerPID: 42, windowID: 10, objectID: 1),
+            Proxy(ownerPID: 42, windowID: 10, objectID: 2),
+            Proxy(ownerPID: 42, windowID: 11, objectID: 1),
+            Proxy(ownerPID: 84, windowID: 10, objectID: 1),
+            Proxy(ownerPID: 42, windowID: nil, objectID: 3),
+            Proxy(ownerPID: 42, windowID: nil, objectID: 3)
+        ]
+
+        let result = WindowAXProxyPreDeduplicator.deduplicate(
+            proxies,
+            ownerPID: \.ownerPID,
+            windowID: \.windowID,
+            sameAXObject: { $0.objectID == $1.objectID },
+            merge: { _, candidate, canonicalWindowID in
+                Proxy(
+                    ownerPID: candidate.ownerPID,
+                    windowID: canonicalWindowID,
+                    objectID: candidate.objectID
+                )
+            }
+        )
+
+        XCTAssertEqual(result.count, 4)
+        XCTAssertEqual(
+            Set(result.compactMap { proxy -> String? in
+                guard let windowID = proxy.windowID else { return nil }
+                return "\(proxy.ownerPID):\(windowID)"
+            }),
+            Set(["42:10", "42:11", "84:10"])
+        )
+        XCTAssertEqual(result.filter { $0.windowID == nil }.count, 1)
+    }
+
+    func testInventoryCacheDeadlineUsesBothRawAndProjectedAge() {
+        let rawCapturedAt = Date(timeIntervalSinceReferenceDate: 100)
+        let storedAt = rawCapturedAt.addingTimeInterval(0.20)
+        let expiresAt = WindowInventoryCachePolicy.expiration(
+            storedAt: storedAt,
+            rawCapturedAt: rawCapturedAt
+        )
+
+        XCTAssertEqual(expiresAt, rawCapturedAt.addingTimeInterval(0.30))
+        XCTAssertTrue(WindowInventoryCachePolicy.isFresh(
+            now: expiresAt.addingTimeInterval(-0.001),
+            expiresAt: expiresAt
+        ))
+        XCTAssertFalse(WindowInventoryCachePolicy.isFresh(
+            now: expiresAt,
+            expiresAt: expiresAt
+        ))
+        XCTAssertFalse(WindowInventoryCachePolicy.isFresh(
+            now: expiresAt.addingTimeInterval(0.001),
+            expiresAt: expiresAt
+        ))
+    }
+
+    func testThreeExplicitAXWindowsResolveToThreeCanonicalWindows() {
+        let result = resolve(
+            [
+                candidate(token: 0, id: 10),
+                candidate(token: 1, id: 11),
+                candidate(token: 2, id: 12)
+            ],
+            [
+                surface(id: 10),
+                surface(id: 11, onScreen: true, spaceIDs: []),
+                surface(id: 12)
+            ]
+        )
+
+        XCTAssertEqual(result.windows.count, 3)
+        XCTAssertEqual(Set(result.windows.map(\.surface.windowID)), Set<CGWindowID>([10, 11, 12]))
+        XCTAssertEqual(Set(result.windows.map(\.operationToken)), Set([0, 1, 2]))
+    }
+
+    func testAXHelperWithoutCanonicalSurfaceDoesNotManufactureWindow() {
+        let result = resolve(
+            [candidate(token: 99, id: 999, title: "AX Helper")],
+            [surface(id: 10, title: "Real Window")]
+        )
+
+        XCTAssertTrue(result.windows.isEmpty)
+    }
+
+    func testSameOwnerSameTitleAndGeometryKeepsDistinctCanonicalWindowIDs() {
+        let result = resolve(
+            [
+                candidate(token: 0, id: 10, pid: 42, title: "Document", bounds: rect()),
+                candidate(token: 1, id: 11, pid: 42, title: "Document", bounds: rect())
+            ],
+            [
+                surface(id: 10, pid: 42, title: "Document", bounds: rect()),
+                surface(id: 11, pid: 42, title: "Document", bounds: rect())
+            ]
+        )
+
+        XCTAssertEqual(result.windows.count, 2)
+        XCTAssertEqual(Set(result.windows.map(\.surface.windowID)), Set<CGWindowID>([10, 11]))
+    }
+
+    func testUnnumberedProxyIsAmbiguousWhenItMatchesClaimedAndUnclaimedSurfacesEqually() {
+        let result = reconcile(
+            [
+                candidate(token: 0, id: 10, title: "Document", bounds: rect()),
+                candidate(token: 1, id: nil, title: "Document", bounds: rect())
+            ],
+            [
+                surface(id: 10, title: "Document", bounds: rect()),
+                surface(id: 11, title: "Document", bounds: rect())
+            ]
+        )
+
+        XCTAssertEqual(result.matches.map(\.windowID), [10])
+        XCTAssertEqual(result.rejections, [.init(token: 1, reason: .ambiguousSurface)])
+    }
+
+    func testMultipleAXProxiesForOneCanonicalWindowProduceOneResolvedWindow() {
+        let result = resolve(
+            [
+                candidate(token: 0, id: 10, preferred: false),
+                candidate(token: 1, id: 10, preferred: true)
+            ],
+            [surface(id: 10)]
+        )
+
+        XCTAssertEqual(result.windows.count, 1)
+        XCTAssertEqual(result.windows.first?.surface.windowID, 10)
+        XCTAssertEqual(result.windows.first?.operationToken, 1)
+    }
+
+    func testCanonicalResolutionKeepsOwnersIsolatedByPID() {
+        let result = resolve(
+            [
+                candidate(token: 0, id: nil, pid: 42, title: "Document", bounds: rect()),
+                candidate(token: 1, id: nil, pid: 84, title: "Document", bounds: rect())
+            ],
+            [
+                surface(id: 10, pid: 42, title: "Document", bounds: rect()),
+                surface(id: 20, pid: 84, title: "Document", bounds: rect())
+            ]
+        )
+
+        XCTAssertEqual(result.windows.count, 2)
+        let firstOwner = result.windows.first { $0.surface.ownerPID == 42 }
+        let secondOwner = result.windows.first { $0.surface.ownerPID == 84 }
+        XCTAssertEqual(firstOwner?.surface.windowID, 10)
+        XCTAssertEqual(firstOwner?.operationToken, 0)
+        XCTAssertEqual(secondOwner?.surface.windowID, 20)
+        XCTAssertEqual(secondOwner?.operationToken, 1)
+    }
+
+    func testPublicFallbackResolutionOnlyAdmitsOnscreenExactIdentity() {
+        let result = resolve(
+            [
+                candidate(token: 0, id: 10),
+                candidate(token: 1, id: 11),
+                candidate(token: 2, id: nil, title: "Fuzzy", bounds: rect())
+            ],
+            [
+                surface(id: 10, source: .publicWindowList),
+                surface(
+                    id: 11,
+                    onScreen: false,
+                    source: .publicWindowList,
+                    spaceIDs: []
+                ),
+                surface(id: 12, title: "Fuzzy", source: .publicWindowList)
+            ],
+            mode: .publicFallback
+        )
+
+        XCTAssertEqual(result.windows.map(\.surface.windowID), [10])
+        XCTAssertEqual(result.windows.first?.operationToken, 0)
     }
 
     func testExactTransparentNonMinimizedSurfaceIsRejected() {
@@ -580,6 +1051,19 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         WindowInventoryReconciler.reconcile(
             candidates: candidates,
             snapshot: snapshot(surfaces)
+        )
+    }
+
+    private func resolve(
+        _ candidates: [WindowInventoryCandidate],
+        _ surfaces: [WindowServerSurface],
+        mode: WindowServerInventoryMode = .skyLight,
+        retainedWindowIDs: Set<CGWindowID> = []
+    ) -> WindowInventoryResolution {
+        WindowInventoryReconciler.resolve(
+            candidates: candidates,
+            snapshot: snapshot(surfaces, mode: mode),
+            retainedWindowIDs: retainedWindowIDs
         )
     }
 
@@ -627,7 +1111,9 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         onScreen: Bool = true,
         alpha: Double = 1,
         source: WindowServerSurface.Source = .skyLight,
-        spaceIDs: Set<UInt64> = [1]
+        spaceIDs: Set<UInt64> = [1],
+        ownerValidated: Bool? = nil,
+        levelValidated: Bool? = nil
     ) -> WindowServerSurface {
         WindowServerSurface(
             windowID: id,
@@ -639,7 +1125,8 @@ final class WindowInventoryReconcilerTests: XCTestCase {
             alpha: alpha,
             spaceIDs: spaceIDs,
             source: source,
-            ownerWasPrivatelyValidated: source == .skyLight
+            ownerWasPrivatelyValidated: ownerValidated ?? (source == .skyLight),
+            levelWasPrivatelyValidated: levelValidated ?? (source == .skyLight)
         )
     }
 }

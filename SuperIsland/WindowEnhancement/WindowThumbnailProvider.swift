@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Darwin
 import OSLog
@@ -13,6 +14,10 @@ struct WindowThumbnailApplicationIdentity: Sendable, Equatable {
     let processIdentifier: pid_t
     fileprivate let cacheNamespace: String
     fileprivate let bundlePath: String?
+
+    /// Stable only for this concrete process launch. Window inventory uses the
+    /// same namespace so a recycled PID can never inherit old window IDs.
+    var processLifetimeKey: String { cacheNamespace }
 
     init?(application: NSRunningApplication) {
         let processIdentifier = application.processIdentifier
@@ -68,6 +73,417 @@ struct WindowThumbnailApplicationIdentity: Sendable, Equatable {
             (launchDate.timeIntervalSinceReferenceDate * 1_000_000).rounded()
         )
         return "launch:\(microseconds)"
+    }
+}
+
+/// Event-driven AX window registry shared by Dock and Cmd-Tab. Some Apps omit
+/// inactive windows from `AXWindows`; remembering only exact window IDs seen in
+/// lifecycle notifications preserves those real windows without admitting raw
+/// WindowServer helper surfaces. The observer sources are installed on the
+/// main run loop, and every public entry point is called from the main actor.
+final class WindowAXLifecycleRegistry: @unchecked Sendable {
+    static let shared = WindowAXLifecycleRegistry()
+
+    private final class ProcessObservation {
+        let identity: WindowThumbnailApplicationIdentity
+        let applicationElement: AXUIElement
+        let observer: AXObserver
+        var windowsByID: [CGWindowID: AXUIElement] = [:]
+        var subscribedWindowIDs: Set<CGWindowID> = []
+        var notificationRegistrationResults: [
+            String: WindowAXNotificationRegistrationDiagnostic
+        ] = [:]
+        var accessSequence: UInt64 = 0
+
+        init(
+            identity: WindowThumbnailApplicationIdentity,
+            applicationElement: AXUIElement,
+            observer: AXObserver
+        ) {
+            self.identity = identity
+            self.applicationElement = applicationElement
+            self.observer = observer
+        }
+    }
+
+    private struct ObserverCreationDiagnostic {
+        let processLifetimeKey: String
+        let result: Int32
+    }
+
+    private static let observerCallback: AXObserverCallback = {
+        observer,
+        element,
+        notification,
+        refcon in
+        guard Thread.isMainThread, let refcon else { return }
+        let registry = Unmanaged<WindowAXLifecycleRegistry>
+            .fromOpaque(refcon)
+            .takeUnretainedValue()
+        registry.receive(
+            observer: observer,
+            element: element,
+            notification: notification as String
+        )
+    }
+
+    private var observationsByPID: [pid_t: ProcessObservation] = [:]
+    private var observerCreationResultsByPID: [
+        pid_t: ObserverCreationDiagnostic
+    ] = [:]
+    private var accessSequence: UInt64 = 0
+    private let maximumObservedProcesses = 24
+    private let maximumWindowsPerProcess = 64
+    private let perWindowNotifications = [
+        kAXUIElementDestroyedNotification as String,
+        kAXWindowMiniaturizedNotification as String,
+        kAXWindowDeminiaturizedNotification as String
+    ]
+
+    private init() {}
+
+    /// Installs one observer for this concrete process launch and refreshes its
+    /// current AX identities. Unsupported individual notifications do not
+    /// invalidate the other event sources.
+    func observe(application: NSRunningApplication) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard AXIsProcessTrusted(),
+              application.activationPolicy == .regular,
+              !application.isTerminated,
+              let identity = WindowThumbnailApplicationIdentity(
+                  application: application
+              ) else { return }
+
+        if let existing = observationsByPID[identity.processIdentifier] {
+            if existing.identity == identity {
+                touch(existing)
+                seedCurrentWindows(in: existing)
+                return
+            }
+            removeObservation(processIdentifier: identity.processIdentifier)
+        }
+
+        let applicationElement = AXUIElementCreateApplication(
+            identity.processIdentifier
+        )
+        AXUIElementSetMessagingTimeout(applicationElement, 0.15)
+        var createdObserver: AXObserver?
+        let observerCreationResult = AXObserverCreate(
+            identity.processIdentifier,
+            Self.observerCallback,
+            &createdObserver
+        )
+        if WindowInventoryDiagnosticGate.isEnabled(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        ) {
+            observerCreationResultsByPID[identity.processIdentifier] =
+                ObserverCreationDiagnostic(
+                    processLifetimeKey: identity.processLifetimeKey,
+                    result: Int32(observerCreationResult.rawValue)
+                )
+        }
+        guard observerCreationResult == .success,
+              let observer = createdObserver else { return }
+
+        let observation = ProcessObservation(
+            identity: identity,
+            applicationElement: applicationElement,
+            observer: observer
+        )
+        observationsByPID[identity.processIdentifier] = observation
+        touch(observation)
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        addNotification(
+            kAXWindowCreatedNotification as String,
+            element: applicationElement,
+            observation: observation,
+            refcon: refcon,
+            targetWindowID: nil
+        )
+        addNotification(
+            kAXFocusedWindowChangedNotification as String,
+            element: applicationElement,
+            observation: observation,
+            refcon: refcon,
+            targetWindowID: nil
+        )
+        CFRunLoopAddSource(
+            CFRunLoopGetMain(),
+            AXObserverGetRunLoopSource(observer),
+            .commonModes
+        )
+        seedCurrentWindows(in: observation)
+        pruneIfNeeded()
+    }
+
+    /// Returns only exact-ID AX elements from this same process launch. The
+    /// normal candidate policy and private WindowServer reconciliation still
+    /// decide whether each element may become a visible preview card.
+    func windowElements(for application: NSRunningApplication) -> [AXUIElement] {
+        dispatchPrecondition(condition: .onQueue(.main))
+        observe(application: application)
+        guard let identity = WindowThumbnailApplicationIdentity(
+                  application: application
+              ),
+              let observation = observationsByPID[identity.processIdentifier],
+              observation.identity == identity else { return [] }
+        touch(observation)
+        return observation.windowsByID
+            .sorted { $0.key < $1.key }
+            .map(\.value)
+    }
+
+    func diagnosticSnapshot(
+        for application: NSRunningApplication
+    ) -> WindowAXLifecycleDiagnosticSnapshot {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let identity = WindowThumbnailApplicationIdentity(
+            application: application
+        ) else {
+            return WindowAXLifecycleDiagnosticSnapshot(
+                observerCreationResult: nil,
+                isObservationInstalled: false,
+                windowIDs: [],
+                notificationRegistrations: []
+            )
+        }
+        let observation = observationsByPID[identity.processIdentifier]
+        let matchingObservation = observation.flatMap {
+            $0.identity == identity ? $0 : nil
+        }
+        return WindowAXLifecycleDiagnosticSnapshot(
+            observerCreationResult: observerCreationResultsByPID[
+                identity.processIdentifier
+            ].flatMap {
+                $0.processLifetimeKey == identity.processLifetimeKey
+                    ? $0.result
+                    : nil
+            },
+            isObservationInstalled: matchingObservation != nil,
+            windowIDs: matchingObservation?.windowsByID.keys.sorted() ?? [],
+            notificationRegistrations: matchingObservation?
+                .notificationRegistrationResults.values.sorted {
+                    if $0.notification == $1.notification {
+                        return ($0.targetWindowID ?? 0) < ($1.targetWindowID ?? 0)
+                    }
+                    return $0.notification < $1.notification
+                } ?? []
+        )
+    }
+
+    func remove(processIdentifier: pid_t) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        removeObservation(processIdentifier: processIdentifier)
+    }
+
+    func reset() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        for processIdentifier in Array(observationsByPID.keys) {
+            removeObservation(processIdentifier: processIdentifier)
+        }
+        accessSequence = 0
+        observerCreationResultsByPID.removeAll(keepingCapacity: false)
+    }
+
+    private func receive(
+        observer: AXObserver,
+        element: AXUIElement,
+        notification: String
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let observation = observationsByPID.values.first(where: {
+            CFEqual($0.observer, observer)
+        }), observation.identity.matchesCurrentProcess() else { return }
+        touch(observation)
+
+        switch notification {
+        case kAXWindowCreatedNotification as String,
+             kAXWindowMiniaturizedNotification as String,
+             kAXWindowDeminiaturizedNotification as String:
+            track(element, in: observation)
+        case kAXFocusedWindowChangedNotification as String:
+            if let focused = elementAttribute(
+                kAXFocusedWindowAttribute,
+                of: observation.applicationElement
+            ) {
+                track(focused, in: observation)
+            }
+        case kAXUIElementDestroyedNotification as String:
+            if let windowID = windowDirectWindowNumber(of: element) {
+                observation.windowsByID.removeValue(forKey: windowID)
+                observation.subscribedWindowIDs.remove(windowID)
+            } else {
+                let removedIDs = observation.windowsByID.compactMap {
+                    CFEqual($0.value, element) ? $0.key : nil
+                }
+                for windowID in removedIDs {
+                    observation.windowsByID.removeValue(forKey: windowID)
+                    observation.subscribedWindowIDs.remove(windowID)
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    private func seedCurrentWindows(in observation: ProcessObservation) {
+        var windows: [AXUIElement] = []
+        for attribute in [
+            kAXFocusedWindowAttribute,
+            kAXMainWindowAttribute
+        ] {
+            if let window = elementAttribute(
+                attribute,
+                of: observation.applicationElement
+            ), !windows.contains(where: { CFEqual($0, window) }) {
+                windows.append(window)
+            }
+        }
+        var value: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            observation.applicationElement,
+            kAXWindowsAttribute as CFString,
+            &value
+        ) == .success,
+        let available = value as? [AXUIElement] {
+            for window in available
+            where !windows.contains(where: { CFEqual($0, window) }) {
+                windows.append(window)
+            }
+        }
+        for window in windows { track(window, in: observation) }
+    }
+
+    private func track(
+        _ element: AXUIElement,
+        in observation: ProcessObservation
+    ) {
+        var ownerPID: pid_t = 0
+        guard AXUIElementGetPid(element, &ownerPID) == .success,
+              ownerPID == observation.identity.processIdentifier,
+              let windowID = windowDirectWindowNumber(of: element),
+              windowID > 0 else { return }
+        if let existing = observation.windowsByID[windowID],
+           !CFEqual(existing, element) {
+            removeWindowNotifications(
+                from: existing,
+                observation: observation
+            )
+            observation.subscribedWindowIDs.remove(windowID)
+        }
+        observation.windowsByID[windowID] = element
+        if observation.windowsByID.count > maximumWindowsPerProcess {
+            let retainedIDs = Set(
+                observation.windowsByID.keys.sorted().suffix(
+                    maximumWindowsPerProcess
+                )
+            )
+            for (candidateID, candidateElement) in observation.windowsByID
+            where !retainedIDs.contains(candidateID) {
+                removeWindowNotifications(
+                    from: candidateElement,
+                    observation: observation
+                )
+            }
+            observation.windowsByID = observation.windowsByID.filter {
+                retainedIDs.contains($0.key)
+            }
+            observation.subscribedWindowIDs = observation.subscribedWindowIDs
+                .intersection(retainedIDs)
+        }
+        guard observation.subscribedWindowIDs.insert(windowID).inserted else {
+            return
+        }
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        for notification in perWindowNotifications {
+            addNotification(
+                notification,
+                element: element,
+                observation: observation,
+                refcon: refcon,
+                targetWindowID: windowID
+            )
+        }
+    }
+
+    private func addNotification(
+        _ notification: String,
+        element: AXUIElement,
+        observation: ProcessObservation,
+        refcon: UnsafeMutableRawPointer,
+        targetWindowID: CGWindowID?
+    ) {
+        let result = AXObserverAddNotification(
+            observation.observer,
+            element,
+            notification as CFString,
+            refcon
+        )
+        if WindowInventoryDiagnosticGate.isEnabled(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        ) {
+            let key = "\(notification)|\(targetWindowID.map(String.init) ?? "application")"
+            observation.notificationRegistrationResults[key] =
+                WindowAXNotificationRegistrationDiagnostic(
+                    notification: notification,
+                    targetWindowID: targetWindowID,
+                    result: Int32(result.rawValue)
+                )
+        }
+    }
+
+    private func removeWindowNotifications(
+        from element: AXUIElement,
+        observation: ProcessObservation
+    ) {
+        for notification in perWindowNotifications {
+            AXObserverRemoveNotification(
+                observation.observer,
+                element,
+                notification as CFString
+            )
+        }
+    }
+
+    private func elementAttribute(
+        _ name: String,
+        of element: AXUIElement
+    ) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            name as CFString,
+            &value
+        ) == .success,
+        let value,
+        CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return unsafeBitCast(value, to: AXUIElement.self)
+    }
+
+    private func touch(_ observation: ProcessObservation) {
+        accessSequence &+= 1
+        observation.accessSequence = accessSequence
+    }
+
+    private func pruneIfNeeded() {
+        while observationsByPID.count > maximumObservedProcesses,
+              let oldestPID = observationsByPID.min(by: {
+                  $0.value.accessSequence < $1.value.accessSequence
+              })?.key {
+            removeObservation(processIdentifier: oldestPID)
+        }
+    }
+
+    private func removeObservation(processIdentifier: pid_t) {
+        observerCreationResultsByPID.removeValue(forKey: processIdentifier)
+        guard let observation = observationsByPID.removeValue(
+            forKey: processIdentifier
+        ) else { return }
+        CFRunLoopRemoveSource(
+            CFRunLoopGetMain(),
+            AXObserverGetRunLoopSource(observation.observer),
+            .commonModes
+        )
     }
 }
 
@@ -1656,6 +2072,16 @@ enum WindowThumbnailProvider {
 
     static func clearAllCache() {
         purgeAllCache()
+        WindowInventoryBindingHistory.shared.reset()
+        WindowServerInventoryService.shared.invalidate()
+        let resetRegistry = {
+            WindowAXLifecycleRegistry.shared.reset()
+        }
+        if Thread.isMainThread {
+            resetRegistry()
+        } else {
+            DispatchQueue.main.async(execute: resetRegistry)
+        }
         notifyPreviewInvalidation()
     }
 
@@ -1736,6 +2162,13 @@ enum WindowThumbnailProvider {
                 guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
                     as? NSRunningApplication else { return }
                 clearCache(processIdentifier: application.processIdentifier)
+                WindowInventoryBindingHistory.shared.remove(
+                    processIdentifier: application.processIdentifier
+                )
+                WindowAXLifecycleRegistry.shared.remove(
+                    processIdentifier: application.processIdentifier
+                )
+                WindowServerInventoryService.shared.invalidate()
                 notifyPreviewInvalidation()
             }
         )

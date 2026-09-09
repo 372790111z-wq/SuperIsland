@@ -932,11 +932,10 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 continue
             }
 
-            // The all-window snapshot already provides the original window ID
-            // and its owner PID. During Mission Control,
-            // CGWindowListCreateDescriptionFromArray can return no description
-            // for that same transformed entry, so do not re-query it before AX
-            // matching. Require one exact AX window under the reported owner;
+            // The all-window snapshot already provides the window ID and its
+            // owner PID. Use that identity for AX matching without a redundant
+            // description query and the extra race with window destruction.
+            // Require one exact AX window under the reported owner;
             // any stale identity, PID mismatch or duplicate remains
             // non-actionable.
             guard let liveWindow = resolveExactWindow(
@@ -1278,8 +1277,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
     private func resolveExactWindow(
         _ windowNumber: CGWindowID
     ) -> (window: AXUIElement, windowNumber: CGWindowID, ownerPID: pid_t, windowServerFrame: CGRect?)? {
-        let requested = [NSNumber(value: windowNumber)] as CFArray
-        guard let descriptions = CGWindowListCreateDescriptionFromArray(requested) as? [[String: Any]],
+        guard let descriptions = WindowServerWindowDescriptions.copy(for: [windowNumber]),
               descriptions.count == 1,
               let describedNumber = descriptions[0][kCGWindowNumber as String] as? NSNumber,
               CGWindowID(describedNumber.uint32Value) == windowNumber,
@@ -1600,9 +1598,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 }
                 for windowNumber in sceneProbeWindowNumbers(in: next.element) {
                     directWindowNumberCount += 1
-                    let requested = [NSNumber(value: windowNumber)] as CFArray
-                    let descriptions = CGWindowListCreateDescriptionFromArray(requested)
-                        as? [[String: Any]]
+                    let descriptions = WindowServerWindowDescriptions.copy(for: [windowNumber])
                     if descriptions?.count == 1 {
                         publicDescriptionCount += 1
                     }
@@ -1646,9 +1642,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 let windowNumbers = sceneProbeWindowNumbers(in: next.element)
                 if windowNumbers.count == 1, let windowNumber = windowNumbers.first {
                     directWindowNumberCount += 1
-                    let requested = [NSNumber(value: windowNumber)] as CFArray
-                    let descriptions = CGWindowListCreateDescriptionFromArray(requested)
-                        as? [[String: Any]]
+                    let descriptions = WindowServerWindowDescriptions.copy(for: [windowNumber])
                     if descriptions?.count == 1 {
                         publicDescriptionCount += 1
                     }
@@ -1843,9 +1837,9 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         let inventoryTruncated = cappedInventory.count < sortedInventory.count
 
         var inventoryOwnerByWindow: [CGWindowID: pid_t] = [:]
-        if let descriptions = CGWindowListCreateDescriptionFromArray(
-            cappedInventory.map(NSNumber.init(value:)) as CFArray
-        ) as? [[String: Any]] {
+        if let descriptions = WindowServerWindowDescriptions.copy(
+            for: cappedInventory
+        ) {
             for description in descriptions {
                 guard let windowNumber = description[
                     kCGWindowNumber as String

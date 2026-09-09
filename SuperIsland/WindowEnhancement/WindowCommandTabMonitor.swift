@@ -34,41 +34,6 @@ enum WindowAXCandidatePolicy {
         _ = isPreferredWindow
         return true
     }
-
-    static func areExactProxies(
-        lhsPID: pid_t,
-        lhsTitle: String,
-        lhsBounds: CGRect?,
-        lhsIsMinimized: Bool,
-        lhsIsPreferredWindow: Bool,
-        rhsPID: pid_t,
-        rhsTitle: String,
-        rhsBounds: CGRect?,
-        rhsIsMinimized: Bool,
-        rhsIsPreferredWindow: Bool
-    ) -> Bool {
-        guard lhsPID == rhsPID,
-              lhsIsMinimized == rhsIsMinimized,
-              let lhsBounds,
-              let rhsBounds else { return false }
-        let sameBounds = abs(lhsBounds.minX - rhsBounds.minX) <= 1
-            && abs(lhsBounds.minY - rhsBounds.minY) <= 1
-            && abs(lhsBounds.width - rhsBounds.width) <= 1
-            && abs(lhsBounds.height - rhsBounds.height) <= 1
-        guard sameBounds else { return false }
-
-        if !lhsTitle.isEmpty, !rhsTitle.isEmpty {
-            return lhsTitle == rhsTitle
-        }
-
-        // Tahoe commonly returns a sparse focused/main AX proxy for the same
-        // window that AXWindows exposes with a canonical WindowServer ID. The
-        // sparse proxy can omit its title, so requiring two non-empty titles
-        // manufactures a second blank card. Keep the relaxed rule bounded to
-        // focused/main evidence; two anonymous background windows must remain
-        // distinct even if an App initially stacks them at the same geometry.
-        return lhsIsPreferredWindow || rhsIsPreferredWindow
-    }
 }
 
 typealias WindowAXWindowNumberResolver = @convention(c) (
@@ -139,6 +104,7 @@ final class WindowCommandTabMonitor {
     private var accessibilityTrustRetryTask: Task<Void, Never>?
     private var accessibilityTrustRetryAttempt = 0
     private var activationObserver: NSObjectProtocol?
+    private var deactivationObserver: NSObjectProtocol?
     private var previewInvalidationObserver: NSObjectProtocol?
     private var thumbnailCaptureTask: Task<Void, Never>?
     private var postCloseRefreshTask: Task<Void, Never>?
@@ -209,7 +175,7 @@ final class WindowCommandTabMonitor {
 
     private struct WindowCandidate {
         let application: NSRunningApplication
-        let element: AXUIElement
+        let element: AXUIElement?
         let title: String
         let bounds: CGRect?
         let windowID: CGWindowID?
@@ -262,6 +228,10 @@ final class WindowCommandTabMonitor {
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
             self.activationObserver = nil
+        }
+        if let deactivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(deactivationObserver)
+            self.deactivationObserver = nil
         }
         if let previewInvalidationObserver {
             NotificationCenter.default.removeObserver(previewInvalidationObserver)
@@ -582,7 +552,8 @@ final class WindowCommandTabMonitor {
                   hasExplicitWindowSelection,
                   isPresenting,
                   candidates.indices.contains(selectedIndex),
-                  candidates[selectedIndex].windows.indices.contains(selectedWindowIndex) else {
+                  candidates[selectedIndex].windows.indices.contains(selectedWindowIndex),
+                  candidates[selectedIndex].windows[selectedWindowIndex].element != nil else {
                 return nil
             }
             return (
@@ -1183,11 +1154,12 @@ final class WindowCommandTabMonitor {
                         identity: WindowPreviewIdentity(processID: window.application.processIdentifier, windowID: window.windowID ?? 0),
                         title: window.title,
                         isMinimized: window.isMinimized,
-                        canClose: window.canClose,
+                        canClose: window.element != nil && window.canClose,
                         isSelected: index == presentedIndex && windowIndex == selectedWindowIndex,
                         thumbnailResult: index == presentedIndex && thumbnails.indices.contains(windowIndex)
                             ? thumbnails[windowIndex]
-                            : nil
+                            : nil,
+                        canActivate: window.element != nil
                     )
                 }
             )
@@ -1240,7 +1212,8 @@ final class WindowCommandTabMonitor {
     private func commit(applicationIndex: Int, windowIndex: Int) {
         guard isPresenting,
               candidates.indices.contains(applicationIndex),
-              candidates[applicationIndex].windows.indices.contains(windowIndex) else { return }
+              candidates[applicationIndex].windows.indices.contains(windowIndex),
+              candidates[applicationIndex].windows[windowIndex].element != nil else { return }
         selectedIndex = applicationIndex
         selectedWindowIndex = windowIndex
         activate(
@@ -1266,6 +1239,10 @@ final class WindowCommandTabMonitor {
         }
         let candidate = candidates[applicationIndex]
         let window = candidate.windows[windowIndex]
+        guard window.element != nil else {
+            preferences.publishFeedback("当前预览窗口暂不可操作，请先切换到该 App")
+            return
+        }
         guard let applicationIdentity = WindowThumbnailApplicationIdentity(
             application: window.application
         ) else {
@@ -1308,9 +1285,10 @@ final class WindowCommandTabMonitor {
             return
         }
         guard currentWindow.canClose,
+              let currentElement = currentWindow.element,
               let closeButton = elementAttribute(
                   kAXCloseButtonAttribute,
-                  of: currentWindow.element
+                  of: currentElement
               ) else {
             preferences.publishFeedback("当前预览窗口没有可用的关闭按钮")
             return
@@ -1377,7 +1355,11 @@ final class WindowCommandTabMonitor {
                 return matches.count == 1 ? matches[0] : nil
             }
             let matches = candidate.windows.indices.filter {
-                CFEqual(candidate.windows[$0].element, closedWindow.element)
+                guard let candidateElement = candidate.windows[$0].element,
+                      let closedElement = closedWindow.element else {
+                    return false
+                }
+                return CFEqual(candidateElement, closedElement)
             }
             return matches.count == 1 ? matches[0] : nil
         }()
@@ -1682,10 +1664,16 @@ final class WindowCommandTabMonitor {
     ) -> WindowCandidate? {
         let currentWindows = windowCandidates(for: application)
         if let expectedWindowID = original.windowID {
-            let matches = currentWindows.filter { $0.windowID == expectedWindowID }
+            let matches = currentWindows.filter {
+                $0.windowID == expectedWindowID && $0.element != nil
+            }
             return matches.count == 1 ? matches[0] : nil
         }
-        let retainedMatches = currentWindows.filter { CFEqual($0.element, original.element) }
+        guard let originalElement = original.element else { return nil }
+        let retainedMatches = currentWindows.filter {
+            guard let currentElement = $0.element else { return false }
+            return CFEqual(currentElement, originalElement)
+        }
         return retainedMatches.count == 1 ? retainedMatches[0] : nil
     }
 
@@ -1697,15 +1685,16 @@ final class WindowCommandTabMonitor {
     ) -> Bool {
         var ownerPID: pid_t = 0
         guard !application.isTerminated,
-              AXUIElementGetPid(window.element, &ownerPID) == .success,
+              let element = window.element,
+              AXUIElementGetPid(element, &ownerPID) == .success,
               ownerPID == application.processIdentifier else { return false }
         if let expectedWindowID,
-           windowIDAttribute(window.element) != expectedWindowID {
+           windowIDAttribute(element) != expectedWindowID {
             return false
         }
-        if boolAttribute(kAXMinimizedAttribute, of: window.element) == true {
+        if boolAttribute(kAXMinimizedAttribute, of: element) == true {
             AXUIElementSetAttributeValue(
-                window.element,
+                element,
                 kAXMinimizedAttribute as CFString,
                 kCFBooleanFalse
             )
@@ -1716,15 +1705,15 @@ final class WindowCommandTabMonitor {
         let focusResult = AXUIElementSetAttributeValue(
             applicationElement,
             kAXFocusedWindowAttribute as CFString,
-            window.element
+            element
         )
         AXUIElementSetAttributeValue(
-            window.element,
+            element,
             kAXMainAttribute as CFString,
             kCFBooleanTrue
         )
         let raiseResult = AXUIElementPerformAction(
-            window.element,
+            element,
             kAXRaiseAction as CFString
         )
         guard focusResult == .success, raiseResult == .success,
@@ -1732,7 +1721,7 @@ final class WindowCommandTabMonitor {
                 kAXFocusedWindowAttribute,
                 of: applicationElement
               ) else { return false }
-        return CFEqual(focusedWindow, window.element)
+        return CFEqual(focusedWindow, element)
     }
 
     private func cancel() {
@@ -1770,38 +1759,34 @@ final class WindowCommandTabMonitor {
     private func windowCandidates(
         for applications: [NSRunningApplication]
     ) -> [WindowCandidate] {
-        var result: [WindowCandidate] = []
-        var indexByWindowID: [CGWindowID: Int] = [:]
-        for application in applications where !application.isTerminated {
-            for candidate in windowCandidates(for: application) {
-                guard let windowID = candidate.windowID else {
-                    if !result.contains(where: {
-                        $0.application.processIdentifier
-                            == candidate.application.processIdentifier
-                            && $0.windowID == nil
-                            && CFEqual($0.element, candidate.element)
-                    }) {
-                        result.append(candidate)
-                    }
-                    continue
-                }
-                if let existingIndex = indexByWindowID[windowID] {
-                    if windowCandidateQuality(candidate)
-                        > windowCandidateQuality(result[existingIndex]) {
-                        result[existingIndex] = candidate
-                    }
-                } else {
-                    indexByWindowID[windowID] = result.count
-                    result.append(candidate)
-                }
+        let collected = applications
+            .filter { !$0.isTerminated }
+            .flatMap { windowCandidates(for: $0) }
+        return WindowAXProxyPreDeduplicator.deduplicate(
+            collected,
+            ownerPID: { $0.application.processIdentifier },
+            windowID: \.windowID,
+            sameAXObject: { lhs, rhs in
+                guard let lhsElement = lhs.element,
+                      let rhsElement = rhs.element else { return false }
+                return CFEqual(lhsElement, rhsElement)
+            },
+            merge: { [weak self] existing, candidate, canonicalWindowID in
+                self?.mergedWindowCandidate(
+                    existing: existing,
+                    candidate: candidate,
+                    canonicalWindowID: canonicalWindowID
+                ) ?? existing
             }
-        }
-        return result
+        )
     }
 
     private func windowCandidates(
         for application: NSRunningApplication
     ) -> [WindowCandidate] {
+        let diagnosticsEnabled = WindowInventoryDiagnosticGate.isEnabled(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        )
         let appElement = AXUIElementCreateApplication(application.processIdentifier)
         let focusedWindow = elementAttribute(kAXFocusedWindowAttribute, of: appElement)
         let mainWindow = elementAttribute(kAXMainWindowAttribute, of: appElement)
@@ -1812,26 +1797,63 @@ final class WindowCommandTabMonitor {
         }
 
         var windowsValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
+        let windowsAttributeResult = AXUIElementCopyAttributeValue(
             appElement,
             kAXWindowsAttribute as CFString,
             &windowsValue
-        ) == .success,
-           let availableWindows = windowsValue as? [AXUIElement] {
+        )
+        let attributeWindows = windowsValue as? [AXUIElement] ?? []
+        if windowsAttributeResult == .success {
+            let availableWindows = attributeWindows
             for window in availableWindows
             where !collectedWindows.contains(where: { CFEqual($0, window) }) {
                 collectedWindows.append(window)
             }
         }
 
+        // Preserve exact window identities delivered by AX lifecycle events.
+        // This covers Apps that omit inactive real windows from AXWindows;
+        // current private WindowServer evidence still decides admission.
+        let lifecycleWindows = WindowAXLifecycleRegistry.shared.windowElements(
+            for: application
+        )
+        for window in lifecycleWindows
+        where !collectedWindows.contains(where: { CFEqual($0, window) }) {
+            collectedWindows.append(window)
+        }
+
+        var rawAXDiagnostics: [WindowInventoryAXCandidateDiagnostics] = []
         let resolvedCandidates = collectedWindows.compactMap { window -> WindowCandidate? in
+            let token = rawAXDiagnostics.count
             var ownerPID: pid_t = 0
-            let role = stringAttribute(kAXRoleAttribute, of: window) ?? ""
-            let subrole = stringAttribute(kAXSubroleAttribute, of: window) ?? ""
-            guard AXUIElementGetPid(window, &ownerPID) == .success,
-                  ownerPID == application.processIdentifier else {
+            guard AXUIElementGetPid(window, &ownerPID) == .success else {
+                if diagnosticsEnabled {
+                    rawAXDiagnostics.append(.ownerValidationFailure(
+                        token: token,
+                        ownerPID: 0,
+                        isFocusedSource: focusedWindow.map { CFEqual($0, window) } ?? false,
+                        isMainSource: mainWindow.map { CFEqual($0, window) } ?? false,
+                        isWindowsAttributeSource: attributeWindows.contains { CFEqual($0, window) },
+                        isLifecycleRegistrySource: lifecycleWindows.contains { CFEqual($0, window) }
+                    ))
+                }
                 return nil
             }
+            guard ownerPID == application.processIdentifier else {
+                if diagnosticsEnabled {
+                    rawAXDiagnostics.append(.ownerValidationFailure(
+                        token: token,
+                        ownerPID: ownerPID,
+                        isFocusedSource: focusedWindow.map { CFEqual($0, window) } ?? false,
+                        isMainSource: mainWindow.map { CFEqual($0, window) } ?? false,
+                        isWindowsAttributeSource: attributeWindows.contains { CFEqual($0, window) },
+                        isLifecycleRegistrySource: lifecycleWindows.contains { CFEqual($0, window) }
+                    ))
+                }
+                return nil
+            }
+            let role = stringAttribute(kAXRoleAttribute, of: window) ?? ""
+            let subrole = stringAttribute(kAXSubroleAttribute, of: window) ?? ""
             let title = (stringAttribute(kAXTitleAttribute, of: window) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let isMinimized = boolAttribute(
@@ -1841,34 +1863,65 @@ final class WindowCommandTabMonitor {
             let isPreferredWindow = [focusedWindow, mainWindow]
                 .compactMap { $0 }
                 .contains { CFEqual($0, window) }
-            let isExplicitlyHidden = boolAttribute(
+            let isHidden = boolAttribute(
                 kAXHiddenAttribute,
                 of: window
-            ) == true
-            let isExplicitlyInvisible = boolAttribute(
+            )
+            let isVisible = boolAttribute(
                 "AXVisible",
                 of: window
-            ) == false
+            )
+            let isModal = boolAttribute("AXModal", of: window)
             // Electron Apps can publish background standard-window shells.
             // Preserve a real focused/main or minimized untitled window, but
             // reject an otherwise hidden/invisible or untitled background
             // shell before it becomes an unavailable preview card.
-            guard WindowAXCandidatePolicy.shouldInclude(
+            let shouldInclude = WindowAXCandidatePolicy.shouldInclude(
                 role: role,
                 subrole: subrole,
-                isModal: boolAttribute("AXModal", of: window),
+                isModal: isModal,
                 title: title,
                 isMinimized: isMinimized,
                 isPreferredWindow: isPreferredWindow,
-                isHidden: isExplicitlyHidden,
-                isVisible: isExplicitlyInvisible ? false : nil
-            ) else { return nil }
+                isHidden: isHidden == true,
+                isVisible: isVisible == false ? false : nil
+            )
+            let diagnosticWindowID = diagnosticsEnabled ? windowIDAttribute(window) : nil
+            let diagnosticBounds = diagnosticsEnabled ? windowBounds(window) : nil
+            if diagnosticsEnabled {
+                rawAXDiagnostics.append(WindowInventoryAXCandidateDiagnostics(
+                    token: token,
+                    ownerPID: ownerPID,
+                    windowID: diagnosticWindowID,
+                    role: role,
+                    subrole: subrole,
+                    titleLength: title.count,
+                    bounds: diagnosticBounds,
+                    isMinimized: isMinimized,
+                    isPreferredWindow: isPreferredWindow,
+                    isHidden: isHidden,
+                    isVisible: isVisible,
+                    isModal: isModal,
+                    isFocusedSource: focusedWindow.map { CFEqual($0, window) } ?? false,
+                    isMainSource: mainWindow.map { CFEqual($0, window) } ?? false,
+                    isWindowsAttributeSource: attributeWindows.contains { CFEqual($0, window) },
+                    isLifecycleRegistrySource: lifecycleWindows.contains { CFEqual($0, window) },
+                    wasIncludedByAXPolicy: shouldInclude
+                ))
+            }
+            guard shouldInclude else { return nil }
+            let windowID = diagnosticsEnabled
+                ? diagnosticWindowID
+                : windowIDAttribute(window)
+            let bounds = diagnosticsEnabled
+                ? diagnosticBounds
+                : windowBounds(window)
             return WindowCandidate(
                 application: application,
                 element: window,
                 title: title,
-                bounds: windowBounds(window),
-                windowID: windowIDAttribute(window),
+                bounds: bounds,
+                windowID: windowID,
                 isMinimized: isMinimized,
                 isPreferredWindow: isPreferredWindow,
                 canClose: elementAttribute(kAXCloseButtonAttribute, of: window) != nil,
@@ -1876,61 +1929,39 @@ final class WindowCommandTabMonitor {
             )
         }
 
-        // AXFocusedWindow, AXMainWindow and AXWindows may vend distinct AX
-        // proxy objects for the same underlying Chrome window. Prefer an exact
-        // WindowServer ID; when one proxy has no ID, merge only an exact
-        // same-PID/title/minimized-state/geometry match. Keep the richest proxy
-        // so title, geometry and close behavior are not lost.
-        var deduplicated: [WindowCandidate] = []
-        var indexByWindowID: [CGWindowID: Int] = [:]
-        for candidate in resolvedCandidates {
-            guard let windowID = candidate.windowID else {
-                if let proxyIndex = deduplicated.firstIndex(where: {
-                    $0.windowID != nil
-                        && windowCandidatesAreExactProxies($0, candidate)
-                }) {
-                    deduplicated[proxyIndex] = mergedWindowCandidate(
-                        existing: deduplicated[proxyIndex],
-                        candidate: candidate,
-                        canonicalWindowID: deduplicated[proxyIndex].windowID
-                    )
-                    continue
-                }
-                if !deduplicated.contains(where: {
-                    $0.windowID == nil && CFEqual($0.element, candidate.element)
-                }) {
-                    deduplicated.append(candidate)
-                }
-                continue
-            }
-            if let proxyIndex = deduplicated.firstIndex(where: {
-                $0.windowID == nil
-                    && windowCandidatesAreExactProxies($0, candidate)
-            }) {
-                deduplicated[proxyIndex] = mergedWindowCandidate(
-                    existing: deduplicated[proxyIndex],
+        // Before canonical reconciliation, deduplicate only the same AX object
+        // or the same non-zero WindowServer ID. A title/geometry match is not
+        // proof of identity: two real overlapping documents can be identical.
+        let deduplicated = WindowAXProxyPreDeduplicator.deduplicate(
+            resolvedCandidates,
+            ownerPID: { $0.application.processIdentifier },
+            windowID: \.windowID,
+            sameAXObject: { lhs, rhs in
+                guard let lhsElement = lhs.element,
+                      let rhsElement = rhs.element else { return false }
+                return CFEqual(lhsElement, rhsElement)
+            },
+            merge: { [weak self] existing, candidate, canonicalWindowID in
+                self?.mergedWindowCandidate(
+                    existing: existing,
                     candidate: candidate,
-                    canonicalWindowID: windowID
-                )
-                indexByWindowID[windowID] = proxyIndex
-                continue
+                    canonicalWindowID: canonicalWindowID
+                ) ?? existing
             }
-            if let existingIndex = indexByWindowID[windowID] {
-                deduplicated[existingIndex] = mergedWindowCandidate(
-                    existing: deduplicated[existingIndex],
-                    candidate: candidate,
-                    canonicalWindowID: windowID
-                )
-            } else {
-                indexByWindowID[windowID] = deduplicated.count
-                deduplicated.append(candidate)
-            }
-        }
-        let snapshot = WindowServerInventoryService.shared.snapshot(
-            for: [application.processIdentifier]
         )
-        let reconciliation = WindowInventoryReconciler.reconcile(
-            candidates: deduplicated.enumerated().map { index, candidate in
+        let processIdentity = WindowThumbnailApplicationIdentity(
+            application: application
+        )
+        let processLifetimeKey = processIdentity?.processLifetimeKey
+        let retainedWindowIDs = processLifetimeKey.map {
+            WindowInventoryBindingHistory.shared.windowIDs(for: $0)
+        } ?? []
+        let currentExactWindowIDs = Set(deduplicated.compactMap(\.windowID))
+        let snapshot = WindowServerInventoryService.shared.snapshot(
+            for: [application.processIdentifier],
+            requestedWindowIDs: currentExactWindowIDs.union(retainedWindowIDs)
+        )
+        let inventoryCandidates = deduplicated.enumerated().map { index, candidate in
                 WindowInventoryCandidate(
                     token: index,
                     ownerPID: application.processIdentifier,
@@ -1940,51 +1971,98 @@ final class WindowCommandTabMonitor {
                     isMinimized: candidate.isMinimized,
                     isPreferredWindow: candidate.isPreferredWindow
                 )
-            },
-            snapshot: snapshot
-        )
-        logger.debug(
-            "Cmd-Tab inventory pid=\(application.processIdentifier, privacy: .public) mode=\(snapshot.mode.rawValue, privacy: .public) ax=\(resolvedCandidates.count, privacy: .public) proxies=\(deduplicated.count, privacy: .public) matched=\(reconciliation.matches.count, privacy: .public) rejected=\(reconciliation.rejections.count, privacy: .public)"
-        )
-        let canonicalWindowIDByIndex = Dictionary(
-            uniqueKeysWithValues: reconciliation.matches.map {
-                ($0.token, $0.windowID)
             }
+        let resolution = WindowInventoryReconciler.resolve(
+            candidates: inventoryCandidates,
+            snapshot: snapshot,
+            retainedWindowIDs: retainedWindowIDs
         )
-        return deduplicated.enumerated().compactMap { index, candidate in
-            guard let canonicalWindowID = canonicalWindowIDByIndex[index] else {
-                return nil
-            }
-            return WindowCandidate(
-                application: candidate.application,
-                element: candidate.element,
-                title: candidate.title,
-                bounds: candidate.bounds,
-                windowID: canonicalWindowID,
-                isMinimized: candidate.isMinimized,
-                isPreferredWindow: candidate.isPreferredWindow,
-                canClose: candidate.canClose,
-                allowsUniformContent: candidate.allowsUniformContent
+        if snapshot.mode == .skyLight, let processLifetimeKey {
+            let liveValidatedIDs = Set<CGWindowID>(snapshot.surfaces.compactMap { surface in
+                guard WindowInventoryReconciler.isRetainablePrivateTarget(
+                    surface,
+                    mode: snapshot.mode
+                ) else { return nil }
+                return surface.windowID
+            })
+            let newlyConfirmedIDs = Set<CGWindowID>(resolution.windows.compactMap { resolved in
+                guard let operationToken = resolved.operationToken,
+                      deduplicated.indices.contains(operationToken),
+                      deduplicated[operationToken].windowID == resolved.surface.windowID,
+                      resolved.confidence == .exactWindowServerID,
+                      WindowInventoryReconciler.isRetainablePrivateTarget(
+                          resolved.surface,
+                          mode: snapshot.mode
+                      ) else { return nil }
+                return resolved.surface.windowID
+            })
+            WindowInventoryBindingHistory.shared.recordObservation(
+                processIdentifier: application.processIdentifier,
+                processLifetimeKey: processLifetimeKey,
+                confirmedExactWindowIDs: newlyConfirmedIDs,
+                liveValidatedWindowIDs: liveValidatedIDs,
+                snapshotCapturedAt: snapshot.capturedAt,
+                snapshotIsComplete: snapshot.isComplete
             )
         }
-    }
-
-    private func windowCandidatesAreExactProxies(
-        _ lhs: WindowCandidate,
-        _ rhs: WindowCandidate
-    ) -> Bool {
-        WindowAXCandidatePolicy.areExactProxies(
-            lhsPID: lhs.application.processIdentifier,
-            lhsTitle: lhs.title,
-            lhsBounds: lhs.bounds,
-            lhsIsMinimized: lhs.isMinimized,
-            lhsIsPreferredWindow: lhs.isPreferredWindow,
-            rhsPID: rhs.application.processIdentifier,
-            rhsTitle: rhs.title,
-            rhsBounds: rhs.bounds,
-            rhsIsMinimized: rhs.isMinimized,
-            rhsIsPreferredWindow: rhs.isPreferredWindow
+        logger.debug(
+            "Cmd-Tab inventory pid=\(application.processIdentifier, privacy: .public) mode=\(snapshot.mode.rawValue, privacy: .public) ax=\(resolvedCandidates.count, privacy: .public) proxies=\(deduplicated.count, privacy: .public) surfaces=\(snapshot.surfaces.count, privacy: .public) resolved=\(resolution.windows.count, privacy: .public) rejected=\(resolution.rejections.count, privacy: .public)"
         )
+        if diagnosticsEnabled {
+            WindowInventoryDiagnosticRecorder.shared.record(
+                source: .commandTab,
+                applicationBundleIdentifier: application.bundleIdentifier,
+                processIdentifier: application.processIdentifier,
+                axSources: WindowInventoryAXSourceDiagnostics(
+                    hasFocusedWindow: focusedWindow != nil,
+                    hasMainWindow: mainWindow != nil,
+                    windowsAttributeResult: Int32(windowsAttributeResult.rawValue),
+                    windowsAttributeCount: attributeWindows.count,
+                    lifecycleRegistryCount: lifecycleWindows.count,
+                    collectedCount: collectedWindows.count
+                ),
+                rawAXCandidates: rawAXDiagnostics,
+                reconcilerCandidates: inventoryCandidates,
+                lifecycle: WindowAXLifecycleRegistry.shared.diagnosticSnapshot(
+                    for: application
+                ),
+                snapshot: snapshot,
+                retainedWindowIDs: retainedWindowIDs,
+                resolution: resolution
+            )
+        }
+        return resolution.windows.compactMap { resolved in
+            if let operationToken = resolved.operationToken {
+                guard deduplicated.indices.contains(operationToken) else {
+                    return nil
+                }
+                let candidate = deduplicated[operationToken]
+                return WindowCandidate(
+                    application: candidate.application,
+                    element: candidate.element,
+                    title: candidate.title,
+                    bounds: resolved.surface.bounds,
+                    windowID: resolved.surface.windowID,
+                    isMinimized: candidate.isMinimized,
+                    isPreferredWindow: candidate.isPreferredWindow,
+                    canClose: candidate.canClose,
+                    allowsUniformContent: candidate.allowsUniformContent
+                )
+            }
+            let surfaceTitle = resolved.surface.title
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return WindowCandidate(
+                application: application,
+                element: nil,
+                title: surfaceTitle.isEmpty ? "未命名窗口" : surfaceTitle,
+                bounds: resolved.surface.bounds,
+                windowID: resolved.surface.windowID,
+                isMinimized: false,
+                isPreferredWindow: false,
+                canClose: false,
+                allowsUniformContent: false
+            )
+        }
     }
 
     private func mergedWindowCandidate(
@@ -1992,11 +2070,18 @@ final class WindowCommandTabMonitor {
         candidate: WindowCandidate,
         canonicalWindowID: CGWindowID?
     ) -> WindowCandidate {
-        let useCandidate = WindowAXOperationProxyPolicy.prefersCandidate(
-            existing: proxyEvidence(for: existing),
-            candidate: proxyEvidence(for: candidate)
-        )
-        let operationProxy = useCandidate ? candidate : existing
+        let operationProxy: WindowCandidate
+        if existing.element == nil, candidate.element != nil {
+            operationProxy = candidate
+        } else if existing.element != nil, candidate.element == nil {
+            operationProxy = existing
+        } else {
+            let useCandidate = WindowAXOperationProxyPolicy.prefersCandidate(
+                existing: proxyEvidence(for: existing),
+                candidate: proxyEvidence(for: candidate)
+            )
+            operationProxy = useCandidate ? candidate : existing
+        }
         let metadataProxy = !candidate.title.isEmpty ? candidate : existing
         return WindowCandidate(
             application: operationProxy.application,
@@ -2046,21 +2131,10 @@ final class WindowCommandTabMonitor {
             .sorted { $0.processIdentifier < $1.processIdentifier }
     }
 
-    private func windowCandidateQuality(_ candidate: WindowCandidate) -> Int {
-        var score = 0
-        if !candidate.title.isEmpty { score += 4 }
-        if let bounds = candidate.bounds,
-           bounds.width > 1,
-           bounds.height > 1 {
-            score += 2
-        }
-        if candidate.canClose { score += 1 }
-        return score
-    }
-
     private func observeApplicationActivationIfNeeded() {
-        guard activationObserver == nil else { return }
-        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        guard activationObserver == nil, deactivationObserver == nil else { return }
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        activationObserver = workspaceCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
@@ -2076,7 +2150,33 @@ final class WindowCommandTabMonitor {
                 if self?.eventTap == nil {
                     self?.updateEnabledState()
                 }
+                WindowAXLifecycleRegistry.shared.observe(
+                    application: application
+                )
                 self?.schedulePrewarm(for: application)
+            }
+        }
+        deactivationObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.didDeactivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.preferences.isEnabled,
+                      self.preferences.cmdTabPlusEnabled || self.preferences.dockPreviewEnabled,
+                      application.activationPolicy == .regular,
+                      !application.isTerminated,
+                      !self.preferences.isExcluded(application) else { return }
+                // Refresh the event-driven registry as the App leaves the
+                // foreground. This performs AX reads only at a lifecycle edge;
+                // WindowServer reconciliation remains demand-driven on hover
+                // or Cmd-Tab presentation.
+                WindowAXLifecycleRegistry.shared.observe(
+                    application: application
+                )
             }
         }
         // Do not prewarm background Apps at launch. The native switcher path
