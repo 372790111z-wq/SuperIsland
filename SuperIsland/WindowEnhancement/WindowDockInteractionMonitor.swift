@@ -869,9 +869,9 @@ final class WindowDockInteractionMonitor {
                 id: window.id,
                 title: window.title,
                 isMinimized: window.isMinimized,
-                canActivate: true,
+                canActivate: window.element != nil,
                 isPreviewOnly: false,
-                canClose: window.canClose,
+                canClose: window.element != nil && window.canClose,
                 thumbnailResult: thumbnailResult,
                 action: { [weak self] in
                     self?.activate(window: window, applicationPID: applicationPID)
@@ -987,20 +987,23 @@ final class WindowDockInteractionMonitor {
 
         let targetPID = application.processIdentifier
         let windows = windows(for: application)
-        let visibleWindows = windows.filter { !$0.isMinimized }
+        let operationalWindows = windows.filter { $0.element != nil }
+        let visibleWindows = operationalWindows.filter { !$0.isMinimized }
         let targetWasFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID
 
         mouseDownTargetPID = targetPID
         if targetWasFrontmost, !visibleWindows.isEmpty {
-            mouseDownReverseAction = .minimize(visibleWindows.map(\.element))
-        } else if visibleWindows.isEmpty, !windows.isEmpty {
+            mouseDownReverseAction = .minimize(visibleWindows.compactMap(\.element))
+        } else if visibleWindows.isEmpty, !operationalWindows.isEmpty {
             // Prefer restoring exactly the windows this feature minimized. If
             // the user/system minimized every window separately, restoring the
             // current AX list still gives the expected Dock toggle semantics.
             let tracked = (reverseMinimizedWindows[targetPID] ?? []).filter {
                 boolAttribute(kAXMinimizedAttribute, of: $0) != nil
             }
-            mouseDownReverseAction = .restore(tracked.isEmpty ? windows.map(\.element) : tracked)
+            mouseDownReverseAction = .restore(
+                tracked.isEmpty ? operationalWindows.compactMap(\.element) : tracked
+            )
         } else {
             // Clicking a background App with visible windows should retain the
             // Dock's normal activation behavior; it must not immediately vanish.
@@ -1311,7 +1314,7 @@ final class WindowDockInteractionMonitor {
 
     private struct DockWindowEntry: Identifiable {
         let id: Int
-        let element: AXUIElement
+        let element: AXUIElement?
         /// Raw AX title used for WindowServer matching. Keep this separate from
         /// the user-facing fallback label so an untitled window can still match.
         let captureTitle: String
@@ -1327,6 +1330,9 @@ final class WindowDockInteractionMonitor {
 
     private func windows(for application: NSRunningApplication) -> [DockWindowEntry] {
         guard AXIsProcessTrusted() else { return [] }
+        let diagnosticsEnabled = WindowInventoryDiagnosticGate.isEnabled(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        )
         let appElement = AXUIElementCreateApplication(application.processIdentifier)
         let focusedWindow = elementAttribute(kAXFocusedWindowAttribute, of: appElement)
         let mainWindow = elementAttribute(kAXMainWindowAttribute, of: appElement)
@@ -1345,20 +1351,62 @@ final class WindowDockInteractionMonitor {
         }
 
         var windowsValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
+        let windowsAttributeResult = AXUIElementCopyAttributeValue(
             appElement,
             kAXWindowsAttribute as CFString,
             &windowsValue
-        ) == .success,
-           let rawWindows = windowsValue as? [AXUIElement] {
+        )
+        let attributeWindows = windowsValue as? [AXUIElement] ?? []
+        if windowsAttributeResult == .success {
+            let rawWindows = attributeWindows
             for window in rawWindows
             where !collectedWindows.contains(where: { CFEqual($0, window) }) {
                 collectedWindows.append(window)
             }
         }
 
+        // WINS keeps an event-driven AX registry because several Apps omit an
+        // inactive real window from a later AXWindows read. Merge only exact
+        // WID elements observed for this same process launch; the shared
+        // WindowServer reconciler remains the final anti-phantom boundary.
+        let lifecycleWindows = WindowAXLifecycleRegistry.shared.windowElements(
+            for: application
+        )
+        for window in lifecycleWindows
+        where !collectedWindows.contains(where: { CFEqual($0, window) }) {
+            collectedWindows.append(window)
+        }
+
         var rawEntries: [DockWindowEntry] = []
+        var rawAXDiagnostics: [WindowInventoryAXCandidateDiagnostics] = []
         for (index, window) in collectedWindows.enumerated() {
+            var ownerPID: pid_t = 0
+            guard AXUIElementGetPid(window, &ownerPID) == .success else {
+                if diagnosticsEnabled {
+                    rawAXDiagnostics.append(.ownerValidationFailure(
+                        token: index,
+                        ownerPID: 0,
+                        isFocusedSource: focusedWindow.map { CFEqual($0, window) } ?? false,
+                        isMainSource: mainWindow.map { CFEqual($0, window) } ?? false,
+                        isWindowsAttributeSource: attributeWindows.contains { CFEqual($0, window) },
+                        isLifecycleRegistrySource: lifecycleWindows.contains { CFEqual($0, window) }
+                    ))
+                }
+                continue
+            }
+            guard ownerPID == application.processIdentifier else {
+                if diagnosticsEnabled {
+                    rawAXDiagnostics.append(.ownerValidationFailure(
+                        token: index,
+                        ownerPID: ownerPID,
+                        isFocusedSource: focusedWindow.map { CFEqual($0, window) } ?? false,
+                        isMainSource: mainWindow.map { CFEqual($0, window) } ?? false,
+                        isWindowsAttributeSource: attributeWindows.contains { CFEqual($0, window) },
+                        isLifecycleRegistrySource: lifecycleWindows.contains { CFEqual($0, window) }
+                    ))
+                }
+                continue
+            }
             let title = stringAttribute(kAXTitleAttribute, of: window)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let role = stringAttribute(kAXRoleAttribute, of: window) ?? ""
@@ -1367,23 +1415,56 @@ final class WindowDockInteractionMonitor {
             let isPreferredWindow = [focusedWindow, mainWindow]
                 .compactMap { $0 }
                 .contains { CFEqual($0, window) }
-            guard WindowAXCandidatePolicy.shouldInclude(
+            let isModal = boolAttribute("AXModal", of: window)
+            let isHidden = boolAttribute(kAXHiddenAttribute, of: window)
+            let isVisible = boolAttribute("AXVisible", of: window)
+            let shouldInclude = WindowAXCandidatePolicy.shouldInclude(
                 role: role,
                 subrole: subrole,
-                isModal: boolAttribute("AXModal", of: window),
+                isModal: isModal,
                 title: title,
                 isMinimized: isMinimized,
                 isPreferredWindow: isPreferredWindow,
-                isHidden: boolAttribute(kAXHiddenAttribute, of: window),
-                isVisible: boolAttribute("AXVisible", of: window)
-            ) else { continue }
+                isHidden: isHidden,
+                isVisible: isVisible
+            )
+            let diagnosticWindowID = diagnosticsEnabled ? windowIDAttribute(window) : nil
+            let diagnosticBounds = diagnosticsEnabled ? elementBounds(window) : nil
+            if diagnosticsEnabled {
+                rawAXDiagnostics.append(WindowInventoryAXCandidateDiagnostics(
+                    token: index,
+                    ownerPID: ownerPID,
+                    windowID: diagnosticWindowID,
+                    role: role,
+                    subrole: subrole,
+                    titleLength: title.count,
+                    bounds: diagnosticBounds,
+                    isMinimized: isMinimized,
+                    isPreferredWindow: isPreferredWindow,
+                    isHidden: isHidden,
+                    isVisible: isVisible,
+                    isModal: isModal,
+                    isFocusedSource: focusedWindow.map { CFEqual($0, window) } ?? false,
+                    isMainSource: mainWindow.map { CFEqual($0, window) } ?? false,
+                    isWindowsAttributeSource: attributeWindows.contains { CFEqual($0, window) },
+                    isLifecycleRegistrySource: lifecycleWindows.contains { CFEqual($0, window) },
+                    wasIncludedByAXPolicy: shouldInclude
+                ))
+            }
+            guard shouldInclude else { continue }
+            let windowID = diagnosticsEnabled
+                ? diagnosticWindowID
+                : windowIDAttribute(window)
+            let bounds = diagnosticsEnabled
+                ? diagnosticBounds
+                : elementBounds(window)
             rawEntries.append(DockWindowEntry(
                 id: index,
                 element: window,
                 captureTitle: title,
                 captureOccurrence: 0,
-                captureBounds: elementBounds(window),
-                windowID: windowIDAttribute(window),
+                captureBounds: bounds,
+                windowID: windowID,
                 title: title.isEmpty ? "未命名窗口" : title,
                 isMinimized: isMinimized,
                 isPreferredWindow: isPreferredWindow,
@@ -1392,58 +1473,41 @@ final class WindowDockInteractionMonitor {
             ))
         }
 
-        // Focused/main/AXWindows can vend distinct AX proxies for one real
-        // window. Prefer WindowServer identity and use the shared exact-proxy
-        // rule only when one proxy lacks an ID.
-        var deduplicated: [DockWindowEntry] = []
-        var indexByWindowID: [CGWindowID: Int] = [:]
-        for entry in rawEntries {
-            if let windowID = entry.windowID {
-                if let existingIndex = indexByWindowID[windowID] {
-                    deduplicated[existingIndex] = mergedDockEntry(
-                        existing: deduplicated[existingIndex],
-                        candidate: entry,
-                        canonicalWindowID: windowID
-                    )
-                    continue
-                }
-                if let proxyIndex = deduplicated.firstIndex(where: {
-                    $0.windowID == nil && dockEntriesAreExactProxies($0, entry, pid: application.processIdentifier)
-                }) {
-                    deduplicated[proxyIndex] = mergedDockEntry(
-                        existing: deduplicated[proxyIndex],
-                        candidate: entry,
-                        canonicalWindowID: windowID
-                    )
-                    indexByWindowID[windowID] = proxyIndex
-                } else {
-                    indexByWindowID[windowID] = deduplicated.count
-                    deduplicated.append(entry)
-                }
-            } else {
-                if let proxyIndex = deduplicated.firstIndex(where: {
-                    $0.windowID != nil
-                        && dockEntriesAreExactProxies($0, entry, pid: application.processIdentifier)
-                }) {
-                    deduplicated[proxyIndex] = mergedDockEntry(
-                        existing: deduplicated[proxyIndex],
-                        candidate: entry,
-                        canonicalWindowID: deduplicated[proxyIndex].windowID
-                    )
-                    continue
-                }
-                guard !deduplicated.contains(where: {
-                    $0.windowID == nil && CFEqual($0.element, entry.element)
-                }) else { continue }
-                deduplicated.append(entry)
+        // Before canonical reconciliation, deduplicate only facts that cannot
+        // collapse two real windows: the same AX object or the same non-zero
+        // WindowServer ID. Title and geometry are matching evidence, never a
+        // pre-reconciliation identity key.
+        let deduplicated = WindowAXProxyPreDeduplicator.deduplicate(
+            rawEntries,
+            ownerPID: { _ in application.processIdentifier },
+            windowID: \.windowID,
+            sameAXObject: { lhs, rhs in
+                guard let lhsElement = lhs.element,
+                      let rhsElement = rhs.element else { return false }
+                return CFEqual(lhsElement, rhsElement)
+            },
+            merge: { [weak self] existing, candidate, canonicalWindowID in
+                self?.mergedDockEntry(
+                    existing: existing,
+                    candidate: candidate,
+                    canonicalWindowID: canonicalWindowID
+                ) ?? existing
             }
-        }
-
-        let snapshot = WindowServerInventoryService.shared.snapshot(
-            for: [application.processIdentifier]
         )
-        let reconciliation = WindowInventoryReconciler.reconcile(
-            candidates: deduplicated.enumerated().map { index, entry in
+
+        let processIdentity = WindowThumbnailApplicationIdentity(
+            application: application
+        )
+        let processLifetimeKey = processIdentity?.processLifetimeKey
+        let retainedWindowIDs = processLifetimeKey.map {
+            WindowInventoryBindingHistory.shared.windowIDs(for: $0)
+        } ?? []
+        let currentExactWindowIDs = Set(deduplicated.compactMap(\.windowID))
+        let snapshot = WindowServerInventoryService.shared.snapshot(
+            for: [application.processIdentifier],
+            requestedWindowIDs: currentExactWindowIDs.union(retainedWindowIDs)
+        )
+        let inventoryCandidates = deduplicated.enumerated().map { index, entry in
                 WindowInventoryCandidate(
                     token: index,
                     ownerPID: application.processIdentifier,
@@ -1453,33 +1517,100 @@ final class WindowDockInteractionMonitor {
                     isMinimized: entry.isMinimized,
                     isPreferredWindow: entry.isPreferredWindow
                 )
-            },
-            snapshot: snapshot
-        )
-        logger.debug(
-            "Dock inventory pid=\(application.processIdentifier, privacy: .public) mode=\(snapshot.mode.rawValue, privacy: .public) ax=\(rawEntries.count, privacy: .public) proxies=\(deduplicated.count, privacy: .public) matched=\(reconciliation.matches.count, privacy: .public) rejected=\(reconciliation.rejections.count, privacy: .public)"
-        )
-        let canonicalWindowIDByIndex = Dictionary(
-            uniqueKeysWithValues: reconciliation.matches.map {
-                ($0.token, $0.windowID)
             }
+        let resolution = WindowInventoryReconciler.resolve(
+            candidates: inventoryCandidates,
+            snapshot: snapshot,
+            retainedWindowIDs: retainedWindowIDs
         )
-        let confirmedEntries = deduplicated.enumerated().compactMap { index, entry in
-            canonicalWindowIDByIndex[index].map { (entry, $0) }
+        if snapshot.mode == .skyLight, let processLifetimeKey {
+            let liveValidatedIDs = Set<CGWindowID>(snapshot.surfaces.compactMap { surface in
+                guard WindowInventoryReconciler.isRetainablePrivateTarget(
+                    surface,
+                    mode: snapshot.mode
+                ) else { return nil }
+                return surface.windowID
+            })
+            let newlyConfirmedIDs = Set<CGWindowID>(resolution.windows.compactMap { resolved in
+                guard let operationToken = resolved.operationToken,
+                      deduplicated.indices.contains(operationToken),
+                      deduplicated[operationToken].windowID == resolved.surface.windowID,
+                      resolved.confidence == .exactWindowServerID,
+                      WindowInventoryReconciler.isRetainablePrivateTarget(
+                          resolved.surface,
+                          mode: snapshot.mode
+                      ) else { return nil }
+                return resolved.surface.windowID
+            })
+            WindowInventoryBindingHistory.shared.recordObservation(
+                processIdentifier: application.processIdentifier,
+                processLifetimeKey: processLifetimeKey,
+                confirmedExactWindowIDs: newlyConfirmedIDs,
+                liveValidatedWindowIDs: liveValidatedIDs,
+                snapshotCapturedAt: snapshot.capturedAt,
+                snapshotIsComplete: snapshot.isComplete
+            )
         }
-
+        logger.debug(
+            "Dock inventory pid=\(application.processIdentifier, privacy: .public) mode=\(snapshot.mode.rawValue, privacy: .public) ax=\(rawEntries.count, privacy: .public) proxies=\(deduplicated.count, privacy: .public) surfaces=\(snapshot.surfaces.count, privacy: .public) resolved=\(resolution.windows.count, privacy: .public) rejected=\(resolution.rejections.count, privacy: .public)"
+        )
+        if diagnosticsEnabled {
+            WindowInventoryDiagnosticRecorder.shared.record(
+                source: .dock,
+                applicationBundleIdentifier: application.bundleIdentifier,
+                processIdentifier: application.processIdentifier,
+                axSources: WindowInventoryAXSourceDiagnostics(
+                    hasFocusedWindow: focusedWindow != nil,
+                    hasMainWindow: mainWindow != nil,
+                    windowsAttributeResult: Int32(windowsAttributeResult.rawValue),
+                    windowsAttributeCount: attributeWindows.count,
+                    lifecycleRegistryCount: lifecycleWindows.count,
+                    collectedCount: collectedWindows.count
+                ),
+                rawAXCandidates: rawAXDiagnostics,
+                reconcilerCandidates: inventoryCandidates,
+                lifecycle: WindowAXLifecycleRegistry.shared.diagnosticSnapshot(
+                    for: application
+                ),
+                snapshot: snapshot,
+                retainedWindowIDs: retainedWindowIDs,
+                resolution: resolution
+            )
+        }
         var titleOccurrences: [String: Int] = [:]
-        return confirmedEntries.enumerated().map { index, confirmed in
-            let entry = confirmed.0
+        return resolution.windows.compactMap { resolved in
+            let entry: DockWindowEntry
+            if let operationToken = resolved.operationToken {
+                guard deduplicated.indices.contains(operationToken) else {
+                    return nil
+                }
+                entry = deduplicated[operationToken]
+            } else {
+                let surfaceTitle = resolved.surface.title
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                entry = DockWindowEntry(
+                    id: Int(resolved.surface.windowID),
+                    element: nil,
+                    captureTitle: surfaceTitle,
+                    captureOccurrence: 0,
+                    captureBounds: resolved.surface.bounds,
+                    windowID: resolved.surface.windowID,
+                    title: surfaceTitle.isEmpty ? "未命名窗口" : surfaceTitle,
+                    isMinimized: false,
+                    isPreferredWindow: false,
+                    canClose: false,
+                    allowsUniformContent: false
+                )
+            }
             let occurrence = titleOccurrences[entry.captureTitle, default: 0]
             titleOccurrences[entry.captureTitle] = occurrence + 1
             return DockWindowEntry(
-                id: Int(confirmed.1),
+                id: Int(resolved.surface.windowID),
                 element: entry.element,
                 captureTitle: entry.captureTitle,
                 captureOccurrence: occurrence,
-                captureBounds: entry.captureBounds,
-                windowID: confirmed.1,
+                captureBounds: resolved.surface.bounds,
+                windowID: resolved.surface.windowID,
                 title: entry.title,
                 isMinimized: entry.isMinimized,
                 isPreferredWindow: entry.isPreferredWindow,
@@ -1487,25 +1618,6 @@ final class WindowDockInteractionMonitor {
                 allowsUniformContent: entry.allowsUniformContent
             )
         }
-    }
-
-    private func dockEntriesAreExactProxies(
-        _ lhs: DockWindowEntry,
-        _ rhs: DockWindowEntry,
-        pid: pid_t
-    ) -> Bool {
-        WindowAXCandidatePolicy.areExactProxies(
-            lhsPID: pid,
-            lhsTitle: lhs.captureTitle,
-            lhsBounds: lhs.captureBounds,
-            lhsIsMinimized: lhs.isMinimized,
-            lhsIsPreferredWindow: lhs.isPreferredWindow,
-            rhsPID: pid,
-            rhsTitle: rhs.captureTitle,
-            rhsBounds: rhs.captureBounds,
-            rhsIsMinimized: rhs.isMinimized,
-            rhsIsPreferredWindow: rhs.isPreferredWindow
-        )
     }
 
     private func mergedDockEntry(
@@ -1553,13 +1665,14 @@ final class WindowDockInteractionMonitor {
     private func activate(window: DockWindowEntry, applicationPID: pid_t) {
         guard let application = NSRunningApplication(processIdentifier: applicationPID),
               !application.isTerminated,
-              !preferences.isExcluded(application) else {
+              !preferences.isExcluded(application),
+              let element = window.element else {
             dismissPreview(animated: true)
             return
         }
         if window.isMinimized {
             _ = AXUIElementSetAttributeValue(
-                window.element,
+                element,
                 kAXMinimizedAttribute as CFString,
                 kCFBooleanFalse
             )
@@ -1576,9 +1689,9 @@ final class WindowDockInteractionMonitor {
         _ = AXUIElementSetAttributeValue(
             appElement,
             kAXFocusedWindowAttribute as CFString,
-            window.element
+            element
         )
-        _ = AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
+        _ = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
         dismissPreview(animated: true)
     }
 
@@ -1595,9 +1708,10 @@ final class WindowDockInteractionMonitor {
             return
         }
         guard window.canClose,
+              let element = window.element,
               let closeButton = elementAttribute(
                 kAXCloseButtonAttribute,
-                of: window.element
+                of: element
               ) else {
             // The row was closable when enumerated, but its AX hierarchy may
             // have changed while the pointer travelled to the button. Do not
@@ -1632,7 +1746,7 @@ final class WindowDockInteractionMonitor {
         }
 
         if var tracked = reverseMinimizedWindows[applicationPID] {
-            tracked.removeAll { CFEqual($0, window.element) }
+            tracked.removeAll { CFEqual($0, element) }
             reverseMinimizedWindows[applicationPID] = tracked.isEmpty ? nil : tracked
         }
 
