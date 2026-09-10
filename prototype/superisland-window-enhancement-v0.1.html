@@ -1,0 +1,2126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="SuperIsland 全量窗口增强系统可交互需求稿，覆盖分屏岛、Cmd-Tab、Dock、调度中心、快捷功能、权限与异常状态。" />
+  <link rel="icon" href="data:," />
+  <title>SuperIsland 窗口增强系统｜可交互需求稿 v0.1</title>
+  <style>
+    :root {
+      --bg: #08090c;
+      --panel: #111319;
+      --panel-2: #171a22;
+      --panel-3: #20242e;
+      --line: rgba(255,255,255,.09);
+      --line-strong: rgba(255,255,255,.16);
+      --text: #f5f7fb;
+      --muted: #9ba3b5;
+      --dim: #858d9e;
+      --blue: #4f8cff;
+      --blue-2: #2367f2;
+      --green: #38d68b;
+      --orange: #ffb84d;
+      --red: #ff6578;
+      --purple: #a77bff;
+      --radius: 16px;
+      --shadow: 0 28px 90px rgba(0,0,0,.45);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif; }
+    button, select, input { font: inherit; }
+    button { color: inherit; }
+
+    body { padding: 18px; }
+    .shell { max-width: 1680px; margin: 0 auto; }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+      padding: 2px 4px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .brand img { width: 38px; height: 38px; border-radius: 11px; box-shadow: 0 8px 30px rgba(79,140,255,.22); }
+    .brand h1 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+    .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .topmeta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+    .tag, .state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      color: var(--muted);
+      background: rgba(255,255,255,.035);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .tag.confirmed { color: #bff9da; border-color: rgba(56,214,139,.27); background: rgba(56,214,139,.08); }
+    .tag.pending { color: #ffe0a8; border-color: rgba(255,184,77,.28); background: rgba(255,184,77,.08); }
+    .tag.demo { color: #cddaff; border-color: rgba(79,140,255,.28); background: rgba(79,140,255,.08); }
+
+    .workbench {
+      display: grid;
+      grid-template-columns: 228px minmax(640px, 1fr) 302px;
+      min-height: 790px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      overflow: hidden;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .scenario-nav { background: #0d0f14; padding: 18px 12px; border-right: 1px solid var(--line); }
+    .nav-label { color: var(--dim); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; padding: 0 10px 8px; }
+    .scenario-list { display: grid; gap: 4px; }
+    .scenario-btn {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      align-items: center;
+      gap: 9px;
+      border: 0;
+      border-radius: 10px;
+      padding: 10px;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+      cursor: pointer;
+    }
+    .scenario-btn:hover { background: rgba(255,255,255,.05); color: var(--text); }
+    .scenario-btn.active { background: rgba(79,140,255,.14); color: #fff; box-shadow: inset 0 0 0 1px rgba(79,140,255,.18); }
+    .scenario-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: rgba(255,255,255,.055); font-size: 13px; }
+    .scenario-btn.active .scenario-icon { background: rgba(79,140,255,.25); }
+    .scenario-name { font-size: 12px; font-weight: 600; }
+    .scenario-desc { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+    .nav-divider { height: 1px; background: var(--line); margin: 16px 8px; }
+    .phase-stack { display: grid; gap: 7px; padding: 0 8px; }
+    .phase { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 10px; color: var(--muted); }
+    .phase b { font-weight: 600; }
+    .phase i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--blue); box-shadow: 0 0 0 3px rgba(79,140,255,.12); }
+    .phase:nth-child(2) i { background: var(--purple); }
+    .phase:nth-child(3) i { background: var(--orange); }
+    .phase:nth-child(4) i { background: var(--red); }
+
+    .stage-column { min-width: 0; display: flex; flex-direction: column; background: var(--panel-2); }
+    .stage-head {
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .stage-title h2 { margin: 0; font-size: 15px; }
+    .stage-title p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .stage-actions { display: flex; align-items: center; gap: 8px; }
+    .select, .btn {
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      background: rgba(255,255,255,.055);
+      padding: 8px 10px;
+      color: var(--text);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .select { appearance: auto; }
+    .btn:hover { background: rgba(255,255,255,.09); }
+    .btn.primary { background: var(--blue-2); border-color: transparent; }
+    .btn.primary:hover { background: #3274ff; }
+    .btn.danger { background: rgba(255,101,120,.12); border-color: rgba(255,101,120,.25); color: #ffb1bb; }
+    .btn.small { padding: 6px 8px; font-size: 10px; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    .desktop-wrap { flex: 1; padding: 18px; display: flex; align-items: center; justify-content: center; min-height: 650px; }
+    .desktop {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      max-height: 690px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 16px;
+      background:
+        radial-gradient(circle at 80% 15%, rgba(130,96,255,.42), transparent 32%),
+        radial-gradient(circle at 20% 80%, rgba(38,128,255,.34), transparent 36%),
+        linear-gradient(145deg, #11243e 0%, #18162b 50%, #0d1720 100%);
+      box-shadow: 0 22px 65px rgba(0,0,0,.34);
+      user-select: none;
+    }
+    .desktop.secondary-screen::after {
+      content: "外接显示器 · 竖屏";
+      position: absolute;
+      right: 14px;
+      top: 34px;
+      font-size: 10px;
+      color: rgba(255,255,255,.6);
+    }
+    .menubar {
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      background: rgba(240,244,250,.82);
+      color: rgba(11,13,18,.88);
+      backdrop-filter: blur(24px);
+      font-size: 10px;
+      position: relative;
+      z-index: 20;
+    }
+    .menu-left, .menu-right { display: flex; align-items: center; gap: 11px; }
+    .apple { font-size: 13px; }
+
+    .island {
+      position: absolute;
+      z-index: 80;
+      left: 50%;
+      top: 0;
+      transform: translateX(-50%);
+      width: 188px;
+      min-height: 34px;
+      border-radius: 0 0 18px 18px;
+      background: #050608;
+      box-shadow: 0 12px 32px rgba(0,0,0,.28);
+      transition: width .28s cubic-bezier(.2,.8,.2,1), min-height .28s cubic-bezier(.2,.8,.2,1), border-radius .28s;
+      overflow: hidden;
+      color: white;
+      pointer-events: auto;
+    }
+    .island.expanded { width: min(600px, 78%); min-height: 112px; border-radius: 18px; background: rgba(3,3,4,.96); box-shadow: 0 18px 42px rgba(0,0,0,.52); }
+    .island.full { width: min(610px, 76%); min-height: 218px; border-radius: 0 0 26px 26px; }
+    .island-inner { min-height: inherit; padding: 10px; }
+    .island-compact { height: 22px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 10px; color: #dce3f5; }
+    .island-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+    .island-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 1px 0 9px; }
+    .island-head strong { font-size: 12px; }
+    .island-head span { font-size: 9px; color: #8d96a9; }
+    .island-close { border: 0; width: 22px; height: 22px; border-radius: 50%; background: #1c1f26; cursor: pointer; font-size: 10px; }
+    .layout-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
+    .layout-target {
+      position: relative;
+      height: 92px;
+      border: 1px solid rgba(255,255,255,.13);
+      background: linear-gradient(#24262a,#17191d);
+      border-radius: 11px;
+      cursor: pointer;
+      padding: 7px;
+      transition: .16s;
+    }
+    .layout-target:hover, .layout-target.target-hot { border-color: rgba(255,255,255,.24); background: linear-gradient(#292b30,#1c1e22); transform: none; }
+    .layout-target b { display:none; }
+    .layout-icon { height: 76px; border: 1px solid rgba(255,255,255,.14); border-radius: 6px; overflow: hidden; display: flex; gap: 3px; padding: 3px; }
+    .layout-icon i { display: block; border-radius: 3px; background: rgba(79,140,255,.85); }
+    .layout-left i:first-child, .layout-right i:last-child { width: 50%; height: 100%; }
+    .layout-left i:last-child, .layout-right i:first-child { flex: 1; background: rgba(255,255,255,.07); }
+    .layout-full i { width: 100%; height: 100%; }
+    .layout-center i { width: 67%; height: 78%; margin: auto; }
+    .layout-quarter { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+    .layout-quarter i { width: 100%; height: 100%; background: rgba(255,255,255,.07); }
+    .layout-quarter-tl i:nth-child(1), .layout-quarter-tr i:nth-child(2),
+    .layout-quarter-bl i:nth-child(3), .layout-quarter-br i:nth-child(4) { background: rgba(79,140,255,.9); }
+    .layout-next i { width: 42%; height: 78%; margin: auto 0 auto auto; }
+    .layout-next::after { content: "→"; position: absolute; top: 20px; right: 10px; color: white; }
+    .layout-horizontal { display:grid; grid-template-rows:1fr 1fr; }
+    .layout-horizontal i, .layout-vertical i { width:100%; height:100%; background:rgba(255,255,255,.07); }
+    .layout-vertical { display:grid; grid-template-columns:1fr 1fr; }
+    .layout-mixed { display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; }
+    .layout-mixed i { width:100%; height:100%; background:rgba(255,255,255,.07); }
+    .layout-mixed i:first-child { grid-row:1 / 3; }
+    .layout-icon i.active { background:rgba(79,140,255,.92); box-shadow:0 0 0 1px rgba(255,255,255,.45) inset; }
+
+    .island-error { padding: 8px; display: grid; grid-template-columns: 28px 1fr auto; gap: 9px; align-items: center; }
+    .error-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: rgba(255,184,77,.14); color: var(--orange); }
+    .island-error strong { display: block; font-size: 11px; }
+    .island-error p { margin: 3px 0 0; color: #939caf; font-size: 9px; }
+
+    .app-window {
+      position: absolute;
+      z-index: 15;
+      border-radius: 12px;
+      background: rgba(246,247,250,.94);
+      color: #171a20;
+      border: 1px solid rgba(255,255,255,.7);
+      box-shadow: 0 20px 55px rgba(0,0,0,.28);
+      overflow: hidden;
+      transition: left .26s ease, top .26s ease, width .26s ease, height .26s ease, transform .2s, opacity .2s;
+    }
+    .app-window.dragging { transition: none; opacity: .9; transform: scale(1.01); pointer-events: none; }
+    .app-window.minimized { transform: translateY(550px) scale(.2); opacity: 0; pointer-events: none; }
+    .app-window.closed { display: none; }
+    #windowNotes { left: 8%; top: 17%; width: 47%; height: 58%; }
+    #windowBrowser { left: 43%; top: 28%; width: 49%; height: 52%; }
+    #windowPlayer { left: 62%; top: 13%; width: 28%; height: 33%; background: #12151b; color: white; }
+    .window-bar { height: 29px; display: flex; align-items: center; gap: 6px; padding: 0 10px; background: rgba(230,232,238,.9); cursor: grab; }
+    #windowPlayer .window-bar { background: #242731; }
+    .traffic { width: 8px; height: 8px; border-radius: 50%; background: #ff5f57; }
+    .traffic:nth-child(2) { background: #febc2e; }
+    .traffic:nth-child(3) { background: #28c840; }
+    .window-title { margin-left: 8px; font-size: 9px; font-weight: 600; opacity: .7; }
+    .window-body { padding: 14px; height: calc(100% - 29px); }
+    .notes-lines { display: grid; gap: 9px; }
+    .notes-lines i { height: 7px; border-radius: 5px; background: #d9dce4; }
+    .notes-lines i:nth-child(2) { width: 72%; }
+    .notes-lines i:nth-child(4) { width: 84%; }
+    .browser-card { height: 100%; border-radius: 8px; background: linear-gradient(145deg,#eef2ff,#f8f9fc); padding: 14px; }
+    .browser-card h3 { margin: 0 0 6px; font-size: 15px; }
+    .browser-card p { margin: 0; color: #737b8b; font-size: 10px; line-height: 1.55; }
+    .player-art { height: 70%; border-radius: 8px; background: radial-gradient(circle at 30% 30%, #7c5cff, transparent 40%), linear-gradient(145deg,#25304c,#08090d); }
+    .player-meta { margin-top: 8px; font-size: 9px; color: #bbc1ce; }
+
+    .dock {
+      position: absolute;
+      z-index: 35;
+      bottom: 7px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: end;
+      gap: 8px;
+      padding: 7px 11px 9px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 18px;
+      background: rgba(218,225,238,.28);
+      backdrop-filter: blur(28px) saturate(1.35);
+      box-shadow: 0 12px 32px rgba(0,0,0,.27), inset 0 1px rgba(255,255,255,.24);
+    }
+    .dock-icon {
+      position: relative;
+      border: 0;
+      width: 54px;
+      height: 54px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border-radius: 11px;
+      background: transparent;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(0,0,0,.22);
+      transition: transform .16s ease, filter .16s ease;
+    }
+    .dock-icon img { width: 100%; height: 100%; display: block; object-fit: contain; pointer-events: none; }
+    .dock-icon:hover, .dock-icon.active { transform: translateY(-7px) scale(1.13); filter: saturate(1.08); }
+    .dock-icon::after { content: ""; position: absolute; width: 4px; height: 4px; border-radius: 50%; background: rgba(18,22,31,.82); bottom: -7px; }
+
+    .dock-popover {
+      position: absolute;
+      z-index: 60;
+      bottom: 74px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(var(--popover-width, 236px), calc(100% - 24px));
+      padding: 12px 12px 13px;
+      border: 1px solid rgba(255,255,255,.34);
+      border-radius: 28px;
+      background: linear-gradient(180deg,rgba(17,18,22,.74),rgba(9,10,13,.86));
+      backdrop-filter: blur(36px) saturate(1.35);
+      box-shadow: 0 28px 78px rgba(0,0,0,.56), inset 0 1px rgba(255,255,255,.13);
+      display: none;
+      transform-origin: 50% 100%;
+    }
+    .dock-popover.show { display: block; animation: dockPopoverIn .18s cubic-bezier(.2,.8,.2,1); }
+    .dock-popover::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: -9px;
+      width: 18px;
+      height: 18px;
+      border-right: 1px solid rgba(255,255,255,.22);
+      border-bottom: 1px solid rgba(255,255,255,.22);
+      background: rgba(11,12,16,.86);
+      transform: translateX(-50%) rotate(45deg);
+      border-radius: 0 0 4px 0;
+    }
+    @keyframes dockPopoverIn { from { opacity: 0; transform: translateX(-50%) translateY(8px) scale(.96); } to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); } }
+    .popover-head { position: relative; text-align: center; margin: 0 4px 9px; font-size: 13px; font-weight: 650; color: #f2f3f7; letter-spacing: -.01em; }
+    .popover-mode { position: absolute; right: 0; top: 1px; color: #a9b0bd; font-size: 7px; font-weight: 500; }
+    .thumb-grid { display: grid; grid-template-columns: repeat(var(--window-count, 1), minmax(0, 1fr)); gap: 10px; }
+    .thumb { position: relative; min-width: 0; border: 0; border-radius: 17px; background: rgba(255,255,255,.21); padding: 10px 10px 9px; cursor: pointer; color: inherit; transition: background .15s ease, transform .15s ease; }
+    .thumb:hover { background: rgba(255,255,255,.29); transform: translateY(-2px); }
+    .thumb-preview { position: relative; display: block; height: 116px; overflow: hidden; border-radius: 11px; background: #edf0f5; border: 1px solid rgba(255,255,255,.38); box-shadow: 0 9px 24px rgba(0,0,0,.34); }
+    .thumb-preview .mini-bar { height: 13px; background: #d8dce4; border-bottom: 1px solid #c7ccd6; }
+    .thumb-preview .mini-sidebar { position: absolute; inset: 13px auto 0 0; width: 28%; background: #e3e6ec; border-right: 1px solid #d1d5dd; }
+    .thumb-preview .mini-content { position: absolute; inset: 24px 9px 8px 34%; border-radius: 4px; background: #fff; box-shadow: 0 2px 8px rgba(20,27,40,.14); }
+    .thumb-preview.notes .mini-content::before { content: ""; position: absolute; inset: 10px 9px; background: repeating-linear-gradient(to bottom,#d5d9e1 0 3px,transparent 3px 10px); }
+    .thumb-preview.browser .mini-content { background: linear-gradient(145deg,#eef2ff,#cad8f4); }
+    .thumb-preview.player { background: url('assets/music.png') center/62px no-repeat, #171923; }
+    .thumb.locked .thumb-preview { display: grid; place-items: center; background: rgba(27,29,36,.92); color: #aeb5c3; font-size: 8px; line-height: 1.4; padding: 12px; }
+    .thumb-name { display: block; font-size: 12px; font-weight: 560; color: #f1f2f5; margin-top: 9px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .thumb-close { position: absolute; z-index: 2; top: 3px; right: 3px; width: 20px; height: 20px; border: 1px solid rgba(255,255,255,.18); border-radius: 50%; background: rgba(8,9,12,.78); color: white; cursor: pointer; font-size: 10px; opacity: 0; transition: opacity .15s; }
+    .thumb:hover .thumb-close, .thumb-close:focus-visible { opacity: 1; }
+
+    .cmd-overlay, .mission-overlay, .fullscreen-overlay, .settings-window {
+      position: absolute;
+      inset: 28px 0 0;
+      z-index: 50;
+      display: none;
+    }
+    .cmd-overlay.show, .mission-overlay.show, .fullscreen-overlay.show, .settings-window.show { display: flex; }
+
+    .fullscreen-overlay {
+      align-items: stretch;
+      justify-content: stretch;
+      padding: 16px;
+      background: rgba(5,7,12,.78);
+      backdrop-filter: blur(18px) saturate(.85);
+    }
+    .fullscreen-lab {
+      width: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 18px;
+      background: rgba(14,16,22,.96);
+      box-shadow: 0 24px 70px rgba(0,0,0,.45);
+    }
+    .fullscreen-lab-head {
+      min-height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.025);
+    }
+    .fullscreen-lab-head strong { display: block; font-size: 12px; }
+    .fullscreen-lab-head p { margin: 3px 0 0; color: var(--muted); font-size: 9px; }
+    .fullscreen-lab-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .fullscreen-lab-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0,1.45fr) minmax(210px,.72fr); }
+    .fullscreen-stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+    .fullscreen-monitor {
+      position: relative;
+      min-height: 250px;
+      flex: 1;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 13px;
+      background:
+        radial-gradient(circle at 78% 16%, rgba(145,104,255,.5), transparent 34%),
+        linear-gradient(145deg,#193762,#141a31 52%,#0b1520);
+    }
+    .fullscreen-monitor.external {
+      background:
+        radial-gradient(circle at 22% 78%, rgba(57,210,151,.38), transparent 34%),
+        linear-gradient(145deg,#152b28,#151a31 55%,#10131b);
+    }
+    .fullscreen-display-label {
+      position: absolute;
+      z-index: 2;
+      top: 9px;
+      right: 10px;
+      border-radius: 999px;
+      padding: 4px 7px;
+      background: rgba(6,8,12,.64);
+      color: rgba(255,255,255,.74);
+      font-size: 8px;
+      backdrop-filter: blur(10px);
+    }
+    .fullscreen-surface {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      border-radius: 0;
+      background: rgba(246,247,251,.97);
+      color: #1d2028;
+      box-shadow: 0 22px 48px rgba(0,0,0,.28);
+      transition: inset .34s cubic-bezier(.2,.8,.2,1), border-radius .34s cubic-bezier(.2,.8,.2,1), transform .34s cubic-bezier(.2,.8,.2,1), opacity .2s ease;
+    }
+    .fullscreen-surface.windowed { inset: 13% 15%; border-radius: 11px; }
+    .fullscreen-surface.layout-left { inset: 7% 50.5% 7% 1.5%; border-radius: 10px; }
+    .fullscreen-surface.centered { inset: 17% 18%; border-radius: 11px; }
+    .fullscreen-surface.safe-visible { inset: 12% 12%; border-radius: 11px; box-shadow: 0 0 0 3px rgba(255,184,77,.45), 0 22px 48px rgba(0,0,0,.28); }
+    .fullscreen-surface.moving { transform: translateX(12%) scale(.94); opacity: .84; }
+    .fullscreen-surface-bar {
+      height: 28px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 10px;
+      background: rgba(226,229,236,.96);
+      border-bottom: 1px solid rgba(28,34,45,.1);
+    }
+    .fullscreen-surface-bar i { width: 7px; height: 7px; border-radius: 50%; background: #ff5f57; }
+    .fullscreen-surface-bar i:nth-child(2) { background: #febc2e; }
+    .fullscreen-surface-bar i:nth-child(3) { background: #28c840; }
+    .fullscreen-surface-bar b { margin-left: 7px; font-size: 9px; opacity: .72; }
+    .fullscreen-mode-badge { margin-left: auto; border-radius: 999px; padding: 3px 6px; background: #e4e7ed; color: #687181; font-size: 7px; }
+    .fullscreen-surface-body { height: calc(100% - 28px); display: grid; grid-template-columns: 27% 1fr; }
+    .fullscreen-surface-sidebar { padding: 14px 10px; background: #eceef3; }
+    .fullscreen-surface-sidebar i, .fullscreen-surface-content i { display: block; height: 6px; margin-bottom: 8px; border-radius: 5px; background: #d5d9e2; }
+    .fullscreen-surface-sidebar i:nth-child(2) { width: 74%; }
+    .fullscreen-surface-sidebar i:nth-child(3) { width: 88%; }
+    .fullscreen-surface-content { padding: 18px; background: #fafbfc; }
+    .fullscreen-surface-content h3 { margin: 0 0 10px; font-size: 13px; }
+    .fullscreen-surface-content i:nth-of-type(2) { width: 72%; }
+    .fullscreen-surface-content i:nth-of-type(4) { width: 84%; }
+    .fullscreen-island-hint {
+      position: absolute;
+      z-index: 4;
+      left: 50%;
+      top: 0;
+      transform: translateX(-50%) translateY(-110%);
+      max-width: 78%;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 0 0 14px 14px;
+      padding: 8px 11px;
+      background: #050608;
+      color: #f4f5f8;
+      box-shadow: 0 12px 30px rgba(0,0,0,.38);
+      font-size: 9px;
+      transition: transform .22s ease;
+    }
+    .fullscreen-island-hint.show { transform: translateX(-50%) translateY(0); }
+    .fullscreen-island-hint i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--orange); box-shadow: 0 0 9px rgba(255,184,77,.75); }
+    .fullscreen-state-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 11px; background: rgba(255,255,255,.025); }
+    .fullscreen-status-line { display: grid; grid-template-columns: 8px minmax(0,1fr) auto; align-items: center; gap: 8px; }
+    .fullscreen-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #737b8c; }
+    .fullscreen-status-dot.processing { background: var(--blue); box-shadow: 0 0 0 4px rgba(79,140,255,.12); animation: fsPulse 1s ease-in-out infinite; }
+    .fullscreen-status-dot.success { background: var(--green); }
+    .fullscreen-status-dot.error { background: var(--red); }
+    .fullscreen-status-dot.rollback { background: var(--orange); }
+    .fullscreen-status-dot.unknown { background: var(--purple); box-shadow: 0 0 0 4px rgba(167,123,255,.14); }
+    @keyframes fsPulse { 50% { opacity: .45; transform: scale(.78); } }
+    .fullscreen-status-line strong { font-size: 10px; }
+    .fullscreen-status-line span:last-child { color: var(--muted); font-size: 8px; }
+    .fullscreen-steps { margin: 9px 0 0; padding: 0; display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 5px; list-style: none; }
+    .fullscreen-steps li { min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 6px; color: #7f8798; background: #151820; font-size: 7px; line-height: 1.35; }
+    .fullscreen-steps li::before { content: "○"; display: block; margin-bottom: 3px; color: #596173; }
+    .fullscreen-steps li.active { border-color: rgba(79,140,255,.45); color: #dce6ff; background: rgba(79,140,255,.09); }
+    .fullscreen-steps li.active::before { content: "●"; color: var(--blue); }
+    .fullscreen-steps li.done { border-color: rgba(56,214,139,.26); color: #bff9da; }
+    .fullscreen-steps li.done::before { content: "✓"; color: var(--green); }
+    .fullscreen-steps li.error { border-color: rgba(255,101,120,.32); color: #ffc0c8; }
+    .fullscreen-steps li.error::before { content: "!"; color: var(--red); }
+    .fullscreen-steps li.unknown { border-color: rgba(167,123,255,.34); color: #ded1ff; background: rgba(167,123,255,.08); }
+    .fullscreen-steps li.unknown::before { content: "?"; color: var(--purple); }
+    .fullscreen-controls { min-width: 0; overflow: auto; border-left: 1px solid var(--line); padding: 12px; background: #0f1117; }
+    .fullscreen-controls h4 { margin: 0 0 7px; color: #dce2ed; font-size: 9px; }
+    .fullscreen-action-list, .fullscreen-test-list { display: grid; gap: 5px; }
+    .fullscreen-action-list { grid-template-columns: 1fr 1fr; }
+    .fullscreen-action, .fullscreen-test {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 7px;
+      background: #181b23;
+      color: var(--muted);
+      text-align: left;
+      cursor: pointer;
+      font-size: 8px;
+      line-height: 1.35;
+    }
+    .fullscreen-action:hover, .fullscreen-test:hover { color: white; border-color: rgba(79,140,255,.42); }
+    .fullscreen-action:focus-visible, .fullscreen-test:focus-visible { outline: 2px solid rgba(79,140,255,.82); outline-offset: 2px; }
+    .fullscreen-action.selected { color: #f4f7ff; border-color: rgba(79,140,255,.55); background: rgba(79,140,255,.14); box-shadow: inset 0 0 0 1px rgba(79,140,255,.08); }
+    .fullscreen-action.busy, .fullscreen-test.busy { cursor: progress; }
+    .fullscreen-action small { display: block; margin-top: 2px; color: #7f8798; font-size: 7px; }
+    .fullscreen-control-divider { height: 1px; margin: 11px 0; background: var(--line); }
+    .fullscreen-test-list { grid-template-columns: 1fr 1fr; }
+    .fullscreen-test { text-align: center; }
+    .fullscreen-test.lock { grid-column: 1 / -1; color: #cddaff; border-color: rgba(79,140,255,.25); }
+    .fullscreen-log { min-height: 50px; margin-top: 9px; border-radius: 8px; padding: 8px; background: rgba(255,255,255,.025); color: #8f98aa; font-size: 8px; line-height: 1.5; }
+    .fullscreen-log strong { color: #dce2ed; }
+    .fullscreen-disclaimer { margin: 9px 0 0; color: #70798b; font-size: 7px; line-height: 1.45; }
+
+    .cmd-overlay { align-items: flex-end; justify-content: center; padding-bottom: 56px; background: rgba(0,0,0,.64); backdrop-filter: blur(3px); }
+    .cmd-switcher {
+      position: relative;
+      width: min(850px, 94%);
+      min-height: 126px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 36px;
+      background: linear-gradient(180deg,rgba(24,25,29,.76),rgba(9,10,12,.88));
+      backdrop-filter: blur(32px) saturate(1.25);
+      box-shadow: 0 32px 90px rgba(0,0,0,.58), inset 0 1px rgba(255,255,255,.12);
+      padding: 14px 22px 12px;
+    }
+    .cmd-head { display: none; }
+    .cmd-cards { display: flex; align-items: end; justify-content: center; gap: 22px; min-height: 98px; }
+    .cmd-card { position: relative; width: 76px; border: 0; border-radius: 16px; background: transparent; padding: 0; cursor: pointer; color: white; }
+    .cmd-card-icon { width: 70px; height: 70px; display: block; margin: 0 auto; border-radius: 16px; object-fit: cover; box-shadow: 0 8px 18px rgba(0,0,0,.36); transition: transform .16s ease, box-shadow .16s ease; }
+    .cmd-card.selected .cmd-card-icon { transform: translateY(-7px) scale(1.09); box-shadow: 0 0 0 4px rgba(255,255,255,.18), 0 13px 28px rgba(0,0,0,.5); }
+    .cmd-card footer { display: block; visibility: hidden; margin-top: 7px; font-size: 10px; font-weight: 650; text-align: center; color: #f5f5f7; white-space: nowrap; }
+    .cmd-card.selected footer { visibility: visible; }
+    .cmd-card footer span:last-child { display: none; }
+    .cmd-window-popover { position: absolute; left: clamp(108px,var(--cmd-anchor,50%),calc(100% - 108px)); bottom: 144px; width: 196px; transform: translateX(-50%); padding: 10px; border: 1px solid rgba(255,255,255,.3); border-radius: 24px; background: rgba(12,13,16,.84); backdrop-filter: blur(30px) saturate(1.2); box-shadow: 0 26px 65px rgba(0,0,0,.55), inset 0 1px rgba(255,255,255,.1); transition: left .18s cubic-bezier(.2,.8,.2,1); }
+    .cmd-window-popover::after { content:""; position:absolute; left:50%; bottom:-9px; width:18px; height:18px; transform:translateX(-50%) rotate(45deg); background:rgba(12,13,16,.9); border-right:1px solid rgba(255,255,255,.2); border-bottom:1px solid rgba(255,255,255,.2); }
+    .cmd-window-app, .cmd-window-name { display:block; text-align:center; font-size:11px; font-weight:620; }
+    .cmd-window-preview { display:block; height:112px; margin:8px 0; overflow:hidden; border-radius:10px; background:linear-gradient(145deg,#e8edfa,#9db4e6); border:1px solid rgba(255,255,255,.32); box-shadow:0 8px 22px rgba(0,0,0,.32); }
+    .cmd-window-preview::before { content:""; display:block; height:15px; background:#d9dde7; border-bottom:1px solid #c6ccd9; }
+    .cmd-window-preview::after { content:""; display:block; width:68%; height:64px; margin:12px auto; border-radius:6px; background:repeating-linear-gradient(to bottom,#d7dce5 0 5px,transparent 5px 14px),#f8f9fb; }
+    .cmd-window-preview.locked { display:grid; place-items:center; background:repeating-linear-gradient(135deg,#20242f,#20242f 7px,#2b303c 7px,#2b303c 14px); color:#a0a7b5; font-size:9px; }
+    .cmd-window-preview.locked::before, .cmd-window-preview.locked::after { display:none; }
+    .cmd-actions { display:flex; align-items:center; justify-content:center; margin-top:4px; color:#d8d8dc; font-size:12px; }
+    .cmd-actions .btn { display:none; }
+    .cmd-key-guide { display:block; text-align:center; color:rgba(255,255,255,.78); font-size:11px; letter-spacing:.02em; }
+
+    .mission-overlay { flex-direction: column; padding: 36px 34px 58px; background: rgba(5,7,11,.42); backdrop-filter: blur(14px); }
+    .mission-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .mission-head strong { font-size: 13px; }
+    .mission-head span { color: #bac1d0; font-size: 10px; }
+    .mission-grid { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; align-items: center; }
+    .mission-card { position: relative; height: 150px; border: 1px solid rgba(255,255,255,.18); border-radius: 13px; background: rgba(246,248,252,.92); color: #1b1e25; padding: 9px; cursor: pointer; transition: .16s; }
+    .mission-card:hover { transform: scale(1.035); box-shadow: 0 15px 40px rgba(0,0,0,.25); }
+    .mission-card .mc-bar { height: 20px; border-radius: 6px 6px 2px 2px; background: #dfe3eb; margin-bottom: 8px; }
+    .mission-card p { margin: 5px 0 0; font-size: 9px; color: #687181; }
+    .mission-close { position: absolute; right: -8px; top: -8px; border: 0; width: 25px; height: 25px; border-radius: 50%; background: #2a2d35; color: white; cursor: pointer; box-shadow: 0 5px 15px rgba(0,0,0,.3); }
+
+    .settings-window { position: fixed; inset: 0; z-index: 300; width: 100vw; height: 100vh; align-items: center; justify-content: center; padding: 18px; background: rgba(4,6,10,.58); color: #f3f3f4; backdrop-filter: blur(18px) saturate(.9); }
+    .settings-card { position: relative; width: min(960px,calc(100vw - 36px)); height: min(680px,calc(100vh - 36px)); min-width: min(800px,calc(100vw - 36px)); min-height: min(560px,calc(100vh - 36px)); display: grid; grid-template-columns: 200px minmax(0,1fr); overflow: hidden; border: 1px solid rgba(255,255,255,.11); border-radius: 14px; background: #1c1c1c; box-shadow: 0 34px 100px rgba(0,0,0,.58), inset 0 1px rgba(255,255,255,.035); }
+    .si-settings-sidebar { min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; padding: 12px 8px; border-right: 1px solid rgba(255,255,255,.1); background: #1c1c1c; }
+    .si-settings-brand { display: flex; align-items: center; gap: 10px; margin: 1px 8px 16px; color: #f5f5f7; font-size: 13px; font-weight: 630; }
+    .si-settings-brand img { width: 28px; height: 28px; border-radius: 7px; object-fit: cover; }
+    .si-settings-nav { display: flex; flex-direction: column; gap: 1px; }
+    .si-settings-pane { width: 100%; min-height: 30px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 6px; padding: 6px 12px 6px 35px; background: transparent; color: #9d9da2; cursor: pointer; text-align: left; font: inherit; font-size: 13px; }
+    .si-settings-pane img { width: 18px; height: 18px; margin-left: -4px; border-radius: 5px; object-fit: cover; }
+    .si-settings-pane:hover { color: #dedee1; background: rgba(255,255,255,.035); }
+    .si-settings-pane.selected { padding-left: 12px; color: #f5f5f7; background: #333; font-weight: 560; }
+    .si-settings-quit { margin-top: auto; }
+    .settings-main { min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; background: #1c1c1c; }
+    .settings-toolbar { height: 66px; flex: 0 0 auto; display: flex; align-items: center; padding: 0 22px 0 24px; border-bottom: 1px solid rgba(255,255,255,.06); background: rgba(28,28,28,.96); }
+    .settings-toolbar-copy { min-width: 0; flex: 1; }
+    .settings-toolbar strong { display: block; font-size: 18px; letter-spacing: -.012em; }
+    .settings-toolbar span { display: block; margin-top: 3px; color: #86868b; font-size: 11px; }
+    .settings-close { width: 28px; height: 28px; border: 0; border-radius: 7px; background: rgba(255,255,255,.06); color: #aaaab0; cursor: pointer; font-size: 18px; line-height: 1; }
+    .settings-close:hover { color: white; background: rgba(255,255,255,.11); }
+    .settings-scroll { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 30px 24px; scrollbar-width: thin; scrollbar-color: #4c4c4f transparent; }
+    .settings-master { min-height: 62px; display: flex; align-items: center; gap: 12px; padding: 11px 14px; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; background: #2a2a2a; }
+    .settings-app-icon { width: 38px; height: 38px; border-radius: 9px; object-fit: cover; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+    .settings-master-copy { min-width: 0; flex: 1; }
+    .settings-master-copy strong { display: block; font-size: 13px; font-weight: 600; }
+    .settings-master-copy span { display: block; margin-top: 3px; color: #909095; font-size: 11px; }
+    .settings-overview { display: grid; grid-template-columns: minmax(250px,.92fr) minmax(285px,1.08fr); gap: 18px; align-items: start; margin-top: 18px; }
+    .settings-preview-wrap { position: sticky; top: 0; }
+    .settings-preview { position: relative; height: 268px; display: grid; place-items: center; overflow: hidden; border: 1px solid rgba(255,255,255,.09); border-radius: 12px; background: #101114; box-shadow: 0 14px 34px rgba(0,0,0,.22); }
+    .settings-preview > img, .settings-preview video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; transition: opacity .16s ease; }
+    .settings-preview > img { padding: 12px; }
+    .settings-preview video { opacity: 0; background: #08090c; }
+    .settings-preview.playing > img { opacity: 0; }
+    .settings-preview.playing video { opacity: 1; }
+    .settings-preview.switching video { opacity: .28; }
+    .settings-preview-meta { padding: 11px 3px 0; }
+    .settings-preview-meta strong { display: block; font-size: 13px; }
+    .settings-preview-meta span { display: block; margin-top: 4px; color: #8e8e93; font-size: 11px; line-height: 1.45; }
+    .settings-feature-list { display: flex; flex-direction: column; gap: 7px; }
+    .settings-feature-row { min-height: 43px; display: flex; align-items: center; gap: 8px; padding: 6px 11px 6px 13px; border: 1px solid rgba(255,255,255,.06); border-radius: 10px; background: #2a2a2a; outline: none; cursor: default; transition: background .15s ease, border-color .15s ease, transform .15s ease; }
+    .settings-preview-trigger:hover, .settings-preview-trigger:focus-within, .settings-preview-trigger:focus-visible, .settings-preview-trigger.previewing { border-color: rgba(10,132,255,.48); background: #2f3843; transform: translateX(-2px); }
+    .settings-feature-row > strong { min-width: 0; flex: 1; font-size: 13px; font-weight: 520; white-space: nowrap; }
+    .settings-section { margin-top: 24px; }
+    .settings-section > h4 { margin: 0 0 8px 2px; color: #a6a6aa; font-size: 11px; font-weight: 550; }
+    .settings-group { overflow: hidden; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; background: #2a2a2a; }
+    .settings-row { min-height: 55px; display: flex; align-items: center; gap: 10px; padding: 8px 13px; border-bottom: .5px solid rgba(255,255,255,.1); outline: none; transition: background .15s, border-color .15s, transform .15s; }
+    .settings-row:last-child { border-bottom: 0; }
+    .settings-copy { min-width: 0; flex: 1; }
+    .settings-copy strong { display: block; font-size: 13px; font-weight: 520; }
+    .settings-copy span { display: block; margin-top: 3px; color: #8e8e93; font-size: 10px; }
+    .settings-shortcut { min-width: 112px; height: 30px; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; background: #363638; color: #dedee2; cursor: pointer; font-size: 12px; }
+    .settings-shortcut.recording { color: #5ac8fa; box-shadow: 0 0 0 2px rgba(10,132,255,.2); }
+    .settings-layouts { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px 9px; padding: 12px; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; background: #242424; }
+    .settings-layout-card { min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+    .settings-layout { display: grid; place-items: center; height: 116px; border: 1px solid rgba(255,255,255,.09); border-radius: 10px; padding: 0; overflow: hidden; background: #2a2a2a; cursor: pointer; outline: none; transition: transform .16s, border-color .15s, box-shadow .15s, background .15s; }
+    .settings-layout:hover, .settings-layout:focus-visible, .settings-layout.previewing { transform: translateY(-2px); border-color: rgba(10,132,255,.65); background: #303943; box-shadow: 0 8px 22px rgba(0,0,0,.2), 0 0 0 2px rgba(10,132,255,.14); }
+    .settings-layout img { width: 100%; height: 100%; object-fit: cover; opacity: .94; }
+    .settings-layout-card .settings-shortcut { width: 100%; min-width: 0; height: 28px; font-size: 10px; }
+    .settings-footnote { margin: 18px 8px 0; color: #77777c; font-size: 10px; line-height: 1.5; text-align: center; }
+    .settings-advanced { position: absolute; inset: 0 0 0 201px; z-index: 3; display: none; flex-direction: column; background: rgba(28,28,28,.995); }
+    .settings-advanced.show { display: flex; }
+    .settings-advanced-head { height: 66px; flex: 0 0 auto; display: flex; align-items: center; padding: 0 24px; border-bottom: 1px solid rgba(255,255,255,.06); }
+    .settings-advanced-head strong { font-size: 18px; }
+    .settings-advanced-body { flex: 1; overflow: auto; padding: 18px 24px 72px; scrollbar-width: thin; }
+    .advanced-card { overflow: hidden; margin-bottom: 16px; border: 1px solid rgba(255,255,255,.08); border-radius: 11px; background: #2a2a2a; }
+    .advanced-row { min-height: 54px; display: flex; align-items: center; gap: 12px; padding: 10px 15px; border-bottom: .5px solid rgba(255,255,255,.1); }
+    .advanced-row:last-child { border-bottom: 0; }
+    .advanced-row > strong { flex: 1; font-size: 13px; font-weight: 520; }
+    .accent-options { display: flex; align-items: center; gap: 10px; }
+    .accent-swatch { width: 22px; height: 22px; border: 0; border-radius: 50%; background: var(--swatch); cursor: pointer; box-shadow: inset 0 0 0 1px rgba(255,255,255,.13); }
+    .accent-swatch.selected { box-shadow: inset 0 0 0 6px rgba(255,255,255,.72), 0 0 0 2px var(--swatch); }
+    .advanced-card-head { padding: 14px 15px 12px; border-bottom: .5px solid rgba(255,255,255,.1); }
+    .advanced-card-head strong { display: block; font-size: 13px; }
+    .advanced-card-head span { display: block; margin-top: 4px; color: #8e8e93; font-size: 11px; }
+    .excluded-apps { min-height: 92px; display: flex; align-items: center; gap: 10px; padding: 14px 15px; }
+    .advanced-action { min-height: 32px; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; padding: 0 13px; background: #38383a; color: #e5e5e7; cursor: pointer; font: inherit; font-size: 12px; }
+    .advanced-action:hover { background: #444447; }
+    .excluded-app-chip { display: none; align-items: center; gap: 8px; border-radius: 9px; padding: 7px 10px; background: #38383a; color: #dddde0; font-size: 11px; }
+    .excluded-app-chip.show { display: flex; }
+    .license-copy { flex: 1; min-width: 0; }
+    .license-copy strong { display: block; font-size: 13px; }
+    .license-copy span { display: block; margin-top: 4px; color: #8e8e93; font-size: 11px; }
+    .advanced-footer { position: absolute; left: 0; right: 0; bottom: 0; height: 58px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-top: 1px solid rgba(255,255,255,.07); background: rgba(28,28,28,.97); backdrop-filter: blur(16px); }
+    .advanced-footer .done { background: #0a84ff; border-color: #0a84ff; color: white; font-weight: 620; }
+    .settings-advanced-button { width: 100%; margin-top: 16px; border: 1px solid rgba(255,255,255,.08); border-radius: 9px; padding: 11px; background: #2a2a2a; color: #d0d0d4; cursor: pointer; font-size: 12px; font-weight: 600; }
+    .settings-advanced-button:hover { background: #333; }
+    .switch { --switch-w: 34px; --switch-h: 20px; position: relative; width: var(--switch-w); height: var(--switch-h); border: 0; border-radius: 999px; background: #55555a; cursor: pointer; padding: 0; transition: .18s; flex: 0 0 auto; }
+    .switch::after { content: ""; position: absolute; width: calc(var(--switch-h) - 4px); height: calc(var(--switch-h) - 4px); border-radius: 50%; background: white; top: 2px; left: 2px; transition: .18s; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+    .switch.on { background: #0a84ff; }
+    .switch.on::after { left: calc(var(--switch-w) - var(--switch-h) + 2px); }
+    .permission-state { font-size: 13px; color: #18a353; white-space: nowrap; }
+    .permission-state.missing { color: var(--orange); }
+    .kbd { display: inline-flex; align-items: center; gap: 3px; }
+    .kbd i { font-style: normal; border: 1px solid rgba(255,255,255,.12); background: #353535; border-radius: 5px; padding: 3px 6px; font-size: 9px; color: #d5d8df; }
+
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+    @media (max-width: 820px) {
+      .settings-card { grid-template-columns: 168px minmax(0,1fr); min-width: 0; }
+      .si-settings-sidebar { width: 168px; }
+      .settings-advanced { left: 169px; }
+      .settings-overview { grid-template-columns: minmax(220px,.9fr) minmax(250px,1.1fr); gap: 12px; }
+      .settings-preview { height: 230px; }
+      .settings-shortcut { min-width: 94px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .settings-preview video, .settings-preview-trigger { transition: none; }
+      .settings-preview-trigger:hover, .settings-preview-trigger:focus-visible, .settings-preview-trigger.previewing { transform: none; }
+      .fullscreen-surface, .fullscreen-island-hint { transition: none; }
+      .fullscreen-status-dot.processing { animation: none; }
+    }
+
+    .modal-backdrop { position: absolute; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.48); backdrop-filter: blur(5px); }
+    .modal-backdrop.show { display: flex; }
+    .modal { width: 330px; padding: 17px; border-radius: 16px; border: 1px solid rgba(255,255,255,.13); background: #20232a; box-shadow: var(--shadow); }
+    .modal h3 { margin: 0; font-size: 13px; }
+    .modal p { margin: 7px 0 15px; color: #a5adbd; font-size: 10px; line-height: 1.55; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+    .toast {
+      position: absolute;
+      z-index: 110;
+      left: 50%;
+      bottom: 62px;
+      transform: translate(-50%, 16px);
+      opacity: 0;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 999px;
+      padding: 8px 10px 8px 13px;
+      background: rgba(16,18,24,.94);
+      box-shadow: 0 12px 35px rgba(0,0,0,.35);
+      color: #e8ebf2;
+      font-size: 10px;
+      transition: .22s;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+    .toast button { border: 0; border-radius: 999px; padding: 5px 8px; background: rgba(79,140,255,.18); color: #b9ceff; cursor: pointer; font-size: 9px; }
+
+    .notes-panel { background: #0d0f14; border-left: 1px solid var(--line); padding: 17px; overflow: auto; }
+    .notes-panel h3 { margin: 0; font-size: 13px; }
+    .notes-panel > p { margin: 5px 0 14px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+    .note-block { border: 1px solid var(--line); border-radius: 12px; padding: 11px; background: rgba(255,255,255,.025); margin-bottom: 10px; }
+    .note-block h4 { margin: 0 0 7px; font-size: 10px; color: #dce2ed; }
+    .note-block ul { margin: 0; padding-left: 16px; display: grid; gap: 6px; }
+    .note-block li { color: var(--muted); font-size: 9px; line-height: 1.45; }
+    .note-block.confirmed { border-color: rgba(56,214,139,.18); background: rgba(56,214,139,.035); }
+    .note-block.pending { border-color: rgba(255,184,77,.2); background: rgba(255,184,77,.035); }
+    .state-lab { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .state-lab button { border: 1px solid var(--line); border-radius: 8px; background: #171a21; color: var(--muted); padding: 7px; cursor: pointer; font-size: 9px; }
+    .state-lab button:hover { color: white; border-color: rgba(79,140,255,.45); }
+
+    .coverage {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: repeat(4,1fr);
+      gap: 8px;
+    }
+    .coverage-card { border: 1px solid var(--line); border-radius: 10px; padding: 9px; background: rgba(255,255,255,.025); }
+    .coverage-card strong { display: block; font-size: 10px; }
+    .coverage-card span { display: block; margin-top: 3px; font-size: 9px; color: var(--muted); }
+
+    .prototype-note { margin-top: 10px; color: #858d9e; font-size: 9px; text-align: center; }
+
+    @media (max-width: 1220px) {
+      body { padding: 10px; }
+      .workbench { grid-template-columns: 184px minmax(600px, 1fr); }
+      .notes-panel { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }
+      .notes-panel > h3, .notes-panel > p, .notes-panel > .note-block:first-of-type, .notes-panel > .note-block:nth-of-type(2) { grid-column: span 1; }
+    }
+    @media (max-width: 880px) {
+      .workbench { display: block; }
+      .scenario-nav { border-right: 0; border-bottom: 1px solid var(--line); }
+      .scenario-list { grid-template-columns: repeat(3,1fr); }
+      .scenario-btn { grid-template-columns: 24px 1fr; padding: 7px; }
+      .scenario-desc, .phase-stack, .nav-divider { display: none; }
+      .desktop-wrap { padding: 10px; min-height: 480px; }
+      .notes-panel { display: block; }
+      .stage-head { align-items: flex-start; flex-direction: column; }
+      .layout-grid { grid-template-columns: repeat(3,1fr); }
+      .island.expanded { width: 80%; }
+      .fullscreen-lab-grid { grid-template-columns: 1fr; overflow: auto; }
+      .fullscreen-controls { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
+      .fullscreen-stage { min-height: 430px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="../assets/logo.png" alt="SuperIsland Logo" />
+        <div>
+          <h1>SuperIsland 窗口增强系统</h1>
+          <p>可交互需求稿 v0.1 · HTML Gate · 不是业务实现</p>
+        </div>
+      </div>
+      <div class="topmeta">
+        <span class="tag confirmed">✓ 全量能力范围已确认</span>
+        <span class="tag demo">演示数据</span>
+        <span class="tag pending">全屏 PRD / Swift 尚未同步</span>
+        <span class="tag pending">4 项待拍板</span>
+      </div>
+    </header>
+
+    <section class="workbench">
+      <aside class="scenario-nav" aria-label="需求场景">
+        <div class="nav-label">关键流程</div>
+        <div class="scenario-list">
+          <button class="scenario-btn active" data-scene="split">
+            <span class="scenario-icon">▤</span>
+            <span><span class="scenario-name">拖窗分屏岛</span><span class="scenario-desc">拖入、布局、跨屏、撤销</span></span>
+          </button>
+          <button class="scenario-btn" data-scene="fullscreen">
+            <span class="scenario-icon">⛶</span>
+            <span><span class="scenario-name">原生全屏转换</span><span class="scenario-desc">退出、执行、恢复、回滚</span></span>
+          </button>
+          <button class="scenario-btn" data-scene="cmdtab">
+            <span class="scenario-icon">⌘</span>
+            <span><span class="scenario-name">Cmd-Tab Plus</span><span class="scenario-desc">预览、切换、关闭、退出</span></span>
+          </button>
+          <button class="scenario-btn" data-scene="dock">
+            <span class="scenario-icon">◫</span>
+            <span><span class="scenario-name">Dock 增强</span><span class="scenario-desc">预览、反转、锁定屏幕</span></span>
+          </button>
+          <button class="scenario-btn" data-scene="mission">
+            <span class="scenario-icon">▦</span>
+            <span><span class="scenario-name">调度中心 Pro</span><span class="scenario-desc">关闭窗口、退出 App</span></span>
+          </button>
+          <button class="scenario-btn" data-scene="settings">
+            <span class="scenario-icon">⚙</span>
+            <span><span class="scenario-name">设置与权限</span><span class="scenario-desc">功能、快捷键、诊断</span></span>
+          </button>
+        </div>
+
+        <div class="nav-divider"></div>
+        <div class="nav-label">交付阶段</div>
+        <div class="phase-stack">
+          <div class="phase"><span><i></i> <b>P0</b> 窗口核心</span><span>首发</span></div>
+          <div class="phase"><span><i></i> <b>P1</b> 切换预览</span><span>第二阶段</span></div>
+          <div class="phase"><span><i></i> <b>P2</b> Dock 增强</span><span>第三阶段</span></div>
+          <div class="phase"><span><i></i> <b>P3</b> 系统深度</span><span>PoC 后</span></div>
+        </div>
+      </aside>
+
+      <section class="stage-column">
+        <header class="stage-head">
+          <div class="stage-title">
+            <h2 id="sceneTitle">拖动窗口到岛上完成布局</h2>
+            <p id="sceneDescription">用户拖动真实窗口靠近刘海，岛展开为布局投放区；放置后可撤销。</p>
+          </div>
+          <div class="stage-actions">
+            <select id="windowType" class="select" aria-label="窗口类型">
+              <option value="resizable">可缩放窗口</option>
+              <option value="fixed">不可缩放窗口</option>
+            </select>
+            <button id="primaryDemo" class="btn primary">演示拖入岛</button>
+            <button id="resetDemo" class="btn">重置</button>
+          </div>
+        </header>
+
+        <div class="desktop-wrap">
+          <div class="desktop" id="desktop" aria-label="macOS 桌面交互模拟器">
+            <div class="menubar">
+              <div class="menu-left"><span class="apple">●</span><b>备忘录</b><span>文件</span><span>编辑</span><span>窗口</span></div>
+              <div class="menu-right"><span>⌁</span><span>⌨</span><span>82%</span><span>周一 10:30</span></div>
+            </div>
+
+            <div class="island" id="island">
+              <div class="island-inner" id="islandContent">
+                <div class="island-compact"><span class="island-dot"></span><span>窗口中心 · 已就绪</span></div>
+              </div>
+            </div>
+
+            <article class="app-window" id="windowNotes" data-window="notes">
+              <div class="window-bar"><i class="traffic"></i><i class="traffic"></i><i class="traffic"></i><span class="window-title">产品讨论记录</span></div>
+              <div class="window-body">
+                <div class="notes-lines"><i></i><i></i><i></i><i></i><i></i><i></i><i style="width:63%"></i></div>
+              </div>
+            </article>
+
+            <article class="app-window" id="windowBrowser" data-window="browser">
+              <div class="window-bar"><i class="traffic"></i><i class="traffic"></i><i class="traffic"></i><span class="window-title">SuperIsland 需求资料</span></div>
+              <div class="window-body">
+                <div class="browser-card"><h3>Window Hub</h3><p>把窗口排列、切换、Dock 和 Mission Control 统一到 SuperIsland 的原生交互体系。</p></div>
+              </div>
+            </article>
+
+            <article class="app-window" id="windowPlayer" data-window="player">
+              <div class="window-bar"><i class="traffic"></i><i class="traffic"></i><i class="traffic"></i><span class="window-title">正在播放</span></div>
+              <div class="window-body"><div class="player-art"></div><div class="player-meta">Night Drive · Playing</div></div>
+            </article>
+
+            <div class="fullscreen-overlay" id="fullscreenOverlay" aria-label="原生全屏窗口转换状态机演示">
+              <div class="fullscreen-lab">
+                <header class="fullscreen-lab-head">
+                  <div><strong id="fullscreenLabTitle"></strong><p id="fullscreenLabDescription"></p></div>
+                  <div class="fullscreen-lab-badges"><span class="tag confirmed">语义已确认</span><span class="tag demo">假数据演示</span><span class="tag pending">代码未实现</span></div>
+                </header>
+                <div class="fullscreen-lab-grid">
+                  <section class="fullscreen-stage">
+                    <div class="fullscreen-monitor" id="fullscreenMonitor">
+                      <span class="fullscreen-display-label" id="fullscreenDisplayLabel">主显示器 · 原生全屏</span>
+                      <div class="fullscreen-surface" id="fullscreenSurface">
+                        <div class="fullscreen-surface-bar"><i></i><i></i><i></i><b>产品讨论记录</b><span class="fullscreen-mode-badge" id="fullscreenModeBadge">原生全屏</span></div>
+                        <div class="fullscreen-surface-body">
+                          <div class="fullscreen-surface-sidebar"><i></i><i></i><i></i></div>
+                          <div class="fullscreen-surface-content"><h3>全屏中的备忘录窗口</h3><i></i><i></i><i></i><i></i></div>
+                        </div>
+                      </div>
+                      <div class="fullscreen-island-hint" id="fullscreenIslandHint"><i></i><span>原生全屏没有可拖标题栏，请先退出全屏再使用分屏岛。</span></div>
+                    </div>
+
+                    <div class="fullscreen-state-card" aria-live="polite">
+                      <div class="fullscreen-status-line"><span class="fullscreen-status-dot" id="fullscreenStatusDot"></span><strong id="fullscreenStatusTitle">等待触发</strong><span id="fullscreenStatusDetail">当前：主显示器原生全屏</span></div>
+                      <ol class="fullscreen-steps" id="fullscreenSteps"></ol>
+                    </div>
+                  </section>
+
+                  <aside class="fullscreen-controls">
+                    <h4>1 · 选择动作</h4>
+                    <div class="fullscreen-action-list" id="fullscreenActionList" aria-label="全屏窗口动作"></div>
+
+                    <div class="fullscreen-control-divider"></div>
+                    <h4>2 · 状态与异常演示</h4>
+                    <div class="fullscreen-test-list" id="fullscreenTestList" aria-label="全屏异常状态"></div>
+                    <div class="fullscreen-log" id="fullscreenLog"></div>
+                    <p class="fullscreen-disclaimer" id="fullscreenDisclaimer"></p>
+                  </aside>
+                </div>
+              </div>
+            </div>
+
+            <div class="dock-popover" id="dockPopover"></div>
+
+            <div class="dock" id="dock" aria-label="Dock 演示">
+              <button class="dock-icon" data-app="notes" title="备忘录" aria-label="备忘录"><img src="assets/notes.png" alt="" /></button>
+              <button class="dock-icon" data-app="browser" title="Safari" aria-label="Safari"><img src="assets/safari.png" alt="" /></button>
+              <button class="dock-icon" data-app="player" title="音乐" aria-label="音乐"><img src="assets/music.png" alt="" /></button>
+              <button class="dock-icon" data-app="settings" title="Finder" aria-label="Finder 与设置演示入口"><img src="assets/finder.png" alt="" /></button>
+            </div>
+
+            <div class="cmd-overlay" id="cmdOverlay">
+              <div class="cmd-switcher">
+                <div class="cmd-head"><strong>Cmd-Tab Plus</strong><span class="key-hints">← → 选择 · 1–3 窗口 · ⌘W 关闭 · ⌘Q 退出</span></div>
+                <div class="cmd-window-popover" id="cmdWindowPopover" aria-live="polite"></div>
+                <div class="cmd-cards" id="cmdCards"></div>
+                <div class="cmd-actions">
+                  <button class="btn small" id="cmdPrev">← 上一个</button>
+                  <div><button class="btn small" id="cmdClose">关闭窗口</button> <button class="btn small danger" id="cmdQuit">退出 App</button><span class="cmd-key-guide">⌘ ⇥ 切换窗口 · 松开 Command 打开</span></div>
+                  <button class="btn small" id="cmdNext">下一个 →</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="mission-overlay" id="missionOverlay">
+              <div class="mission-head"><div><strong>调度中心 Pro</strong><br><span>选择窗口后可关闭；退出 App 需要二次确认</span></div><button class="btn small" id="missionExit">退出调度中心</button></div>
+              <div class="mission-grid" id="missionGrid"></div>
+            </div>
+
+            <div class="settings-window" id="settingsWindow">
+              <div class="settings-card">
+                <aside class="si-settings-sidebar" aria-label="SuperIsland 设置侧栏">
+                  <div class="si-settings-brand"><img src="../assets/logo.png" alt=""><span>SuperIsland</span></div>
+                  <nav class="si-settings-nav">
+                    <button class="si-settings-pane" data-pane-name="通用">通用</button>
+                    <button class="si-settings-pane" data-pane-name="模块">模块</button>
+                    <button class="si-settings-pane" data-pane-name="外观">外观</button>
+                    <button class="si-settings-pane" data-pane-name="扩展">扩展</button>
+                    <button class="si-settings-pane selected" aria-current="page"><img src="../assets/logo.png" alt="">窗口增强</button>
+                    <button class="si-settings-pane" data-pane-name="高级">高级</button>
+                  </nav>
+                  <button class="si-settings-pane si-settings-quit" id="closeSettingsWindow">退出</button>
+                </aside>
+
+                <section class="settings-main">
+                  <div class="settings-toolbar">
+                    <div class="settings-toolbar-copy"><strong>窗口增强</strong><span>分屏、窗口预览、快捷操作与布局</span></div>
+                    <button class="settings-close" id="settingsBack" aria-label="关闭窗口增强设置">×</button>
+                  </div>
+                  <div class="settings-scroll" id="settingsScroll">
+                    <div class="settings-master">
+                      <img class="settings-app-icon" src="../assets/logo.png" alt="SuperIsland 图标">
+                      <div class="settings-master-copy"><strong>窗口增强</strong><span>开启后由 SuperIsland 在后台响应拖窗、Dock 与快捷键操作</span></div>
+                      <button class="switch on" data-toggle aria-label="启用窗口增强" aria-pressed="true"></button>
+                    </div>
+
+                    <div class="settings-overview">
+                      <div class="settings-preview-wrap">
+                        <div class="settings-preview" id="settingsPreview" aria-live="polite">
+                          <img id="settingsPreviewDefault" src="assets/settings-previews/macbook-hero.png" alt="SuperIsland 窗口增强功能总览">
+                          <video id="settingsPreviewVideo" muted loop playsinline preload="metadata"></video>
+                        </div>
+                        <div class="settings-preview-meta"><strong id="settingsPreviewTitle">功能总览</strong><span id="settingsPreviewDescription">移入右侧任一功能，或用键盘聚焦，即可查看对应演示。</span></div>
+                      </div>
+
+                      <div id="settingsInteractionArea">
+                        <div class="settings-feature-list" aria-label="核心窗口增强功能">
+                          <div class="settings-feature-row settings-preview-trigger" tabindex="0" data-preview="edge"><strong>屏幕边缘分屏</strong><button class="switch on" data-toggle aria-label="屏幕边缘分屏" aria-pressed="true"></button></div>
+                          <div class="settings-feature-row settings-preview-trigger" tabindex="0" data-preview="island"><strong>悬浮分屏岛</strong><button class="switch on" data-toggle aria-label="悬浮分屏岛" aria-pressed="true"></button></div>
+                          <div class="settings-feature-row settings-preview-trigger" tabindex="0" data-preview="shake"><strong>摇动窗口</strong><button class="switch on" data-toggle aria-label="摇动窗口" aria-pressed="true"></button></div>
+                          <div class="settings-feature-row settings-preview-trigger" tabindex="0" data-preview="dock"><strong>Dock 窗口预览</strong><button class="switch on" data-toggle aria-label="Dock 窗口预览" aria-pressed="true"></button></div>
+                          <div class="settings-feature-row settings-preview-trigger" tabindex="0" data-preview="mission"><strong>调度中心 Pro</strong><button class="switch on" data-toggle aria-label="调度中心 Pro" aria-pressed="true"></button></div>
+                          <div class="settings-feature-row settings-preview-trigger" tabindex="0" data-preview="reverse"><strong>Dock 窗口反转</strong><button class="switch on" data-toggle aria-label="Dock 窗口反转" aria-pressed="true"></button></div>
+                          <div class="settings-feature-row settings-preview-trigger" tabindex="0" data-preview="cmdtab"><strong>Cmd-Tab Plus</strong><button class="switch on" data-toggle aria-label="Cmd-Tab Plus" aria-pressed="true"></button></div>
+                        </div>
+
+                        <section class="settings-section">
+                          <h4>调度中心 Pro</h4>
+                          <div class="settings-group">
+                            <div class="settings-row settings-preview-trigger" tabindex="0" data-preview="missionClose"><div class="settings-copy"><strong>关闭窗口</strong><span>关闭当前选中的单个窗口</span></div><button class="settings-shortcut" data-shortcut>⌘ W</button><button class="switch on" data-toggle aria-label="关闭窗口快捷键" aria-pressed="true"></button></div>
+                            <div class="settings-row settings-preview-trigger" tabindex="0" data-preview="missionQuit"><div class="settings-copy"><strong>退出程序</strong><span>退出前二次确认，保护未保存内容</span></div><button class="settings-shortcut" data-shortcut>设置快捷键</button><button class="switch on" data-toggle aria-label="退出程序快捷键" aria-pressed="true"></button></div>
+                          </div>
+                        </section>
+
+                        <section class="settings-section">
+                          <h4>快捷功能</h4>
+                          <div class="settings-group">
+                            <div class="settings-row settings-preview-trigger" tabindex="0" data-preview="dockLock"><div class="settings-copy"><strong>Dock 锁定屏幕</strong></div><button class="settings-shortcut" data-shortcut>设置快捷键</button><button class="switch on" data-toggle aria-label="Dock 锁定屏幕" aria-pressed="true"></button></div>
+                            <div class="settings-row settings-preview-trigger" tabindex="0" data-preview="hiddenAll"><div class="settings-copy"><strong>隐藏所有窗口</strong></div><button class="settings-shortcut" data-shortcut>⌘ D</button><button class="switch on" data-toggle aria-label="隐藏所有窗口" aria-pressed="true"></button></div>
+                            <div class="settings-row settings-preview-trigger" tabindex="0" data-preview="hiddenOthers"><div class="settings-copy"><strong>隐藏其他窗口</strong></div><button class="settings-shortcut" data-shortcut>设置快捷键</button><button class="switch on" data-toggle aria-label="隐藏其他窗口" aria-pressed="true"></button></div>
+                            <div class="settings-row settings-preview-trigger" tabindex="0" data-preview="nextDisplay"><div class="settings-copy"><strong>移动到下个显示器</strong></div><button class="settings-shortcut" data-shortcut>设置快捷键</button><button class="switch on" data-toggle aria-label="移动到下个显示器" aria-pressed="true"></button></div>
+                            <div class="settings-row settings-preview-trigger" tabindex="0" data-preview="previousDisplay"><div class="settings-copy"><strong>移动到上个显示器</strong></div><button class="settings-shortcut" data-shortcut>设置快捷键</button><button class="switch on" data-toggle aria-label="移动到上个显示器" aria-pressed="true"></button></div>
+                            <div class="settings-row settings-preview-trigger" tabindex="0" data-preview="center"><div class="settings-copy"><strong>窗口居中</strong></div><button class="settings-shortcut" data-shortcut>设置快捷键</button><button class="switch on" data-toggle aria-label="窗口居中" aria-pressed="true"></button></div>
+                          </div>
+                        </section>
+
+                        <section class="settings-section">
+                          <h4>窗口布局</h4>
+                          <div class="settings-layouts" id="settingsLayoutGrid" aria-label="为窗口布局设置快捷键">
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="左半屏" aria-label="预览左半屏布局"><img src="assets/settings-layouts/left-half.png" alt="左半屏布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置左半屏快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="右半屏" aria-label="预览右半屏布局"><img src="assets/settings-layouts/right-half.png" alt="右半屏布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置右半屏快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="最大化" aria-label="预览最大化布局"><img src="assets/settings-layouts/maximize.png" alt="最大化布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置最大化快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="左侧三分之一" aria-label="预览左侧三分之一布局"><img src="assets/settings-layouts/left-third.png" alt="左侧三分之一布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置左侧三分之一快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="居中三分之一" aria-label="预览居中三分之一布局"><img src="assets/settings-layouts/center-third.png" alt="居中三分之一布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置居中三分之一快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="右侧三分之一" aria-label="预览右侧三分之一布局"><img src="assets/settings-layouts/right-third.png" alt="右侧三分之一布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置右侧三分之一快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="上半屏" aria-label="预览上半屏布局"><img src="assets/settings-layouts/top-half.png" alt="上半屏布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置上半屏快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="下半屏" aria-label="预览下半屏布局"><img src="assets/settings-layouts/bottom-half.png" alt="下半屏布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置下半屏快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="右侧三分之二" aria-label="预览右侧三分之二布局"><img src="assets/settings-layouts/right-two-thirds.png" alt="右侧三分之二布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置右侧三分之二快捷键">设置快捷键</button></div>
+                            <div class="settings-layout-card"><button class="settings-layout" data-layout-name="左侧三分之二" aria-label="预览左侧三分之二布局"><img src="assets/settings-layouts/left-two-thirds.png" alt="左侧三分之二布局"></button><button class="settings-shortcut" data-shortcut aria-label="设置左侧三分之二快捷键">设置快捷键</button></div>
+                          </div>
+                        </section>
+
+                        <section class="settings-section">
+                          <h4>权限与降级</h4>
+                          <div class="settings-group">
+                            <div class="settings-row"><div class="settings-copy"><strong>辅助功能</strong><span>用于读取窗口位置并执行移动、缩放和关闭</span></div><span class="permission-state" id="axPermissionLabel">✓ 已授权</span></div>
+                            <div class="settings-row"><div class="settings-copy"><strong>屏幕录制（可选）</strong><span>只用于本地窗口缩略图；拒绝后仍可基础分屏</span></div><button class="btn small" id="requestScreenPermission" disabled>已授权</button></div>
+                          </div>
+                          <button class="settings-advanced-button" id="openAdvancedSettings">高级设置…</button>
+                        </section>
+                        <p class="settings-footnote">本页仅确认 SuperIsland 设置结构与交互；正式系统权限、快捷键冲突和 Swift 落地需分别验收。</p>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="settings-advanced" id="advancedSettings" aria-label="高级设置">
+                  <div class="settings-advanced-head"><strong>高级选项</strong></div>
+                  <div class="settings-advanced-body">
+                    <div class="advanced-card">
+                      <div class="advanced-row"><strong>预留台前调度空间</strong><button class="switch on" data-toggle aria-label="预留台前调度空间" aria-pressed="true"></button></div>
+                      <div class="advanced-row"><strong>分屏窗口间距</strong><button class="switch" data-toggle aria-label="分屏窗口间距" aria-pressed="false"></button></div>
+                      <div class="advanced-row"><strong>强调色</strong><div class="accent-options" aria-label="强调色选择">
+                        <button class="accent-swatch selected" style="--swatch:#8e8e93" data-accent="灰色" aria-label="灰色强调色" aria-pressed="true"></button>
+                        <button class="accent-swatch" style="--swatch:#0a84ff" data-accent="蓝色" aria-label="蓝色强调色" aria-pressed="false"></button>
+                        <button class="accent-swatch" style="--swatch:#bf5af2" data-accent="紫色" aria-label="紫色强调色" aria-pressed="false"></button>
+                        <button class="accent-swatch" style="--swatch:#ff375f" data-accent="红色" aria-label="红色强调色" aria-pressed="false"></button>
+                        <button class="accent-swatch" style="--swatch:#ff9f0a" data-accent="橙色" aria-label="橙色强调色" aria-pressed="false"></button>
+                        <button class="accent-swatch" style="--swatch:#ffd60a" data-accent="黄色" aria-label="黄色强调色" aria-pressed="false"></button>
+                        <button class="accent-swatch" style="--swatch:#30d158" data-accent="绿色" aria-label="绿色强调色" aria-pressed="false"></button>
+                      </div>
+                    </div>
+                    </div>
+
+                    <div class="advanced-card">
+                      <div class="advanced-card-head"><strong>排除 App</strong><span>SuperIsland 会排除以下 App，不响应快捷键和分屏功能</span></div>
+                      <div class="excluded-apps"><button class="advanced-action" id="addExcludedApp">添加 App…</button><div class="excluded-app-chip" id="excludedAppChip"><img src="assets/finder.png" width="24" height="24" alt="Finder"><span>Finder</span></div></div>
+                    </div>
+
+                    <div class="advanced-card">
+                      <div class="advanced-card-head"><strong>关于</strong></div>
+                      <div class="advanced-row"><div class="license-copy"><strong>SuperIsland</strong><span>版本 0.1 · HTML 演示</span></div><button class="advanced-action" data-advanced-action="检查新版本">检查新版本</button></div>
+                    </div>
+                  </div>
+                  <div class="advanced-footer"><button class="advanced-action" data-advanced-action="了解更多">了解更多</button><button class="advanced-action done" id="closeAdvancedSettings">完成</button></div>
+                </section>
+              </div>
+            </div>
+
+            <div class="modal-backdrop" id="modalBackdrop">
+              <div class="modal">
+                <h3 id="modalTitle">确认操作</h3>
+                <p id="modalText">此操作需要确认。</p>
+                <div class="modal-actions"><button class="btn" id="modalCancel">取消</button><button class="btn primary" id="modalConfirm">确认</button></div>
+              </div>
+            </div>
+
+            <div class="toast" id="toast"><span id="toastText">操作完成</span><button id="toastAction">撤销</button></div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="notes-panel">
+        <h3 id="noteTitle">场景说明 · 拖窗分屏岛</h3>
+        <p id="noteSummary">拖动窗口靠近刘海后才展开，不长期占用屏幕；不支持缩放的窗口必须明确提示。</p>
+
+        <div class="note-block confirmed">
+          <h4>✓ 已确认</h4>
+          <ul id="confirmedList">
+            <li>全量能力纳入产品范围，按阶段交付。</li>
+            <li>窗口能力作为原生内置模块，而不是 JS 扩展。</li>
+            <li>基础分屏不依赖屏幕录制权限。</li>
+          </ul>
+        </div>
+
+        <div class="note-block pending">
+          <h4 id="pendingHeading">△ 待拍板</h4>
+          <ul id="pendingList">
+            <li>用户可见名称：“窗口中心”或“窗口增强”。</li>
+            <li>拖到岛上后默认直接投放，还是松手前再次确认。</li>
+            <li>Cmd-Tab Plus 是否默认替代系统 Cmd-Tab。</li>
+            <li>默认快捷键组合。</li>
+          </ul>
+        </div>
+
+        <div class="note-block">
+          <h4>状态实验室</h4>
+          <div class="state-lab">
+            <button data-lab="normal">正常状态</button>
+            <button data-lab="axDenied">辅助功能拒绝</button>
+            <button data-lab="screenDenied">缩略图未授权</button>
+            <button data-lab="noWindows">没有可管理窗口</button>
+          </div>
+        </div>
+
+        <div class="note-block">
+          <h4>演示边界</h4>
+          <ul>
+            <li>页面内窗口、缩略图和权限均为演示假数据，不代表系统能力已经接通。</li>
+            <li>Mission Control 操作能否覆盖所有 macOS 版本，需要原生 PoC 后确认。</li>
+            <li>关闭含未保存内容的窗口时，最终恢复与确认行为由目标 App 决定。</li>
+          </ul>
+        </div>
+      </aside>
+    </section>
+
+    <section class="coverage" aria-label="需求覆盖">
+      <div class="coverage-card"><strong>入口</strong><span>拖窗热区、快捷键、Dock、Mission Control、设置</span></div>
+      <div class="coverage-card"><strong>反馈</strong><span>处理中、成功、失败、撤销、重试、确认</span></div>
+      <div class="coverage-card"><strong>权限</strong><span>辅助功能必需；屏幕录制按缩略图功能单独申请</span></div>
+      <div class="coverage-card"><strong>兼容</strong><span>多屏、竖屏、全屏转换（仅需求稿）、不可缩放窗口、无窗口</span></div>
+    </section>
+    <p class="prototype-note">HTML 仅用于确认入口、流程、状态、反馈和边界；确认后才进入正式 PRD，PRD 确认后仍需单独授权进入 Swift 代码。</p>
+  </main>
+
+  <script>
+    const $ = (selector, root = document) => root.querySelector(selector);
+    const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+    const fullscreenFlowConfig = {
+      title: '原生全屏窗口的安全转换',
+      description: '布局与居中退出全屏后保持窗口化；跨屏移动退出、移动并恢复全屏；任何不确定状态都先对账，再回滚或降级到在线可见区域。',
+      labTitle: '原生全屏转换状态机',
+      labDescription: '保留同一窗口身份与稳定 display ID；每次写入前后都 readback，不把超时或定时器结束当作成功。',
+      noteTitle: '场景说明 · 原生全屏转换',
+      noteSummary: '已确认的是主动作语义；超时对账、AX 失败、显示器拓扑复验和回滚降级是本轮安全审查补充的需求草稿。当前 PRD 与 Swift 尚未同步。',
+      confirmed: [
+        '布局和居中：退出原生全屏，执行成功后保持窗口化。',
+        '跨屏移动：退出原生全屏，移动到目标显示器，校验后恢复原生全屏。',
+        '拖动分屏岛：原生全屏没有可拖标题栏，提示先退出全屏。',
+        '单个窗口同一时刻只运行一条转换状态机，连续触发被锁定并忽略。'
+      ],
+      pending: [
+        '超时进入未知态并对账；晚到退出不得继续原动作，优先恢复触发前状态。',
+        'AX 拒绝、部分写入和 readback 失败必须显式收敛为已验证回滚或在线可见区域窗口化。',
+        '跨屏每次写入前后都用稳定 display ID 复验；拓扑变化时停止恢复全屏并降级到在线可见区域。',
+        '回滚只有 readback 匹配才算成功；回滚失败保持在线可见、窗口化、未知态并提示人工恢复。',
+        '正式超时阈值、AX 错误映射和人工恢复入口仍需原生 PoC 后写入 PRD。'
+      ],
+      pendingHeading: '△ 安全分支待同步',
+      primary: '执行所选动作',
+      initialLog: '<strong>等待操作。</strong><br>每个演示从同一主屏原生全屏假状态开始；处理中锁定窗口身份、display ID 和状态机代次。',
+      disclaimer: '窗口、显示器、稳定 display ID、AX 返回值、延迟、超时、晚到事件和 readback 均为演示假数据。当前 PRD 与 Swift 仍排除原生全屏窗口；本场景尚未同步、尚未实现，也不代表已通过 macOS 真机验证。',
+      actions: {
+        layout: { name: '左半屏布局', hint: '成功：窗口化左半屏', final: '主显示器窗口化 · 左半屏', layoutClass: 'layout-left', successPolicy: 'keepWindowed', writeLabel: '写入位置与尺寸' },
+        center: { name: '窗口居中', hint: '成功：窗口化居中', final: '主显示器窗口化 · 居中', layoutClass: 'centered', successPolicy: 'keepWindowed', writeLabel: '写入居中位置' },
+        move: { name: '移动到下个显示器', hint: '退出 → 移动 → 验证 → 恢复', final: '外接显示器 · 原生全屏', successPolicy: 'restoreFullscreen', writeLabel: '写入目标显示器位置' },
+        drag: { name: '拖入分屏岛', hint: '全屏中拒绝并提示先退出', final: '主显示器 · 原生全屏（未改变）', successPolicy: 'reject' }
+      },
+      faults: {
+        normal: { label: '正常完成', action: 'selected' },
+        exitLate: { label: '退出超时 · 晚到退出', action: 'selected' },
+        axWriteRejected: { label: 'AX 写入拒绝', action: 'selected' },
+        partialWrite: { label: 'Frame 部分成功', action: 'selected' },
+        readbackFailed: { label: 'Readback 失败', action: 'selected' },
+        targetDisconnected: { label: '目标屏预检断开', action: 'move' },
+        displayLostDuringMove: { label: '移动中断屏', action: 'move' },
+        displayLostDuringRestore: { label: '恢复中断屏', action: 'move' },
+        restoreFailed: { label: '恢复全屏失败', action: 'move' },
+        rollbackFailed: { label: '回滚校验失败', action: 'move' },
+        repeat: { label: '连续触发锁定测试', action: 'selected', wide: true }
+      }
+    };
+
+    const sceneMeta = {
+      split: {
+        title: '拖动窗口到岛上完成布局',
+        description: '用户拖动真实窗口靠近刘海，岛展开为布局投放区；放置后可撤销。',
+        noteTitle: '场景说明 · 拖窗分屏岛',
+        noteSummary: '拖动窗口靠近刘海后才展开，不长期占用屏幕；不支持缩放的窗口必须明确提示。',
+        confirmed: ['全量能力纳入产品范围，按阶段交付。','窗口管理必须是原生内置模块。','基础布局只依赖辅助功能权限。'],
+        pending: ['布局入口名：“窗口中心”或“窗口增强”。','松手即投放，还是松手前二次确认。','是否允许用户编辑布局模板。'],
+        primary: '演示拖入岛'
+      },
+      fullscreen: {
+        title: fullscreenFlowConfig.title,
+        description: fullscreenFlowConfig.description,
+        noteTitle: fullscreenFlowConfig.noteTitle,
+        noteSummary: fullscreenFlowConfig.noteSummary,
+        confirmed: fullscreenFlowConfig.confirmed,
+        pending: fullscreenFlowConfig.pending,
+        pendingHeading: fullscreenFlowConfig.pendingHeading,
+        primary: fullscreenFlowConfig.primary
+      },
+      cmdtab: {
+        title: '窗口级 Cmd-Tab Plus',
+        description: '按 App 切换，也能继续选择 App 内具体窗口；支持关闭窗口和确认后退出 App。',
+        noteTitle: '场景说明 · Cmd-Tab Plus',
+        noteSummary: '这是一层独立的全局切换浮层，不受岛的 420×260 尺寸限制；岛只承担触发和结果反馈。',
+        confirmed: ['支持应用级和窗口级选择。','缩略图不可用时仍显示 App、窗口标题和数量。','退出 App 必须二次确认。'],
+        pending: ['是否默认替代系统 Cmd-Tab。','窗口关闭是否提供短时撤销。','数字键选择最多展示几个窗口。'],
+        primary: '打开切换器'
+      },
+      dock: {
+        title: 'Dock 窗口预览、反转与锁定',
+        description: '悬停或点击 Dock 图标，在图标正上方显示紧凑毛玻璃窗口卡片；再次点击活动 App 可最小化。',
+        noteTitle: '场景说明 · Dock 增强',
+        noteSummary: '视觉基准已确认采用参考图 2：浮层锚定当前 Dock 图标，保持紧凑尺寸和 macOS 暗色毛玻璃质感，不采用大号居中气泡。',
+        confirmed: ['浮层必须锚定当前 Dock 图标并随图标移动。','单窗口紧凑显示，多窗口横向排列。','屏幕录制被拒绝时保留同一外壳并降级为标题列表。','禁止出现参考图 1 那种超大气泡。'],
+        pending: ['预览默认由悬停还是单击触发。','Dock 反转是否首装默认开启。','多屏 Dock 锁定的故障恢复策略。'],
+        primary: '预览备忘录窗口'
+      },
+      mission: {
+        title: '调度中心 Pro',
+        description: '在系统鸟瞰视图中管理窗口；当前为产品目标，必须通过原生兼容性 PoC。',
+        noteTitle: '场景说明 · 调度中心 Pro',
+        noteSummary: '该能力系统耦合最深。需求稿展示目标行为，但不把兼容性假设写成已实现事实。',
+        confirmed: ['能力纳入正式产品范围。','窗口关闭与 App 退出必须分开。','不改变系统原有空间和窗口排序。'],
+        pending: ['最低兼容 macOS 版本。','Finder 多标签窗口的识别规则。','系统更新导致能力不可用时的降级方式。'],
+        primary: '进入调度中心'
+      },
+      settings: {
+        title: 'SuperIsland 设置中的窗口增强',
+        description: '按 WINS 3.5 的设置结构与交互密度完整复刻，并替换为 SuperIsland 的功能、命名与权限说明。',
+        noteTitle: '场景说明 · SuperIsland 窗口增强设置',
+        noteSummary: '视觉和交互以本机 WINS 3.5 录屏为基准：系统设置式双栏、功能悬停视频、快捷键行和大尺寸布局卡；不复制激活、试用、购买等商业模块。',
+        confirmed: ['设置结构、尺寸和悬停演示按 WINS 3.5 复刻。','入口与文案替换为 SuperIsland，并保持现有功能边界。','核心能力、调度中心、快捷功能和布局都支持悬停及键盘聚焦演示。','不加入激活、试用、购买或许可证模块。'],
+        pending: ['最终默认快捷键及冲突策略。','正式产品演示素材由录屏还是实时渲染生成。','进入 Swift 实现前需单独确认 PRD。'],
+        primary: '打开设置'
+      }
+    };
+
+    const state = {
+      scene: 'split',
+      axGranted: true,
+      screenGranted: true,
+      currentWindow: 'notes',
+      cmdIndex: 0,
+      lastAction: null,
+      modalAction: null,
+      toastTimer: null,
+      originals: {},
+      fullscreen: {
+        action: 'layout',
+        busy: false,
+        generation: 0,
+        lockedTriggers: 0
+      }
+    };
+
+    const settingsPreviews = {
+      overview: { title: '功能总览', description: '移入右侧功能可查看对应演示。' },
+      edge: { src: 'assets/settings-previews/edgeSnap.mp4', title: '屏幕边缘分屏', description: '把窗口拖到屏幕边缘，出现可投放的半屏或全屏区域。' },
+      island: { src: 'assets/settings-previews/snapIsland_zh.mp4', title: '悬浮分屏岛', description: '拖动窗口靠近刘海，先选择布局，再完成投放。' },
+      shake: { src: 'assets/settings-previews/aeroShakeView_zh.mp4', title: '摇动窗口', description: '摇动当前窗口，暂时隐藏其他窗口；再次操作可恢复。' },
+      dock: { src: 'assets/settings-previews/dockPreviewView_zh.mp4', title: 'Dock 窗口预览', description: '鼠标移入 Dock 图标，在图标正上方查看对应窗口。' },
+      mission: { src: 'assets/settings-previews/missionControlProStatus.mp4', title: '调度中心 Pro', description: '在鸟瞰视图选择窗口，并区分关闭窗口与退出 App。' },
+      reverse: { src: 'assets/settings-previews/flickDock.mp4', title: 'Dock 窗口反转', description: '再次点击当前 App 的 Dock 图标，快速最小化或恢复窗口。' },
+      cmdtab: { src: 'assets/settings-previews/commandTabPlus.mp4', title: 'Cmd-Tab Plus', description: '从应用级切换继续进入窗口级选择，缩略图不可用时显示标题。' },
+      missionClose: { src: 'assets/settings-previews/mission-close.mp4', title: '调度中心 · 关闭窗口', description: '在调度中心直接关闭当前选中的单个窗口。' },
+      missionQuit: { src: 'assets/settings-previews/mission-quit.mp4', title: '调度中心 · 退出程序', description: '从窗口鸟瞰进入退出流程，并明确区分关闭窗口与退出 App。' },
+      dockLock: { src: 'assets/settings-previews/dock-lock.mp4', title: 'Dock 锁定屏幕', description: '通过 Dock 的快捷动作快速锁定屏幕。' },
+      hiddenAll: { src: 'assets/settings-previews/hidden-all.mp4', title: '隐藏所有窗口', description: '一次隐藏当前桌面上的全部普通应用窗口。' },
+      hiddenOthers: { src: 'assets/settings-previews/hidden-others.mp4', title: '隐藏其他窗口', description: '保留当前窗口，把其余窗口暂时隐藏。' },
+      nextDisplay: { src: 'assets/settings-previews/next-display.mp4', title: '移动到下个显示器', description: '把当前窗口移动到下一个可用显示器，并保持可见位置。' },
+      previousDisplay: { src: 'assets/settings-previews/previous-display.mp4', title: '移动到上个显示器', description: '把当前窗口移动到上一个可用显示器。' },
+      center: { src: 'assets/settings-previews/center.mp4', title: '窗口居中', description: '按当前显示器可用区域把窗口快速居中。' }
+    };
+
+    const desktop = $('#desktop');
+    const island = $('#island');
+    const islandContent = $('#islandContent');
+    const toast = $('#toast');
+
+    function snapshotWindows() {
+      $$('.app-window').forEach(win => {
+        const style = getComputedStyle(win);
+        state.originals[win.dataset.window] = {
+          left: style.left, top: style.top, width: style.width, height: style.height,
+          minimized: win.classList.contains('minimized'), closed: win.classList.contains('closed')
+        };
+      });
+    }
+    snapshotWindows();
+
+    function restoreWindows() {
+      $$('.app-window').forEach(win => {
+        const original = state.originals[win.dataset.window];
+        if (!original) return;
+        Object.assign(win.style, { left: original.left, top: original.top, width: original.width, height: original.height });
+        win.classList.toggle('minimized', original.minimized);
+        win.classList.toggle('closed', original.closed);
+      });
+      desktop.classList.remove('secondary-screen');
+    }
+
+    function compactIsland(text = '窗口中心 · 已就绪', tone = 'normal') {
+      island.className = 'island';
+      const color = tone === 'error' ? 'var(--orange)' : tone === 'done' ? 'var(--green)' : 'var(--green)';
+      islandContent.innerHTML = `<div class="island-compact"><span class="island-dot" style="background:${color}"></span><span>${text}</span></div>`;
+    }
+
+    const fullscreenActionCopy = fullscreenFlowConfig.actions;
+
+    function fullscreenStepLabels(action, fault = 'normal') {
+      if (action === 'drag') return ['检测原生全屏', '拦截拖动入口', '显示退出提示', '保持窗口不变', '等待用户退出'];
+      if (fault === 'exitLate') return ['锁定窗口身份', '请求退出全屏', '超时进入未知态', '对账晚到退出', '恢复并 readback'];
+      if (fault === 'axWriteRejected') return ['锁定窗口身份', '退出原生全屏', 'AX 写入被拒绝', '恢复原全屏', 'readback 回滚'];
+      if (fault === 'partialWrite') return ['锁定窗口身份', '退出原生全屏', '检测部分写入', '补偿并回滚', 'readback 回滚'];
+      if (fault === 'readbackFailed') return ['锁定窗口身份', '退出原生全屏', fullscreenActionCopy[action].writeLabel, 'readback 不可用', action === 'move' ? '回滚或安全降级' : '保持在线可见'];
+      if (action === 'move' && fault === 'targetDisconnected') return ['锁定窗口身份', '退出原生全屏', '写前复验 display ID', '恢复原屏全屏', 'readback 回滚'];
+      if (action === 'move' && fault === 'displayLostDuringMove') return ['锁定窗口身份', '退出原生全屏', '移动中拓扑变化', '降级在线可见区', 'readback 安全位置'];
+      if (action === 'move' && fault === 'displayLostDuringRestore') return ['锁定窗口身份', '退出原生全屏', '移动并 readback', '恢复中拓扑变化', '降级并 readback'];
+      if (action === 'move' && fault === 'restoreFailed') return ['锁定窗口身份', '退出原生全屏', '移动并 readback', '恢复失败后回滚', 'readback 回滚'];
+      if (action === 'move' && fault === 'rollbackFailed') return ['锁定窗口身份', '退出原生全屏', '移动后恢复失败', '执行原屏回滚', '回滚失败后降级'];
+      if (action === 'move') return ['锁定窗口身份', '退出原生全屏', '移动到目标显示器', '恢复原生全屏', '校验目标显示器'];
+      return ['锁定窗口身份', '退出原生全屏', fullscreenActionCopy[action].writeLabel, '保持窗口化', 'readback 最终 frame'];
+    }
+
+    function renderFullscreenSteps(labels) {
+      $('#fullscreenSteps').innerHTML = labels.map(label => '<li>' + label + '</li>').join('');
+    }
+
+    function markFullscreenStep(index, status) {
+      const step = $$('#fullscreenSteps li')[index];
+      if (!step) return;
+      step.classList.remove('active', 'done', 'error', 'unknown');
+      if (status) step.classList.add(status);
+    }
+
+    function setFullscreenStatus(tone, title, detail, logHTML) {
+      const dot = $('#fullscreenStatusDot');
+      dot.className = 'fullscreen-status-dot' + (tone && tone !== 'idle' ? ' ' + tone : '');
+      $('#fullscreenStatusTitle').textContent = title;
+      $('#fullscreenStatusDetail').textContent = detail;
+      if (logHTML) $('#fullscreenLog').innerHTML = logHTML;
+    }
+
+    function setFullscreenMode({ fullscreen = true, display = 'primary', layout = null } = {}) {
+      const surface = $('#fullscreenSurface');
+      const monitor = $('#fullscreenMonitor');
+      surface.classList.remove('windowed', 'layout-left', 'centered', 'safe-visible', 'moving');
+      if (!fullscreen) surface.classList.add('windowed');
+      if (layout) surface.classList.add(layout);
+      monitor.classList.toggle('external', display === 'external');
+      const displayCopy = display === 'external' ? '外接显示器 · EXT-2' : '主显示器 · MAIN-1';
+      $('#fullscreenDisplayLabel').textContent = displayCopy + ' · ' + (fullscreen ? '原生全屏' : '窗口化');
+      $('#fullscreenModeBadge').textContent = fullscreen ? '原生全屏' : '窗口化';
+    }
+
+    function setFullscreenBusy(isBusy) {
+      state.fullscreen.busy = isBusy;
+      $('#fullscreenOverlay').setAttribute('aria-busy', String(isBusy));
+      $$('.fullscreen-action, .fullscreen-test').forEach(button => button.classList.toggle('busy', isBusy));
+    }
+
+    function renderFullscreenControls() {
+      $('#fullscreenLabTitle').textContent = fullscreenFlowConfig.labTitle;
+      $('#fullscreenLabDescription').textContent = fullscreenFlowConfig.labDescription;
+      $('#fullscreenDisclaimer').textContent = fullscreenFlowConfig.disclaimer;
+      $('#fullscreenActionList').innerHTML = Object.entries(fullscreenFlowConfig.actions).map(([id, action]) =>
+        '<button class="fullscreen-action" data-fullscreen-action="' + id + '" aria-pressed="false">' + action.name + '<small>' + action.hint + '</small></button>'
+      ).join('');
+      $('#fullscreenTestList').innerHTML = Object.entries(fullscreenFlowConfig.faults).map(([id, fault]) =>
+        '<button class="fullscreen-test' + (fault.wide ? ' lock' : '') + '" data-fullscreen-test="' + id + '">' + fault.label + '</button>'
+      ).join('');
+    }
+
+    function resetFullscreenDemo({ keepAction = true } = {}) {
+      state.fullscreen.generation += 1;
+      setFullscreenBusy(false);
+      state.fullscreen.lockedTriggers = 0;
+      if (!keepAction) state.fullscreen.action = 'layout';
+      $$('.fullscreen-action').forEach(button => {
+        const selected = button.dataset.fullscreenAction === state.fullscreen.action;
+        button.classList.toggle('selected', selected);
+        button.setAttribute('aria-pressed', String(selected));
+      });
+      $('#fullscreenIslandHint').classList.remove('show');
+      setFullscreenMode({ fullscreen: true, display: 'primary' });
+      renderFullscreenSteps(fullscreenStepLabels(state.fullscreen.action));
+      setFullscreenStatus('idle', '等待触发', '当前：主显示器原生全屏', fullscreenFlowConfig.initialLog);
+    }
+
+    function noteFullscreenLocked(source = '重复操作') {
+      state.fullscreen.lockedTriggers += 1;
+      $('#fullscreenLog').innerHTML = '<strong>已锁定并忽略第 ' + state.fullscreen.lockedTriggers + ' 次重复触发。</strong><br>' + source + '没有启动第二条状态机；当前窗口继续完成原操作。';
+      showToast('窗口转换处理中，已忽略重复触发', '知道了', () => toast.classList.remove('show'));
+    }
+
+    function selectFullscreenAction(action) {
+      if (!fullscreenActionCopy[action]) return;
+      if (state.fullscreen.busy) {
+        noteFullscreenLocked('处理中切换动作');
+        return;
+      }
+      state.fullscreen.action = action;
+      resetFullscreenDemo({ keepAction: true });
+    }
+
+    async function waitForFullscreenStep(milliseconds, generation) {
+      await new Promise(resolve => window.setTimeout(resolve, milliseconds));
+      return generation === state.fullscreen.generation;
+    }
+
+    function finishFullscreenRun(generation) {
+      if (generation !== state.fullscreen.generation) return;
+      setFullscreenBusy(false);
+      if (state.fullscreen.lockedTriggers > 0) {
+        $('#fullscreenLog').insertAdjacentHTML('beforeend', '<br><strong>锁定验证：已忽略 ' + state.fullscreen.lockedTriggers + ' 次重复触发，未启动并行状态机。</strong>');
+      }
+    }
+
+    async function degradeToOnlineVisible(generation, { stepIndex = 4, reason, verified = true } = {}) {
+      if (stepIndex !== null) markFullscreenStep(stepIndex, 'active');
+      setFullscreenStatus(verified ? 'rollback' : 'unknown', '正在降级到在线可见区域', '写前复验 MAIN-1 在线 · 停止恢复全屏', '<strong>安全降级。</strong><br>' + reason + '；只向当前在线的 MAIN-1 写入保守可见 frame。');
+      if (!await waitForFullscreenStep(520, generation)) return false;
+      setFullscreenMode({ fullscreen: false, display: 'primary', layout: 'safe-visible' });
+      if (!await waitForFullscreenStep(320, generation)) return false;
+      if (stepIndex !== null) markFullscreenStep(stepIndex, verified ? 'done' : 'unknown');
+      if (verified) {
+        setFullscreenStatus('rollback', '已降级到在线可见区域', '当前：MAIN-1 窗口化 · readback 可见', '<strong>安全降级已验证。</strong><br>写前、写后均确认 MAIN-1 仍在线，readback frame 位于其可见区域；本次不再尝试恢复全屏。');
+      } else {
+        setFullscreenStatus('unknown', '已请求安全降级，最终状态仍未知', '请人工确认 MAIN-1 上的窗口位置', '<strong>不能宣称恢复成功。</strong><br>回滚 readback 失败后已请求保守可见 frame，但仍无法确认 AX 最终状态；停止自动写入并提示人工恢复。');
+      }
+      return true;
+    }
+
+    async function performVerifiedRollback(generation, { reason, rollbackStep = 3, verifyStep = 4, failReadback = false, degradeStep = null } = {}) {
+      markFullscreenStep(rollbackStep, 'active');
+      setFullscreenStatus('rollback', '正在回滚触发前状态', '写前复验 MAIN-1 在线 · 恢复原显示器原生全屏', '<strong>回滚处理中。</strong><br>' + reason + '；先复验稳定 display ID MAIN-1，再恢复原 frame 与原生全屏。');
+      if (!await waitForFullscreenStep(620, generation)) return false;
+      setFullscreenMode({ fullscreen: true, display: 'primary' });
+      markFullscreenStep(rollbackStep, 'done');
+      markFullscreenStep(verifyStep, 'active');
+      setFullscreenStatus('processing', '正在 readback 回滚结果', '验证窗口身份、MAIN-1、AXFullScreen 与 frame', '<strong>回滚写入不等于成功。</strong><br>只有 readback 与触发前快照一致，才结束状态机。');
+      if (!await waitForFullscreenStep(480, generation)) return false;
+      if (failReadback) {
+        markFullscreenStep(verifyStep, 'error');
+        if (degradeStep !== null && degradeStep !== verifyStep) markFullscreenStep(degradeStep, 'active');
+        await degradeToOnlineVisible(generation, { stepIndex: degradeStep, reason: '回滚 readback 未匹配触发前快照', verified: false });
+        return false;
+      }
+      markFullscreenStep(verifyStep, 'done');
+      setFullscreenStatus('rollback', '已回滚并通过 readback', '当前：MAIN-1 原生全屏 · 与触发前一致', '<strong>回滚成功。</strong><br>已 readback 验证同一窗口、稳定 display ID MAIN-1、原生全屏状态和原 frame。');
+      return true;
+    }
+
+    async function runFullscreenAction(action = state.fullscreen.action, fault = 'normal') {
+      if (state.fullscreen.busy) {
+        noteFullscreenLocked('连续触发');
+        return false;
+      }
+      if (!fullscreenFlowConfig.actions[action] || !fullscreenFlowConfig.faults[fault]) return false;
+
+      const actionConfig = fullscreenFlowConfig.actions[action];
+      state.fullscreen.action = action;
+      $$('.fullscreen-action').forEach(button => {
+        const selected = button.dataset.fullscreenAction === action;
+        button.classList.toggle('selected', selected);
+        button.setAttribute('aria-pressed', String(selected));
+      });
+      state.fullscreen.generation += 1;
+      const generation = state.fullscreen.generation;
+      state.fullscreen.lockedTriggers = 0;
+      $('#fullscreenIslandHint').classList.remove('show');
+      setFullscreenMode({ fullscreen: true, display: 'primary' });
+      renderFullscreenSteps(fullscreenStepLabels(action, fault));
+
+      if (action === 'drag') {
+        markFullscreenStep(0, 'done');
+        markFullscreenStep(1, 'error');
+        markFullscreenStep(2, 'done');
+        markFullscreenStep(3, 'done');
+        $('#fullscreenIslandHint').classList.add('show');
+        setFullscreenStatus('error', '原生全屏中不可拖入分屏岛', actionConfig.final, '<strong>未执行窗口操作。</strong><br>原生全屏没有可拖标题栏，提示用户先退出全屏；窗口、display ID 与 frame 均不改变。');
+        return true;
+      }
+
+      setFullscreenBusy(true);
+      setFullscreenStatus('processing', '正在锁定窗口与状态机代次', '窗口身份固定 · MAIN-1 已记录 · 拒绝并行触发', '<strong>状态机已启动。</strong><br>后续每次 AX 写入前后都复验窗口身份、稳定 display ID 与 readback。');
+      markFullscreenStep(0, 'active');
+      if (!await waitForFullscreenStep(360, generation)) return false;
+      markFullscreenStep(0, 'done');
+
+      markFullscreenStep(1, 'active');
+      setFullscreenStatus('processing', '正在请求退出原生全屏', '写前复验 MAIN-1 在线 · 等待 AXFullScreen readback=false', '<strong>退出请求已发出。</strong><br>定时器结束不等于成功，必须等到系统 readback 确认。');
+
+      if (fault === 'exitLate') {
+        if (!await waitForFullscreenStep(760, generation)) return false;
+        markFullscreenStep(1, 'unknown');
+        markFullscreenStep(2, 'unknown');
+        setFullscreenStatus('unknown', '退出请求超时，窗口状态未知', '暂停原动作 · 开始状态对账', '<strong>未知态。</strong><br>不能宣称仍在全屏，也不能继续布局或跨屏；监听晚到事件并重新读取 AXFullScreen、frame 与 MAIN-1。');
+        if (!await waitForFullscreenStep(560, generation)) return false;
+        setFullscreenMode({ fullscreen: false, display: 'primary' });
+        markFullscreenStep(3, 'active');
+        setFullscreenStatus('unknown', '对账发现晚到退出', '当前 readback：MAIN-1 窗口化 · 原动作已取消', '<strong>已处理晚到事件。</strong><br>原动作不会在超时后偷偷继续；状态机转入恢复触发前状态。');
+        if (!await waitForFullscreenStep(420, generation)) return false;
+        markFullscreenStep(3, 'done');
+        markFullscreenStep(4, 'active');
+        setFullscreenStatus('rollback', '正在恢复并验证触发前状态', '写前复验 MAIN-1 在线 · 恢复原生全屏', '<strong>晚到退出补偿。</strong><br>恢复后继续 readback，匹配前不宣称回滚成功。');
+        if (!await waitForFullscreenStep(560, generation)) return false;
+        setFullscreenMode({ fullscreen: true, display: 'primary' });
+        if (!await waitForFullscreenStep(360, generation)) return false;
+        markFullscreenStep(4, 'done');
+        setFullscreenStatus('rollback', '晚到退出已对账并恢复', '当前：MAIN-1 原生全屏 · readback 与触发前一致', '<strong>状态已收敛。</strong><br>超时期间保持未知态；收到晚到退出后取消原动作，并通过 readback 验证恢复结果。');
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      if (!await waitForFullscreenStep(520, generation)) return false;
+      setFullscreenMode({ fullscreen: false, display: 'primary' });
+      markFullscreenStep(1, 'done');
+      setFullscreenStatus('processing', '已退出原生全屏', 'readback：MAIN-1 · AXFullScreen=false', '<strong>退出已验证。</strong><br>只有窗口身份、MAIN-1 与窗口化状态均匹配，才进入下一次 AX 写入。');
+
+      if (fault === 'axWriteRejected') {
+        markFullscreenStep(2, 'active');
+        setFullscreenStatus('processing', '正在检查 AX 属性可写性', 'position / size / fullscreen / display 关联', '<strong>写前检查。</strong><br>目标属性必须可写；拒绝时不把请求发送成功误报为窗口已改变。');
+        if (!await waitForFullscreenStep(480, generation)) return false;
+        markFullscreenStep(2, 'error');
+        setFullscreenStatus('error', 'AX 写入被拒绝', '原动作未完成 · 进入已验证回滚', '<strong>AX 返回不可写或拒绝。</strong><br>窗口已退出全屏，但 frame 或跨屏写入未完成；恢复触发前状态。');
+        await performVerifiedRollback(generation, { reason: 'AX 写入拒绝', rollbackStep: 3, verifyStep: 4 });
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      if (fault === 'partialWrite') {
+        markFullscreenStep(2, 'active');
+        setFullscreenStatus('processing', '正在执行 ' + actionConfig.writeLabel, '写前复验窗口身份与稳定 display ID', '<strong>模拟部分成功。</strong><br>位置、尺寸、空间关联或跨屏写入中只有一部分返回成功。');
+        if (!await waitForFullscreenStep(520, generation)) return false;
+        setFullscreenMode({ fullscreen: false, display: action === 'move' ? 'external' : 'primary', layout: action === 'move' ? 'safe-visible' : actionConfig.layoutClass });
+        markFullscreenStep(2, 'error');
+        setFullscreenStatus('error', '检测到 AX 部分写入', '禁止保留半完成 frame · 执行补偿与回滚', '<strong>部分成功不是成功。</strong><br>readback 与目标 frame 不一致，停止后续动作并恢复原显示器原生全屏。');
+        await performVerifiedRollback(generation, { reason: 'AX 部分写入，目标状态不完整', rollbackStep: 3, verifyStep: 4 });
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      if (fault === 'readbackFailed') {
+        markFullscreenStep(2, 'active');
+        setFullscreenStatus('processing', '正在执行 ' + actionConfig.writeLabel, '写前复验当前在线 display ID', '<strong>写入请求已发送。</strong><br>下一步必须从 AX 重新读取窗口状态，而不是相信 API 返回或本地缓存。');
+        if (!await waitForFullscreenStep(500, generation)) return false;
+        setFullscreenMode({ fullscreen: false, display: action === 'move' ? 'external' : 'primary', layout: action === 'move' ? 'safe-visible' : actionConfig.layoutClass });
+        markFullscreenStep(2, 'done');
+        markFullscreenStep(3, 'unknown');
+        setFullscreenStatus('unknown', '写入后 readback 失败', '最终 frame / display / fullscreen 状态未知', '<strong>不能宣称动作成功。</strong><br>停止布局或恢复全屏，转而请求当前在线 MAIN-1 的保守可见 frame。');
+        if (!await waitForFullscreenStep(480, generation)) return false;
+        await degradeToOnlineVisible(generation, { stepIndex: 4, reason: 'AX readback 不可用，无法验证所选动作', verified: false });
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      if (action === 'layout' || action === 'center') {
+        markFullscreenStep(2, 'active');
+        setFullscreenStatus('processing', '正在执行' + actionConfig.name, '写前复验 MAIN-1 在线 · AX 属性可写', '<strong>窗口化写入。</strong><br>对同一窗口执行 ' + actionConfig.writeLabel + '，完成后重新读取 frame 与 display ID。');
+        if (!await waitForFullscreenStep(520, generation)) return false;
+        setFullscreenMode({ fullscreen: false, display: 'primary', layout: actionConfig.layoutClass });
+        markFullscreenStep(2, 'done');
+
+        markFullscreenStep(3, 'active');
+        if (!await waitForFullscreenStep(260, generation)) return false;
+        markFullscreenStep(3, 'done');
+        markFullscreenStep(4, 'active');
+        setFullscreenStatus('processing', '正在 readback 最终 frame', '验证 MAIN-1、窗口化状态和目标容差', '<strong>最终校验。</strong><br>只有位置与尺寸 readback 落在目标容差内，才保持窗口化并报告成功。');
+        if (!await waitForFullscreenStep(360, generation)) return false;
+        markFullscreenStep(4, 'done');
+        setFullscreenStatus('success', actionConfig.name + '已完成', '当前：' + actionConfig.final, '<strong>成功 · 保持窗口化。</strong><br>已 readback 验证稳定 display ID MAIN-1、AXFullScreen=false 与最终 frame。');
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      markFullscreenStep(2, 'active');
+      if (fault === 'targetDisconnected') {
+        setFullscreenStatus('processing', '正在写前复验目标 display ID', 'MAIN-1 在线 · EXT-2 已从拓扑移除', '<strong>跨屏写前检查失败。</strong><br>EXT-2 不再属于当前稳定屏幕集合，因此不发送移动写入。');
+        if (!await waitForFullscreenStep(520, generation)) return false;
+        markFullscreenStep(2, 'error');
+        await performVerifiedRollback(generation, { reason: '目标 display ID EXT-2 在移动写入前断开', rollbackStep: 3, verifyStep: 4 });
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      setFullscreenStatus('processing', '正在移动到 EXT-2', '写前复验 MAIN-1 / EXT-2 均在线', '<strong>跨屏写入。</strong><br>锁定稳定 display ID EXT-2；写入后会再次读取窗口所属屏幕和拓扑代次。');
+      $('#fullscreenSurface').classList.add('moving');
+      if (!await waitForFullscreenStep(520, generation)) return false;
+
+      if (fault === 'displayLostDuringMove') {
+        setFullscreenMode({ fullscreen: false, display: 'external', layout: 'safe-visible' });
+        markFullscreenStep(2, 'error');
+        markFullscreenStep(3, 'active');
+        setFullscreenStatus('rollback', '移动写入期间 EXT-2 断开', '停止跨屏与恢复全屏 · 选择在线 MAIN-1', '<strong>写后拓扑复验失败。</strong><br>窗口可能处于部分移动状态；立即把同一窗口收敛到 MAIN-1 可见区域。');
+        if (!await waitForFullscreenStep(480, generation)) return false;
+        setFullscreenMode({ fullscreen: false, display: 'primary', layout: 'safe-visible' });
+        markFullscreenStep(3, 'done');
+        markFullscreenStep(4, 'active');
+        if (!await waitForFullscreenStep(360, generation)) return false;
+        markFullscreenStep(4, 'done');
+        setFullscreenStatus('rollback', '断屏后已降级到在线可见区域', '当前：MAIN-1 窗口化 · readback 可见', '<strong>安全降级已验证。</strong><br>写后确认 MAIN-1 在线且 frame 可见；拓扑稳定前不再尝试恢复原生全屏。');
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      setFullscreenMode({ fullscreen: false, display: 'external' });
+      markFullscreenStep(2, 'done');
+      setFullscreenStatus('processing', '跨屏移动已 readback', '当前：EXT-2 窗口化 · 拓扑代次未变化', '<strong>移动写后复验通过。</strong><br>窗口身份、EXT-2 与目标可见 frame 匹配，才进入恢复全屏。');
+
+      markFullscreenStep(3, 'active');
+      setFullscreenStatus('processing', '正在 EXT-2 恢复原生全屏', '写前再次复验 EXT-2 在线', '<strong>恢复写入。</strong><br>恢复前、恢复后都重新读取稳定 display ID 与 AXFullScreen。');
+
+      if (fault === 'displayLostDuringRestore') {
+        if (!await waitForFullscreenStep(560, generation)) return false;
+        markFullscreenStep(3, 'error');
+        setFullscreenStatus('rollback', '恢复全屏期间 EXT-2 断开', '停止恢复 · 降级到在线 MAIN-1', '<strong>恢复写后拓扑复验失败。</strong><br>不把目标屏消失后的 API 返回当作成功，改为在线可见区域窗口化。');
+        await degradeToOnlineVisible(generation, { stepIndex: 4, reason: 'EXT-2 在恢复全屏期间断开', verified: true });
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      if (fault === 'restoreFailed' || fault === 'rollbackFailed') {
+        if (!await waitForFullscreenStep(650, generation)) return false;
+        markFullscreenStep(3, 'error');
+        setFullscreenStatus('error', 'EXT-2 恢复原生全屏失败', '跨屏移动已完成 · 进入原状态回滚', '<strong>恢复失败。</strong><br>不保留半完成状态，回到 MAIN-1 原生全屏并用 readback 校验。');
+        await performVerifiedRollback(generation, {
+          reason: '目标显示器恢复原生全屏失败',
+          rollbackStep: 3,
+          verifyStep: 4,
+          failReadback: fault === 'rollbackFailed',
+          degradeStep: fault === 'rollbackFailed' ? 4 : null
+        });
+        finishFullscreenRun(generation);
+        return true;
+      }
+
+      if (!await waitForFullscreenStep(560, generation)) return false;
+      setFullscreenMode({ fullscreen: true, display: 'external' });
+      markFullscreenStep(3, 'done');
+      markFullscreenStep(4, 'active');
+      setFullscreenStatus('processing', '正在 readback 跨屏最终状态', '验证 EXT-2 在线 · AXFullScreen=true', '<strong>最终校验。</strong><br>稳定 display ID、窗口身份、全屏状态和目标显示器必须同时匹配。');
+      if (!await waitForFullscreenStep(360, generation)) return false;
+      markFullscreenStep(4, 'done');
+      setFullscreenStatus('success', '跨屏移动并恢复全屏', '当前：' + actionConfig.final, '<strong>成功。</strong><br>每次写入前后均复验 EXT-2，最终 readback 确认同一窗口位于在线目标显示器且为原生全屏。');
+      finishFullscreenRun(generation);
+      return true;
+    }
+
+    function splitIsland() {
+      if (!state.axGranted) return permissionIsland();
+      if ($('#windowType').value === 'fixed') return fixedWindowIsland();
+      island.className = 'island expanded';
+      islandContent.innerHTML = `
+        <div class="layout-grid">
+          ${layoutButton('vertical','左右二分','layout-vertical','<i></i><i></i>')}
+          ${layoutButton('horizontal','上下二分','layout-horizontal','<i></i><i></i>')}
+          ${layoutButton('mixed','左主右双','layout-mixed','<i></i><i></i><i></i>')}
+          ${layoutButton('quarters','四宫格','layout-quarter','<i></i><i></i><i></i><i></i>')}
+        </div>`;
+      bindIslandControls();
+    }
+
+    function layoutButton(preset, label, iconClass, icons) {
+      return `<button class="layout-target" data-preset="${preset}"><span class="layout-icon ${iconClass}">${icons}</span><b>${label}</b></button>`;
+    }
+
+    function fixedWindowIsland() {
+      island.className = 'island expanded';
+      islandContent.innerHTML = `<div class="island-error"><span class="error-icon">!</span><div><strong>这个窗口不能调整大小</strong><p>“正在播放”仅支持移动到其他显示器，不能分屏。</p></div><button class="btn small" data-layout="next">移到外屏</button></div>`;
+      bindIslandControls();
+    }
+
+    function permissionIsland() {
+      island.className = 'island expanded';
+      islandContent.innerHTML = `<div class="island-error"><span class="error-icon">!</span><div><strong>需要辅助功能权限</strong><p>尚未读取或控制任何窗口。授权后重试。</p></div><button class="btn small primary" data-open-settings>打开设置</button></div>`;
+      $('[data-open-settings]', island)?.addEventListener('click', () => setScene('settings'));
+    }
+
+    function bindIslandControls() {
+      $('[data-close-island]', island)?.addEventListener('click', () => compactIsland());
+      $$('[data-preset]', island).forEach(btn => {
+        const updateTarget = event => {
+          const rect = btn.getBoundingClientRect();
+          const x = Math.max(0, Math.min(.999, (event.clientX - rect.left) / rect.width));
+          const y = Math.max(0, Math.min(.999, (event.clientY - rect.top) / rect.height));
+          const preset = btn.dataset.preset;
+          const index = preset === 'vertical' ? (x < .5 ? 0 : 1)
+            : preset === 'horizontal' ? (y < .5 ? 0 : 1)
+            : preset === 'mixed' ? (x < .5 ? 0 : y < .5 ? 1 : 2)
+            : (y < .5 ? (x < .5 ? 0 : 1) : (x < .5 ? 2 : 3));
+          const targets = {
+            vertical: ['left','right'], horizontal: ['top','bottom'],
+            mixed: ['left','quarterTR','quarterBR'],
+            quarters: ['quarterTL','quarterTR','quarterBL','quarterBR']
+          };
+          btn.dataset.layout = targets[preset][index];
+          $$('i', btn).forEach((cell, cellIndex) => cell.classList.toggle('active', cellIndex === index));
+        };
+        btn.addEventListener('pointermove', updateTarget);
+        btn.addEventListener('pointerenter', updateTarget);
+        btn.addEventListener('click', event => {
+          updateTarget(event);
+          applyLayout(btn.dataset.layout, state.currentWindow);
+        });
+      });
+      $$('[data-layout]', island).forEach(btn => {
+        if (btn.dataset.preset) return;
+        btn.addEventListener('click', () => applyLayout(btn.dataset.layout, state.currentWindow));
+      });
+    }
+
+    function applyLayout(layout, windowId) {
+      const win = $(`.app-window[data-window="${windowId}"]`);
+      if (!win || !state.axGranted) return permissionIsland();
+      state.lastAction = { type: 'layout', windowId, before: {
+        left: win.style.left || getComputedStyle(win).left,
+        top: win.style.top || getComputedStyle(win).top,
+        width: win.style.width || getComputedStyle(win).width,
+        height: win.style.height || getComputedStyle(win).height
+      }};
+      const layouts = {
+        left: {left:'1.5%',top:'7%',width:'48%',height:'86%'},
+        right: {left:'50.5%',top:'7%',width:'48%',height:'86%'},
+        full: {left:'1.5%',top:'7%',width:'97%',height:'86%'},
+        center: {left:'18%',top:'17%',width:'64%',height:'68%'},
+        top: {left:'1.5%',top:'7%',width:'97%',height:'42%'},
+        bottom: {left:'1.5%',top:'51%',width:'97%',height:'42%'},
+        quarterTL: {left:'1.5%',top:'7%',width:'48%',height:'42%'},
+        quarterTR: {left:'50.5%',top:'7%',width:'48%',height:'42%'},
+        quarterBL: {left:'1.5%',top:'51%',width:'48%',height:'42%'},
+        quarterBR: {left:'50.5%',top:'51%',width:'48%',height:'42%'},
+        next: {left:'52%',top:'15%',width:'42%',height:'72%'}
+      };
+      Object.assign(win.style, layouts[layout]);
+      if (layout === 'next') desktop.classList.add('secondary-screen');
+      compactIsland(layout === 'next' ? '已移动到外接显示器' : '窗口布局已更新', 'done');
+      showToast(layout === 'next' ? '已移动到外接显示器' : `已应用${{left:'左半屏',right:'右半屏',top:'上半屏',bottom:'下半屏',full:'最大化',center:'居中',quarterTL:'左上四分之一',quarterTR:'右上四分之一',quarterBL:'左下四分之一',quarterBR:'右下四分之一'}[layout]}`, '撤销');
+    }
+
+    function showToast(text, actionText = '撤销', action = undoLastAction) {
+      clearTimeout(state.toastTimer);
+      $('#toastText').textContent = text;
+      $('#toastAction').textContent = actionText;
+      $('#toastAction').onclick = action;
+      toast.classList.add('show');
+      state.toastTimer = setTimeout(() => toast.classList.remove('show'), 4600);
+    }
+
+    function undoLastAction() {
+      const action = state.lastAction;
+      if (!action) return;
+      if (action.type === 'layout') {
+        const win = $(`.app-window[data-window="${action.windowId}"]`);
+        Object.assign(win.style, action.before);
+        desktop.classList.remove('secondary-screen');
+      }
+      if (action.type === 'visibility') {
+        action.windows.forEach(({id,minimized,closed}) => {
+          const win = $(`.app-window[data-window="${id}"]`);
+          win.classList.toggle('minimized', minimized);
+          win.classList.toggle('closed', closed);
+        });
+      }
+      toast.classList.remove('show');
+      compactIsland('已撤销上一次窗口操作');
+      state.lastAction = null;
+    }
+
+    function windowSnapshot() {
+      return $$('.app-window').map(win => ({id:win.dataset.window,minimized:win.classList.contains('minimized'),closed:win.classList.contains('closed')}));
+    }
+
+    function renderCmdTab() {
+      const apps = [
+        {id:'notes',name:'备忘录',title:'产品讨论记录',icon:'assets/notes.png'},
+        {id:'browser',name:'Safari',title:'SuperIsland 需求资料',icon:'assets/safari.png'},
+        {id:'finder',name:'访达',title:'项目文件',icon:'assets/finder.png'},
+        {id:'player',name:'音乐',title:'Night Drive',icon:'assets/music.png'},
+        {id:'browser',name:'Chrome',title:'设计参考',icon:'assets/safari.png'},
+        {id:'notes',name:'备忘录',title:'会议记录',icon:'assets/notes.png'},
+        {id:'finder',name:'访达',title:'下载',icon:'assets/finder.png'},
+        {id:'player',name:'音乐',title:'正在播放',icon:'assets/music.png'},
+        {id:'browser',name:'Safari',title:'WINS 参考',icon:'assets/safari.png'}
+      ];
+      state.cmdIndex = Math.max(0, Math.min(state.cmdIndex, apps.length - 1));
+      const selected = apps[state.cmdIndex];
+      $('#cmdCards').innerHTML = apps.map((app,index) => `
+        <button class="cmd-card ${index===state.cmdIndex?'selected':''}" data-cmd-index="${index}" data-app="${app.id}">
+          <img class="cmd-card-icon" src="${app.icon}" alt="${app.name}">
+          <footer><span>${app.name}</span><span>${index+1}</span></footer>
+        </button>`).join('');
+      const popover = $('#cmdWindowPopover');
+      popover.style.setProperty('--cmd-anchor', `${((state.cmdIndex + .5) / apps.length) * 100}%`);
+      popover.innerHTML = `<span class="cmd-window-app">${selected.name}</span><span class="cmd-window-preview ${state.screenGranted?'':'locked'}">${state.screenGranted?'':'缩略图需要屏幕录制权限'}</span><span class="cmd-window-name">${selected.title}</span>`;
+      $$('[data-cmd-index]').forEach(card => card.addEventListener('click', () => { state.cmdIndex = +card.dataset.cmdIndex; renderCmdTab(); }));
+    }
+
+    function positionDockPopover(anchorIcon) {
+      const popover = $('#dockPopover');
+      const desktopRect = $('#desktop').getBoundingClientRect();
+      const iconRect = anchorIcon.getBoundingClientRect();
+      const half = popover.offsetWidth / 2;
+      const anchorX = iconRect.left + iconRect.width / 2 - desktopRect.left;
+      const safeX = Math.max(half + 12, Math.min(anchorX, desktopRect.width - half - 12));
+      popover.style.left = `${safeX}px`;
+      popover.style.bottom = `${desktopRect.bottom - iconRect.top + 13}px`;
+    }
+
+    function renderDockPopover(app='notes', anchorIcon = $(`.dock-icon[data-app="${app}"]`)) {
+      const appData = {
+        notes: {name:'备忘录', windows:[{title:'产品讨论记录',style:'notes'}]},
+        browser: {name:'Safari', windows:[{title:'SuperIsland 需求资料',style:'browser'},{title:'设计参考',style:'browser'}]},
+        player: {name:'音乐', windows:[{title:'Night Drive',style:'player'}]}
+      }[app];
+      const count = appData.windows.length;
+      const popover = $('#dockPopover');
+      popover.style.setProperty('--window-count', count);
+      popover.style.setProperty('--popover-width', count > 1 ? '440px' : '236px');
+      popover.innerHTML = `
+        <div class="popover-head">${appData.name}${state.screenGranted?'':`<span class="popover-mode">标题模式</span>`}</div>
+        <div class="thumb-grid">
+          ${appData.windows.map((win,index) => `
+            <div class="thumb ${state.screenGranted?'':'locked'}" data-thumb="${app}" role="button" tabindex="0" aria-label="切换到${win.title}">
+              <button class="thumb-close" data-close-thumb="${app}" aria-label="关闭${win.title}">×</button>
+              <span class="thumb-preview ${win.style}">${state.screenGranted?`<i class="mini-bar"></i><i class="mini-sidebar"></i><i class="mini-content"></i>`:'未授权屏幕录制<br>显示窗口标题'}</span>
+              <span class="thumb-name">${win.title}</span>
+            </div>`).join('')}
+        </div>`;
+      popover.classList.add('show');
+      $$('.dock-icon').forEach(icon => icon.classList.toggle('active', icon === anchorIcon));
+      positionDockPopover(anchorIcon);
+      $$('[data-close-thumb]').forEach(btn => btn.addEventListener('click', event => { event.stopPropagation(); closeWindow(btn.dataset.closeThumb); }));
+      $$('[data-thumb]').forEach(btn => btn.addEventListener('click', () => focusWindow(btn.dataset.thumb)));
+    }
+
+    function renderMission() {
+      const cards = [
+        {id:'notes',name:'备忘录',title:'产品讨论记录'},
+        {id:'browser',name:'浏览器',title:'SuperIsland 需求资料'},
+        {id:'player',name:'音乐',title:'Night Drive'}
+      ];
+      $('#missionGrid').innerHTML = cards.map(card => `
+        <article class="mission-card" data-mission="${card.id}"><button class="mission-close" data-mission-close="${card.id}">×</button><div class="mc-bar"></div><strong>${card.name}</strong><p>${card.title}</p></article>`).join('');
+      $$('[data-mission-close]').forEach(btn => btn.addEventListener('click', event => { event.stopPropagation(); closeWindow(btn.dataset.missionClose); btn.closest('.mission-card').remove(); }));
+      $$('[data-mission]').forEach(card => card.addEventListener('click', () => { focusWindow(card.dataset.mission); setScene('split'); showToast('已切换到所选窗口','知道了',()=>toast.classList.remove('show')); }));
+    }
+
+    function focusWindow(id) {
+      const win = $(`.app-window[data-window="${id}"]`);
+      if (!win) return;
+      win.classList.remove('minimized','closed');
+      $$('.app-window').forEach(item => item.style.zIndex = item === win ? '24' : '15');
+      state.currentWindow = id;
+      $('#dockPopover').classList.remove('show');
+      $$('.dock-icon').forEach(icon => icon.classList.remove('active'));
+      showToast(`已切换到${{notes:'备忘录',browser:'浏览器',player:'音乐'}[id]}`,'知道了',()=>toast.classList.remove('show'));
+    }
+
+    function closeWindow(id) {
+      const win = $(`.app-window[data-window="${id}"]`);
+      if (!win) return;
+      state.lastAction = {type:'visibility',windows:windowSnapshot()};
+      win.classList.add('closed');
+      showToast('已请求关闭窗口','撤销');
+    }
+
+    function minimizeApp(id) {
+      const win = $(`.app-window[data-window="${id}"]`);
+      if (!win) return;
+      state.lastAction = {type:'visibility',windows:windowSnapshot()};
+      win.classList.toggle('minimized');
+      showToast(win.classList.contains('minimized') ? '已最小化该 App 窗口' : '已恢复该 App 窗口','撤销');
+    }
+
+    function showModal(title,text,confirmText,onConfirm) {
+      $('#modalTitle').textContent = title;
+      $('#modalText').textContent = text;
+      $('#modalConfirm').textContent = confirmText;
+      state.modalAction = onConfirm;
+      $('#modalBackdrop').classList.add('show');
+    }
+    function hideModal() { $('#modalBackdrop').classList.remove('show'); state.modalAction = null; }
+
+    function updateNotes(meta) {
+      $('#noteTitle').textContent = meta.noteTitle;
+      $('#noteSummary').textContent = meta.noteSummary;
+      $('#confirmedList').innerHTML = meta.confirmed.map(item=>`<li>${item}</li>`).join('');
+      $('#pendingHeading').textContent = meta.pendingHeading || '△ 待拍板';
+      $('#pendingList').innerHTML = meta.pending.map(item=>`<li>${item}</li>`).join('');
+    }
+
+    function showSettingsPreview(key = 'overview') {
+      const preview = settingsPreviews[key] || settingsPreviews.overview;
+      const shell = $('#settingsPreview');
+      const video = $('#settingsPreviewVideo');
+      $$('.settings-preview-trigger').forEach(row => row.classList.toggle('previewing', row.dataset.preview === key));
+      $('#settingsPreviewTitle').textContent = preview.title;
+      $('#settingsPreviewDescription').textContent = preview.description;
+      if (key === 'overview') {
+        video.pause();
+        shell.classList.remove('playing', 'switching');
+        delete video.dataset.preview;
+        return;
+      }
+      if (video.dataset.preview === key) return;
+      shell.classList.add('switching');
+      video.dataset.preview = key;
+      window.setTimeout(() => {
+        video.src = preview.src;
+        video.load();
+        shell.classList.add('playing');
+        shell.classList.remove('switching');
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) video.pause();
+        else video.play().catch(() => {});
+      }, 90);
+    }
+
+    function resetSettingsPreview() {
+      if ($('#settingsInteractionArea').contains(document.activeElement)) return;
+      showSettingsPreview('overview');
+    }
+
+    function setScene(scene) {
+      state.scene = scene;
+      const meta = sceneMeta[scene];
+      $$('.scenario-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.scene === scene));
+      $('#sceneTitle').textContent = meta.title;
+      $('#sceneDescription').textContent = meta.description;
+      $('#primaryDemo').textContent = meta.primary;
+      $('#windowType').style.display = scene === 'split' ? '' : 'none';
+      updateNotes(meta);
+
+      $('#cmdOverlay').classList.toggle('show', scene === 'cmdtab');
+      $('#missionOverlay').classList.toggle('show', scene === 'mission');
+      $('#fullscreenOverlay').classList.toggle('show', scene === 'fullscreen');
+      $('#settingsWindow').classList.toggle('show', scene === 'settings');
+      if (scene !== 'fullscreen') {
+        state.fullscreen.generation += 1;
+        setFullscreenBusy(false);
+      }
+      if (scene !== 'settings') $('#settingsPreviewVideo').pause();
+      $('#dockPopover').classList.remove('show');
+      $$('.dock-icon').forEach(icon => icon.classList.remove('active'));
+      if (scene !== 'split') compactIsland();
+      if (scene === 'fullscreen') { resetFullscreenDemo({ keepAction: true }); compactIsland('原生全屏转换 · 需求稿'); }
+      if (scene === 'cmdtab') { renderCmdTab(); compactIsland('Cmd-Tab Plus'); }
+      if (scene === 'dock') compactIsland('Dock 增强 · 已就绪');
+      if (scene === 'mission') { renderMission(); compactIsland('调度中心 Pro · 实验性','error'); }
+      if (scene === 'settings') { compactIsland('设置 · 窗口增强'); showSettingsPreview('overview'); $('#settingsScroll').scrollTop = 0; }
+    }
+
+    $$('.scenario-btn').forEach(btn => btn.addEventListener('click', () => setScene(btn.dataset.scene)));
+    $$('.fullscreen-action').forEach(button => button.addEventListener('click', () => selectFullscreenAction(button.dataset.fullscreenAction)));
+    $$('[data-fullscreen-test]').forEach(button => button.addEventListener('click', () => {
+      const test = button.dataset.fullscreenTest;
+      if (test === 'normal') {
+        void runFullscreenAction();
+        return;
+      }
+      if (test === 'exitTimeout') {
+        const action = state.fullscreen.action === 'drag' ? 'layout' : state.fullscreen.action;
+        if (!state.fullscreen.busy) selectFullscreenAction(action);
+        void runFullscreenAction(action, 'exitTimeout');
+        return;
+      }
+      if (test === 'targetDisconnected' || test === 'restoreFailed') {
+        if (!state.fullscreen.busy) selectFullscreenAction('move');
+        void runFullscreenAction('move', test);
+        return;
+      }
+      if (test === 'repeat') {
+        const action = state.fullscreen.action === 'drag' ? 'layout' : state.fullscreen.action;
+        if (!state.fullscreen.busy) selectFullscreenAction(action);
+        void runFullscreenAction(action, 'normal');
+        window.setTimeout(() => { void runFullscreenAction(action, 'normal'); }, 90);
+      }
+    }));
+    $('#primaryDemo').addEventListener('click', () => {
+      if (state.scene === 'split') splitIsland();
+      if (state.scene === 'fullscreen') void runFullscreenAction();
+      if (state.scene === 'cmdtab') $('#cmdOverlay').classList.add('show');
+      if (state.scene === 'dock') renderDockPopover('notes');
+      if (state.scene === 'mission') { $('#missionOverlay').classList.add('show'); renderMission(); }
+      if (state.scene === 'settings') $('#settingsWindow').classList.add('show');
+    });
+    $('#resetDemo').addEventListener('click', () => { restoreWindows(); resetFullscreenDemo({ keepAction: true }); compactIsland(); hideModal(); toast.classList.remove('show'); $('#advancedSettings').classList.remove('show'); showSettingsPreview('overview'); setScene(state.scene); });
+    $('#windowType').addEventListener('change', () => { if (island.classList.contains('expanded')) splitIsland(); });
+
+    $('#cmdPrev').addEventListener('click', () => { state.cmdIndex = (state.cmdIndex + 2) % 3; renderCmdTab(); });
+    $('#cmdNext').addEventListener('click', () => { state.cmdIndex = (state.cmdIndex + 1) % 3; renderCmdTab(); });
+    $('#cmdClose').addEventListener('click', () => { const id=['notes','browser','player'][state.cmdIndex]; closeWindow(id); });
+    $('#cmdQuit').addEventListener('click', () => {
+      const app=['备忘录','浏览器','音乐'][state.cmdIndex];
+      showModal(`退出${app}？`,`将关闭该 App 的全部窗口。未保存内容是否可恢复由 ${app} 自身决定。`,'确认退出',()=>{ closeWindow(['notes','browser','player'][state.cmdIndex]); hideModal(); });
+    });
+    $('#missionExit').addEventListener('click', () => setScene('split'));
+
+    $$('.dock-icon').forEach(icon => {
+      let clickTimer = null;
+      icon.addEventListener('mouseenter', () => { if (state.scene === 'dock' && icon.dataset.app !== 'settings') renderDockPopover(icon.dataset.app, icon); });
+      icon.addEventListener('click', () => {
+        if (icon.dataset.app === 'settings') return setScene('settings');
+        if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; minimizeApp(icon.dataset.app); return; }
+        clickTimer = setTimeout(() => { renderDockPopover(icon.dataset.app, icon); clickTimer = null; }, 260);
+      });
+    });
+
+    $$('[data-toggle]').forEach(toggle => toggle.addEventListener('click', event => {
+      event.stopPropagation();
+      toggle.classList.toggle('on');
+      toggle.setAttribute('aria-pressed', String(toggle.classList.contains('on')));
+    }));
+    $$('.settings-preview-trigger').forEach(row => {
+      row.addEventListener('mouseenter', () => showSettingsPreview(row.dataset.preview));
+      row.addEventListener('focusin', () => showSettingsPreview(row.dataset.preview));
+    });
+    $('#settingsInteractionArea').addEventListener('mouseleave', resetSettingsPreview);
+    $('#settingsInteractionArea').addEventListener('focusout', () => window.setTimeout(resetSettingsPreview));
+
+    $('#closeSettingsWindow').addEventListener('click', () => setScene('split'));
+    $('#settingsBack').addEventListener('click', () => setScene('split'));
+    $$('[data-pane-name]').forEach(item => item.addEventListener('click', () => showToast(`${item.dataset.paneName}为 SuperIsland 现有设置页，本稿只展开窗口增强`, '知道了', () => toast.classList.remove('show'))));
+
+    $('#openAdvancedSettings').addEventListener('click', () => {
+      $('#advancedSettings').classList.add('show');
+      $('.settings-advanced-body').scrollTop = 0;
+    });
+    $('#closeAdvancedSettings').addEventListener('click', () => $('#advancedSettings').classList.remove('show'));
+    $$('.settings-layout').forEach(layout => layout.addEventListener('click', () => showToast(`${layout.dataset.layoutName}：请选择快捷键后启用`, '知道了', () => toast.classList.remove('show'))));
+    $$('.accent-swatch').forEach(swatch => swatch.addEventListener('click', () => {
+      $$('.accent-swatch').forEach(item => {
+        item.classList.toggle('selected', item === swatch);
+        item.setAttribute('aria-pressed', String(item === swatch));
+      });
+      showToast(`强调色已切换为${swatch.dataset.accent}`, '知道了', () => toast.classList.remove('show'));
+    }));
+    $('#addExcludedApp').addEventListener('click', () => {
+      $('#excludedAppChip').classList.add('show');
+      $('#addExcludedApp').textContent = '继续添加…';
+      showToast('已在演示中排除 Finder', '知道了', () => toast.classList.remove('show'));
+    });
+    $$('[data-advanced-action]').forEach(button => button.addEventListener('click', () => showToast(`${button.dataset.advancedAction}：HTML 演示入口`, '知道了', () => toast.classList.remove('show'))));
+    $$('[data-shortcut]').forEach(shortcut => shortcut.addEventListener('click', () => {
+      shortcut.classList.add('recording');
+      shortcut.textContent = '请按快捷键';
+      const captureShortcut = event => {
+        event.preventDefault();
+        if (['Meta','Alt','Control','Shift'].includes(event.key)) return;
+        shortcut.classList.remove('recording');
+        if (event.key === 'Escape') shortcut.textContent = '未设置';
+        else {
+          const keys = [event.metaKey && '⌘', event.altKey && '⌥', event.ctrlKey && '⌃', event.shiftKey && '⇧', event.key === ' ' ? 'Space' : event.key.toUpperCase()].filter(Boolean);
+          shortcut.textContent = keys.join(' ') || '未设置';
+        }
+        window.removeEventListener('keydown', captureShortcut, true);
+      };
+      window.addEventListener('keydown', captureShortcut, true);
+    }));
+    $('#requestScreenPermission').addEventListener('click', () => showModal('允许录制屏幕与系统音频？','仅用于在本机生成窗口缩略图。拒绝后仍可使用分屏、移动、关闭和窗口标题列表。','模拟允许',()=>{ state.screenGranted=true; $('#requestScreenPermission').textContent='已授权'; $('#requestScreenPermission').disabled=true; hideModal(); showToast('屏幕录制权限已模拟为允许','知道了',()=>toast.classList.remove('show')); }));
+    $('#modalCancel').addEventListener('click', hideModal);
+    $('#modalConfirm').addEventListener('click', () => state.modalAction?.());
+
+    $$('[data-lab]').forEach(btn => btn.addEventListener('click', () => {
+      const mode = btn.dataset.lab;
+      restoreWindows();
+      if (mode === 'normal') { state.axGranted=true; state.screenGranted=true; $('#requestScreenPermission').textContent='已授权'; $('#requestScreenPermission').disabled=true; showToast('已切换为正常状态','知道了',()=>toast.classList.remove('show')); }
+      if (mode === 'axDenied') { state.axGranted=false; state.screenGranted=false; $('#requestScreenPermission').textContent='请求权限'; $('#requestScreenPermission').disabled=false; permissionIsland(); showToast('未执行窗口操作：缺少辅助功能权限','打开设置',()=>setScene('settings')); }
+      if (mode === 'screenDenied') { state.axGranted=true; state.screenGranted=false; $('#requestScreenPermission').textContent='请求权限'; $('#requestScreenPermission').disabled=false; setScene('cmdtab'); renderCmdTab(); showToast('缩略图已降级为标题模式','打开设置',()=>setScene('settings')); }
+      if (mode === 'noWindows') { state.axGranted=true; $$('.app-window').forEach(win=>win.classList.add('closed')); compactIsland('没有可管理的窗口','error'); showToast('当前没有可管理窗口','恢复演示',()=>{restoreWindows();toast.classList.remove('show');}); }
+      $('#axPermissionLabel').textContent = state.axGranted ? '✓ 已授权' : '需要授权';
+      $('#axPermissionLabel').classList.toggle('missing', !state.axGranted);
+    }));
+
+    // Pointer-based window dragging. Moving the title bar into the top hot zone expands the island.
+    $$('.app-window .window-bar').forEach(bar => {
+      let drag = null;
+      bar.addEventListener('pointerdown', event => {
+        if (state.scene !== 'split') return;
+        const win = bar.closest('.app-window');
+        state.currentWindow = win.dataset.window;
+        const rect = win.getBoundingClientRect();
+        const desktopRect = desktop.getBoundingClientRect();
+        drag = { win, dx:event.clientX-rect.left, dy:event.clientY-rect.top, desktopRect };
+        win.classList.add('dragging');
+        bar.setPointerCapture(event.pointerId);
+      });
+      bar.addEventListener('pointermove', event => {
+        if (!drag) return;
+        const x = event.clientX - drag.desktopRect.left - drag.dx;
+        const y = event.clientY - drag.desktopRect.top - drag.dy;
+        drag.win.style.left = `${Math.max(0, Math.min(x, drag.desktopRect.width-drag.win.offsetWidth))}px`;
+        drag.win.style.top = `${Math.max(29, Math.min(y, drag.desktopRect.height-drag.win.offsetHeight))}px`;
+        if (event.clientY - drag.desktopRect.top < 150) splitIsland();
+      });
+      bar.addEventListener('pointerup', event => {
+        if (!drag) return;
+        const target = document.elementFromPoint(event.clientX,event.clientY)?.closest?.('[data-layout]');
+        drag.win.classList.remove('dragging');
+        if (target) applyLayout(target.dataset.layout, drag.win.dataset.window);
+        drag = null;
+      });
+    });
+
+    document.addEventListener('keydown', event => {
+      if (state.scene === 'cmdtab') {
+        if (event.key === 'ArrowRight') { state.cmdIndex=(state.cmdIndex+1)%3; renderCmdTab(); }
+        if (event.key === 'ArrowLeft') { state.cmdIndex=(state.cmdIndex+2)%3; renderCmdTab(); }
+        if (['1','2','3'].includes(event.key)) { state.cmdIndex=+event.key-1; renderCmdTab(); }
+        if (event.key.toLowerCase()==='w' && (event.metaKey||event.ctrlKey)) { event.preventDefault(); $('#cmdClose').click(); }
+      }
+      if (event.key === 'Escape') { hideModal(); $('#dockPopover').classList.remove('show'); if (state.scene!=='split') setScene('split'); }
+    });
+
+    setScene('split');
+  </script>
+</body>
+</html>

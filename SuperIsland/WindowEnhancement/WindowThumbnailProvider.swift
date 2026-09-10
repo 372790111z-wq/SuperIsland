@@ -76,6 +76,124 @@ struct WindowThumbnailApplicationIdentity: Sendable, Equatable {
     }
 }
 
+/// Identifies both this observer installation and its window binding changes.
+/// A newly installed observer must not validate capture work from an earlier
+/// registry entry even when the process launch and numeric generation match.
+struct WindowAXLifecycleRevision: Equatable, Sendable {
+    let observationID: UUID
+    let generation: UInt64
+
+    init(observationID: UUID = UUID(), generation: UInt64 = 0) {
+        self.observationID = observationID
+        self.generation = generation
+    }
+
+    func advanced() -> Self {
+        Self(observationID: observationID, generation: generation &+ 1)
+    }
+}
+
+struct WindowAXLifecycleChange: Sendable {
+    let processLifetimeKey: String
+    let windowIDs: Set<CGWindowID>
+    let revision: WindowAXLifecycleRevision
+
+    func affects(processLifetimeKey: String?, windowID: CGWindowID?) -> Bool {
+        guard let processLifetimeKey, let windowID else { return false }
+        return self.processLifetimeKey == processLifetimeKey
+            && windowIDs.contains(windowID)
+    }
+
+    /// Notification handlers may run after the consumer has already rebuilt
+    /// its rows. Only a snapshot older than this change in the same observer
+    /// installation is stale; a delayed notification cannot cancel fresh work.
+    func invalidates(_ capturedRevision: WindowAXLifecycleRevision) -> Bool {
+        capturedRevision.observationID == revision.observationID
+            && capturedRevision.generation < revision.generation
+    }
+}
+
+/// A destruction callback belongs to one concrete AX proxy, not every later
+/// proxy that happens to reuse its WindowServer ID. Temporary AX failures or
+/// absence from AXWindows likewise do not prove a real window was destroyed.
+enum WindowAXLifecycleRetirementPolicy {
+    static func matchingWindowIDs<Element>(
+        for element: Element,
+        currentWindows: [CGWindowID: Element],
+        sameElement: (Element, Element) -> Bool
+    ) -> Set<CGWindowID> {
+        Set(currentWindows.compactMap { windowID, current in
+            windowID > 0 && sameElement(current, element) ? windowID : nil
+        })
+    }
+
+    static func shouldRetire(roleReadResult: AXError) -> Bool {
+        roleReadResult == .invalidUIElement
+    }
+}
+
+/// A capture belongs to both a global privacy generation and one concrete
+/// process launch. Retiring an A window must not reject B's in-flight pixels.
+struct WindowThumbnailCaptureGeneration: Equatable, Sendable {
+    let globalEpoch: UUID
+    let processLifetimeKey: String
+    let processEpoch: UInt64
+}
+
+/// Value-only generation bookkeeping. Production access is protected by the
+/// thumbnail cache lock, including validation immediately before cache writes.
+/// Only invalidated namespaces occupy the bounded table; untouched launches
+/// use epoch zero. Capacity recycling changes the global identity so a removed
+/// namespace can never alias an old epoch-zero capture.
+struct WindowThumbnailCaptureGenerationTracker: Sendable {
+    private var globalEpoch = UUID()
+    private var processEpochs: [String: UInt64] = [:]
+    private let maximumProcessEntries: Int
+
+    init(maximumProcessEntries: Int = 64) {
+        self.maximumProcessEntries = max(1, maximumProcessEntries)
+    }
+
+    var trackedProcessCount: Int { processEpochs.count }
+
+    func snapshot(for processLifetimeKey: String) -> WindowThumbnailCaptureGeneration {
+        WindowThumbnailCaptureGeneration(
+            globalEpoch: globalEpoch,
+            processLifetimeKey: processLifetimeKey,
+            processEpoch: processEpochs[processLifetimeKey] ?? 0
+        )
+    }
+
+    func isCurrent(
+        _ generation: WindowThumbnailCaptureGeneration,
+        for processLifetimeKey: String
+    ) -> Bool {
+        generation == snapshot(for: processLifetimeKey)
+    }
+
+    func areCurrent(_ generations: [WindowThumbnailCaptureGeneration]) -> Bool {
+        !generations.isEmpty && generations.allSatisfy {
+            isCurrent($0, for: $0.processLifetimeKey)
+        }
+    }
+
+    mutating func invalidate(processLifetimeKey: String) {
+        if processEpochs[processLifetimeKey] == nil,
+           processEpochs.count >= maximumProcessEntries {
+            invalidateAll()
+        }
+        if processEpochs[processLifetimeKey] == UInt64.max {
+            invalidateAll()
+        }
+        processEpochs[processLifetimeKey] = (processEpochs[processLifetimeKey] ?? 0) + 1
+    }
+
+    mutating func invalidateAll() {
+        globalEpoch = UUID()
+        processEpochs.removeAll(keepingCapacity: false)
+    }
+}
+
 /// Event-driven AX window registry shared by Dock and Cmd-Tab. Some Apps omit
 /// inactive windows from `AXWindows`; remembering only exact window IDs seen in
 /// lifecycle notifications preserves those real windows without admitting raw
@@ -83,11 +201,15 @@ struct WindowThumbnailApplicationIdentity: Sendable, Equatable {
 /// main run loop, and every public entry point is called from the main actor.
 final class WindowAXLifecycleRegistry: @unchecked Sendable {
     static let shared = WindowAXLifecycleRegistry()
+    static let didRetireWindowsNotification = Notification.Name(
+        "WindowAXLifecycleRegistry.didRetireWindows"
+    )
 
     private final class ProcessObservation {
         let identity: WindowThumbnailApplicationIdentity
         let applicationElement: AXUIElement
         let observer: AXObserver
+        var revision = WindowAXLifecycleRevision()
         var windowsByID: [CGWindowID: AXUIElement] = [:]
         var subscribedWindowIDs: Set<CGWindowID> = []
         var notificationRegistrationResults: [
@@ -233,6 +355,18 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             .map(\.value)
     }
 
+    /// Does not seed AX windows or install an observer. Consumers compare the
+    /// token captured before asynchronous thumbnail work with this live token
+    /// before publishing its rows.
+    func revision(
+        for identity: WindowThumbnailApplicationIdentity
+    ) -> WindowAXLifecycleRevision? {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let observation = observationsByPID[identity.processIdentifier],
+              observation.identity == identity else { return nil }
+        return observation.revision
+    }
+
     func diagnosticSnapshot(
         for application: NSRunningApplication
     ) -> WindowAXLifecycleDiagnosticSnapshot {
@@ -309,18 +443,12 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                 track(focused, in: observation)
             }
         case kAXUIElementDestroyedNotification as String:
-            if let windowID = windowDirectWindowNumber(of: element) {
-                observation.windowsByID.removeValue(forKey: windowID)
-                observation.subscribedWindowIDs.remove(windowID)
-            } else {
-                let removedIDs = observation.windowsByID.compactMap {
-                    CFEqual($0.value, element) ? $0.key : nil
-                }
-                for windowID in removedIDs {
-                    observation.windowsByID.removeValue(forKey: windowID)
-                    observation.subscribedWindowIDs.remove(windowID)
-                }
-            }
+            let removedIDs = WindowAXLifecycleRetirementPolicy.matchingWindowIDs(
+                for: element,
+                currentWindows: observation.windowsByID,
+                sameElement: { CFEqual($0, $1) }
+            )
+            retire(removedIDs, in: observation)
         default:
             break
         }
@@ -352,6 +480,22 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             }
         }
         for window in windows { track(window, in: observation) }
+
+        // Some Apps do not deliver every destruction notification. Only an
+        // explicitly invalid cached AX object is sufficient fallback evidence;
+        // a minimized/fullscreen window missing from AXWindows remains valid.
+        let invalidIDs = Set(observation.windowsByID.compactMap { windowID, element in
+            var role: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(
+                element,
+                kAXRoleAttribute as CFString,
+                &role
+            )
+            return WindowAXLifecycleRetirementPolicy.shouldRetire(
+                roleReadResult: result
+            ) ? windowID : nil
+        })
+        retire(invalidIDs, in: observation)
     }
 
     private func track(
@@ -363,8 +507,10 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
               ownerPID == observation.identity.processIdentifier,
               let windowID = windowDirectWindowNumber(of: element),
               windowID > 0 else { return }
-        if let existing = observation.windowsByID[windowID],
-           !CFEqual(existing, element) {
+        let replacedProxy = observation.windowsByID[windowID].map {
+            !CFEqual($0, element)
+        } ?? false
+        if replacedProxy, let existing = observation.windowsByID[windowID] {
             removeWindowNotifications(
                 from: existing,
                 observation: observation
@@ -391,19 +537,99 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             observation.subscribedWindowIDs = observation.subscribedWindowIDs
                 .intersection(retainedIDs)
         }
-        guard observation.subscribedWindowIDs.insert(windowID).inserted else {
-            return
+        if observation.subscribedWindowIDs.insert(windowID).inserted {
+            let refcon = Unmanaged.passUnretained(self).toOpaque()
+            for notification in perWindowNotifications {
+                addNotification(
+                    notification,
+                    element: element,
+                    observation: observation,
+                    refcon: refcon,
+                    targetWindowID: windowID
+                )
+            }
         }
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        for notification in perWindowNotifications {
-            addNotification(
-                notification,
-                element: element,
-                observation: observation,
-                refcon: refcon,
-                targetWindowID: windowID
+        if replacedProxy {
+            invalidateBindings([windowID], in: observation)
+        }
+        // Registry membership alone is not proof of a new valid window. In
+        // particular, a stale AX proxy can survive a seed read after closing.
+        if WindowThumbnailProvider.needsPreviewDiscoveryReestablishment(
+            applicationIdentity: observation.identity,
+            windowID: windowID
+        ) {
+            var role: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
+               (role as? String) == (kAXWindowRole as String),
+               let descriptions = WindowServerWindowDescriptions.copy(for: [windowID]) as? [[String: Any]],
+               descriptions.contains(where: {
+                   ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID &&
+                       ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ownerPID
+               }) {
+                WindowThumbnailProvider.reestablishPreviewDiscovery(
+                    applicationIdentity: observation.identity,
+                    windowID: windowID
+                )
+            }
+        }
+    }
+
+    private func retire(
+        _ windowIDs: Set<CGWindowID>,
+        in observation: ProcessObservation
+    ) {
+        let currentIDs = windowIDs.intersection(observation.windowsByID.keys)
+        guard !currentIDs.isEmpty else { return }
+        for windowID in currentIDs {
+            if let element = observation.windowsByID.removeValue(forKey: windowID) {
+                removeWindowNotifications(from: element, observation: observation)
+            }
+            observation.subscribedWindowIDs.remove(windowID)
+        }
+        invalidateBindings(currentIDs, in: observation, recordsRetirement: true)
+    }
+
+    /// Complete all synchronous invalidation before notifying UI consumers.
+    /// A retained private surface cannot recreate the binding; only a new
+    /// exact AX observation can establish it again.
+    private func invalidateBindings(
+        _ windowIDs: Set<CGWindowID>,
+        in observation: ProcessObservation,
+        recordsRetirement: Bool = false
+    ) {
+        guard !windowIDs.isEmpty else { return }
+        WindowInventoryBindingHistory.shared.forget(
+            windowIDs: windowIDs,
+            processLifetimeKey: observation.identity.processLifetimeKey
+        )
+        observation.revision = observation.revision.advanced()
+        if recordsRetirement {
+            WindowThumbnailProvider.retirePreviewDiscovery(
+                applicationIdentity: observation.identity,
+                windowIDs: windowIDs
             )
+        } else {
+            for windowID in windowIDs {
+                WindowThumbnailProvider.clearCache(
+                    applicationIdentity: observation.identity,
+                    request: WindowThumbnailRequest(
+                        title: "",
+                        occurrence: 0,
+                        bounds: nil,
+                        windowID: windowID
+                    )
+                )
+            }
         }
+        WindowServerInventoryService.shared.invalidate()
+        NotificationCenter.default.post(
+            name: Self.didRetireWindowsNotification,
+            object: WindowAXLifecycleChange(
+                processLifetimeKey: observation.identity.processLifetimeKey,
+                windowIDs: windowIDs,
+                revision: observation.revision
+            )
+        )
     }
 
     private func addNotification(
@@ -665,6 +891,26 @@ enum WindowPreviewOnlySelectionPolicy {
     }
 }
 
+/// Retirement filtering precedes both the best-score anchor and the capture
+/// limit. Otherwise retired compositor surfaces can crowd out a live Renderer.
+enum WindowRendererSelectionPolicy {
+    static func nearBest<Candidate>(
+        from candidates: [Candidate],
+        isAllowed: (Candidate) -> Bool,
+        score: (Candidate) -> CGFloat,
+        overlap: (Candidate) -> CGFloat,
+        windowID: (Candidate) -> CGWindowID
+    ) -> [Candidate] {
+        let sorted = candidates.filter(isAllowed).sorted {
+            score($0) == score($1) ? windowID($0) < windowID($1) : score($0) < score($1)
+        }
+        guard let best = sorted.first else { return [] }
+        return Array(sorted.filter {
+            score($0) <= score(best) + 12 && abs(overlap($0) - overlap(best)) <= 0.04
+        }.prefix(4))
+    }
+}
+
 enum WindowThumbnailProvider {
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.workview.SuperIsland",
@@ -706,7 +952,11 @@ enum WindowThumbnailProvider {
     /// lifecycle boundary purged the cache. Cancellation alone is insufficient:
     /// ScreenCaptureKit may finish a capture after sleep/lock or after a feature
     /// toggle, and that late result must never repopulate cleared memory.
-    private static var cacheGeneration: UInt64 = 0
+    private static var captureGenerations = WindowThumbnailCaptureGenerationTracker()
+    // Shares cacheLock with capture generations: a new request cannot observe
+    // a post-retirement epoch without also seeing its discovery exclusion.
+    // Privacy/cache resets intentionally preserve these metadata-only IDs.
+    private static var discoveryRetirements = WindowPreviewDiscoveryRetirementHistory()
     private static var permissionWasRevokedAfterLaunch = false
     @MainActor private static var lifecycleObservers: [NSObjectProtocol] = []
     @MainActor private static var permissionPollTimer: Timer?
@@ -720,7 +970,8 @@ enum WindowThumbnailProvider {
     /// failure remains typed so callers can explain why no image is shown.
     static func captureWindows(
         applicationIdentity: WindowThumbnailApplicationIdentity,
-        requests: [WindowThumbnailRequest]
+        requests: [WindowThumbnailRequest],
+        expectedCacheGeneration: WindowThumbnailCaptureGeneration? = nil
     ) async -> [WindowThumbnailResult] {
         guard !requests.isEmpty else { return [] }
         guard !Task.isCancelled else {
@@ -738,7 +989,14 @@ enum WindowThumbnailProvider {
             clearCache(processIdentifier: applicationIdentity.processIdentifier)
             return repeated(.notEnumerated, count: requests.count)
         }
-        let expectedCacheGeneration = cacheGenerationSnapshot()
+        // Detached prewarm work may start after its AX window was retired.
+        // Preserve the token recorded when its requests were constructed so
+        // old work cannot acquire a new generation and repopulate the cache.
+        let expectedCacheGeneration = expectedCacheGeneration
+            ?? cacheGenerationSnapshot(for: applicationIdentity)
+        guard cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration else {
+            return repeated(.captureFailed, count: requests.count)
+        }
 
         let content: SCShareableContent
         do {
@@ -747,11 +1005,19 @@ enum WindowThumbnailProvider {
                 onScreenWindowsOnly: false
             )
         } catch {
-            return fallbackResults(
+            guard cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration else {
+                return repeated(.captureFailed, count: requests.count)
+            }
+            let fallback = fallbackResults(
                 for: requests,
                 applicationIdentity: applicationIdentity,
                 failure: failureResultAfterCaptureError()
             )
+            guard !Task.isCancelled,
+                  cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration else {
+                return repeated(.captureFailed, count: requests.count)
+            }
+            return fallback
         }
         return await captureWindows(
             applicationIdentity: applicationIdentity,
@@ -766,7 +1032,8 @@ enum WindowThumbnailProvider {
     /// source returned an empty list. The result is preview-only: callers must
     /// not infer AX actions from these WindowServer surfaces.
     static func discoverAndCaptureWindows(
-        applicationIdentity: WindowThumbnailApplicationIdentity
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        expectedCacheGeneration: WindowThumbnailCaptureGeneration? = nil
     ) async -> WindowThumbnailDiscoveryResult {
         guard !Task.isCancelled else { return .unavailable(.captureFailed) }
         switch authorizationState() {
@@ -781,7 +1048,11 @@ enum WindowThumbnailProvider {
             clearCache(processIdentifier: applicationIdentity.processIdentifier)
             return .unavailable(.notEnumerated)
         }
-        let expectedCacheGeneration = cacheGenerationSnapshot()
+        let expectedCacheGeneration = expectedCacheGeneration
+            ?? cacheGenerationSnapshot(for: applicationIdentity)
+        guard cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration else {
+            return .unavailable(.captureFailed)
+        }
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.excludingDesktopWindows(
@@ -792,13 +1063,14 @@ enum WindowThumbnailProvider {
             return .unavailable(failureResultAfterCaptureError())
         }
         guard !Task.isCancelled,
-              applicationIdentity.matchesCurrentProcess() else {
+              applicationIdentity.matchesCurrentProcess(),
+              cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration else {
             return .unavailable(.notEnumerated)
         }
 
         let candidates = fallbackPreviewCandidates(
             in: content,
-            processIdentifier: applicationIdentity.processIdentifier
+            applicationIdentity: applicationIdentity
         )
         guard !candidates.isEmpty else {
             // Some hosted mini-program Dock services publish only narrow
@@ -875,10 +1147,13 @@ enum WindowThumbnailProvider {
 
         guard !Task.isCancelled,
               applicationIdentity.matchesCurrentProcess(),
-              cacheGenerationSnapshot() == expectedCacheGeneration else {
+              cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration else {
             return .unavailable(.captureFailed)
         }
-        return .windows(zip(requests, results).map {
+        return .windows(zip(requests, results).filter {
+            guard let windowID = $0.0.windowID else { return false }
+            return allowsPreviewDiscovery(applicationIdentity: applicationIdentity, windowID: windowID)
+        }.map {
             WindowThumbnailDiscoveredWindow(request: $0.0, result: $0.1)
         })
     }
@@ -887,10 +1162,11 @@ enum WindowThumbnailProvider {
         applicationIdentity: WindowThumbnailApplicationIdentity,
         requests: [WindowThumbnailRequest],
         content: SCShareableContent,
-        expectedCacheGeneration: UInt64
+        expectedCacheGeneration: WindowThumbnailCaptureGeneration
     ) async -> [WindowThumbnailResult] {
         let applicationPID = applicationIdentity.processIdentifier
         guard !Task.isCancelled,
+              cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration,
               applicationIdentity.matchesCurrentProcess() else {
             return repeated(.captureFailed, count: requests.count)
         }
@@ -977,6 +1253,7 @@ enum WindowThumbnailProvider {
                 if captureResult.isEmptySurface {
                     discardCachedCapture(
                         keys: cacheKeysForStore(exactKey: key, applicationIdentity: applicationIdentity, request: request),
+                        applicationIdentity: applicationIdentity,
                         expectedGeneration: expectedCacheGeneration
                     )
                 }
@@ -1016,7 +1293,7 @@ enum WindowThumbnailProvider {
                 }
             }
         }
-        guard cacheGenerationSnapshot() == expectedCacheGeneration else {
+        guard cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration else {
             return repeated(.captureFailed, count: requests.count)
         }
         guard applicationIdentity.matchesCurrentProcess() else {
@@ -1038,7 +1315,7 @@ enum WindowThumbnailProvider {
         exactKey: String,
         request: WindowThumbnailRequest,
         applicationIdentity: WindowThumbnailApplicationIdentity,
-        expectedCacheGeneration: UInt64
+        expectedCacheGeneration: WindowThumbnailCaptureGeneration
     ) -> WindowThumbnailResult {
         let entry = CachedThumbnail(
             image: image,
@@ -1053,6 +1330,7 @@ enum WindowThumbnailProvider {
                 applicationIdentity: applicationIdentity,
                 request: request
             ),
+            applicationIdentity: applicationIdentity,
             expectedGeneration: expectedCacheGeneration
         )
         return stored ? .fresh(image) : .captureFailed
@@ -1064,8 +1342,9 @@ enum WindowThumbnailProvider {
     /// would show the parent WeChat window under a mini-program Dock item.
     private static func fallbackPreviewCandidates(
         in content: SCShareableContent,
-        processIdentifier: pid_t
+        applicationIdentity: WindowThumbnailApplicationIdentity
     ) -> [SCWindow] {
+        let processIdentifier = applicationIdentity.processIdentifier
         let parentPID = parentProcessIdentifier(of: processIdentifier)
         let parentFrames: [CGRect]
         if let parentPID, parentPID > 1 {
@@ -1085,7 +1364,11 @@ enum WindowThumbnailProvider {
             guard window.owningApplication?.processID == processIdentifier,
                   window.windowLayer == 0,
                   window.frame.width >= 160,
-                  window.frame.height >= 100 else { continue }
+                  window.frame.height >= 100,
+                  allowsPreviewDiscovery(
+                    applicationIdentity: applicationIdentity,
+                    windowID: window.windowID
+                  ) else { continue }
             // Fail closed when the helper surface is only a duplicate of the
             // parent App's backing frame, or when the same helper publishes two
             // near-identical surfaces for one visual window.
@@ -1110,6 +1393,10 @@ enum WindowThumbnailProvider {
         let window: SCWindow
         let parentSnapshot: ProcessSnapshot
         let ancestorSnapshot: ProcessSnapshot
+        let parentIdentity: WindowThumbnailApplicationIdentity
+        let ancestorIdentity: WindowThumbnailApplicationIdentity
+        let parentCaptureGeneration: WindowThumbnailCaptureGeneration
+        let ancestorCaptureGeneration: WindowThumbnailCaptureGeneration
     }
 
     private enum AncestorHostedPreviewMatch {
@@ -1146,16 +1433,25 @@ enum WindowThumbnailProvider {
            let ancestorSnapshot = processSnapshot(
                of: parentSnapshot.parentProcessIdentifier
            ),
+           let parentIdentity = NSRunningApplication(processIdentifier: parentSnapshot.processIdentifier)
+            .flatMap({ WindowThumbnailApplicationIdentity(application: $0) }),
+           let ancestorIdentity = NSRunningApplication(processIdentifier: ancestorSnapshot.processIdentifier)
+            .flatMap({ WindowThumbnailApplicationIdentity(application: $0) }),
+           parentIdentity.matchesCurrentProcess(),
+           ancestorIdentity.matchesCurrentProcess(),
            let targetBundlePath = applicationIdentity.bundlePath,
            let ancestorBundlePath = NSRunningApplication(
                 processIdentifier: ancestorSnapshot.processIdentifier
            )?.bundleURL?.standardizedFileURL.path else {
             return .notFound
         }
+        let parentCaptureGeneration = cacheGenerationSnapshot(for: parentIdentity)
+        let ancestorCaptureGeneration = cacheGenerationSnapshot(for: ancestorIdentity)
 
         let targetAnchors = content.windows.filter { window in
             guard let owner = window.owningApplication else { return false }
             return owner.processID == targetPID &&
+                allowsPreviewDiscovery(applicationIdentity: applicationIdentity, windowID: window.windowID) &&
                 owner.bundleIdentifier.caseInsensitiveCompare(
                     targetBundleIdentifier
                 ) == .orderedSame &&
@@ -1169,6 +1465,7 @@ enum WindowThumbnailProvider {
         let hiddenParentShells = content.windows.filter { window in
             guard let owner = window.owningApplication else { return false }
             return owner.processID == parentSnapshot.processIdentifier &&
+                allowsPreviewDiscovery(window: window) &&
                 owner.bundleIdentifier.caseInsensitiveCompare(
                     targetBundleIdentifier
                 ) == .orderedSame &&
@@ -1185,6 +1482,7 @@ enum WindowThumbnailProvider {
         let visibleAncestorWindows = content.windows.filter { window in
             guard let owner = window.owningApplication else { return false }
             return owner.processID == ancestorSnapshot.processIdentifier &&
+                allowsPreviewDiscovery(window: window) &&
                 isTrustedHostedPreviewLineage(
                     targetBundleIdentifier: targetBundleIdentifier,
                     parentBundleIdentifier: hiddenParentShells.first?
@@ -1216,7 +1514,11 @@ enum WindowThumbnailProvider {
         return .matched(AncestorHostedPreviewCandidate(
             window: matchedWindow,
             parentSnapshot: parentSnapshot,
-            ancestorSnapshot: ancestorSnapshot
+            ancestorSnapshot: ancestorSnapshot,
+            parentIdentity: parentIdentity,
+            ancestorIdentity: ancestorIdentity,
+            parentCaptureGeneration: parentCaptureGeneration,
+            ancestorCaptureGeneration: ancestorCaptureGeneration
         ))
     }
 
@@ -1247,7 +1549,7 @@ enum WindowThumbnailProvider {
     private static func captureAncestorHostedPreviewFallback(
         applicationIdentity: WindowThumbnailApplicationIdentity,
         content: SCShareableContent,
-        expectedCacheGeneration: UInt64
+        expectedCacheGeneration: WindowThumbnailCaptureGeneration
     ) async -> WindowThumbnailDiscoveryResult? {
         switch ancestorHostedPreviewMatch(
             applicationIdentity: applicationIdentity,
@@ -1261,16 +1563,32 @@ enum WindowThumbnailProvider {
             )
             return .unavailable(.ambiguous)
         case let .matched(candidate):
+            let ownerGenerations = [candidate.parentCaptureGeneration, candidate.ancestorCaptureGeneration]
+            guard candidate.parentIdentity.matchesCurrentProcess(),
+                  candidate.ancestorIdentity.matchesCurrentProcess(),
+                  areCaptureGenerationsCurrent(ownerGenerations) else {
+                return .unavailable(.captureFailed)
+            }
             let image = await capture(window: candidate.window)
             guard !Task.isCancelled,
-                  cacheGenerationSnapshot() == expectedCacheGeneration,
+                  cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration,
                   applicationIdentity.matchesCurrentProcess(),
+                  candidate.parentIdentity.matchesCurrentProcess(),
+                  candidate.ancestorIdentity.matchesCurrentProcess(),
+                  areCaptureGenerationsCurrent(ownerGenerations),
                   processSnapshot(
                     of: candidate.parentSnapshot.processIdentifier
                   ) == candidate.parentSnapshot,
                   processSnapshot(
                     of: candidate.ancestorSnapshot.processIdentifier
-                  ) == candidate.ancestorSnapshot else {
+                  ) == candidate.ancestorSnapshot,
+                  case let .matched(currentCandidate) = ancestorHostedPreviewMatch(
+                    applicationIdentity: applicationIdentity,
+                    in: content
+                  ),
+                  currentCandidate.window.windowID == candidate.window.windowID,
+                  currentCandidate.parentSnapshot == candidate.parentSnapshot,
+                  currentCandidate.ancestorSnapshot == candidate.ancestorSnapshot else {
                 return .unavailable(.captureFailed)
             }
             switch authorizationState() {
@@ -1366,6 +1684,8 @@ enum WindowThumbnailProvider {
     private struct RelatedRendererCandidate {
         let window: SCWindow
         let processSnapshot: ProcessSnapshot
+        let processIdentity: WindowThumbnailApplicationIdentity
+        let captureGeneration: WindowThumbnailCaptureGeneration
         let overlap: CGFloat
         let score: CGFloat
     }
@@ -1468,6 +1788,13 @@ enum WindowThumbnailProvider {
                   heightError <= 0.14,
                   centerDistance <= centerLimit else { continue }
 
+            guard let processIdentity = NSRunningApplication(processIdentifier: owner.processID)
+                .flatMap({ WindowThumbnailApplicationIdentity(application: $0) }),
+                  processIdentity.matchesCurrentProcess() else { continue }
+            let captureGeneration = cacheGenerationSnapshot(for: processIdentity)
+            guard allowsPreviewDiscovery(applicationIdentity: processIdentity, windowID: window.windowID) else {
+                continue
+            }
             let onScreenPenalty: CGFloat =
                 window.isOnScreen == shellWindow.isOnScreen ? 0 : 24
             let score = rectDistance(shellWindow.frame, window.frame) +
@@ -1476,26 +1803,30 @@ enum WindowThumbnailProvider {
             matches.append(RelatedRendererCandidate(
                 window: window,
                 processSnapshot: snapshot,
+                processIdentity: processIdentity,
+                captureGeneration: captureGeneration,
                 overlap: overlap,
                 score: score
             ))
         }
 
-        let sorted = matches.sorted {
-            if $0.score == $1.score { return $0.window.windowID < $1.window.windowID }
-            return $0.score < $1.score
-        }
-        guard let best = sorted.first else { return .notFound }
         // Multi-process UI frameworks can publish several same-geometry child
         // surfaces for one actionable shell. Every candidate here already has
         // verified process ancestry, bundle containment, and strong geometry,
         // so try only the bounded near-best set until one yields substantive
         // pixels. Treating this normal compositor stack as identity ambiguity
         // made WeChat and similar Apps permanently unpreviewable.
-        let nearBest = sorted.filter {
-            $0.score <= best.score + 12 && abs($0.overlap - best.overlap) <= 0.04
-        }
-        return .matched(Array(nearBest.prefix(4)))
+        let nearBest = WindowRendererSelectionPolicy.nearBest(
+            from: matches,
+            isAllowed: {
+                allowsPreviewDiscovery(applicationIdentity: $0.processIdentity, windowID: $0.window.windowID) &&
+                    areCaptureGenerationsCurrent([$0.captureGeneration])
+            },
+            score: { $0.score },
+            overlap: { $0.overlap },
+            windowID: { $0.window.windowID }
+        )
+        return nearBest.isEmpty ? .notFound : .matched(nearBest)
     }
 
     private static func sharesBundleNamespace(
@@ -1511,7 +1842,7 @@ enum WindowThumbnailProvider {
         shellWindow: SCWindow,
         applicationIdentity: WindowThumbnailApplicationIdentity,
         content: SCShareableContent,
-        expectedCacheGeneration: UInt64
+        expectedCacheGeneration: WindowThumbnailCaptureGeneration
     ) async -> WindowThumbnailResult? {
         let match = relatedRendererMatch(
             for: shellWindow,
@@ -1524,13 +1855,16 @@ enum WindowThumbnailProvider {
         case let .matched(candidates):
             for candidate in candidates {
                 guard !Task.isCancelled,
-                      cacheGenerationSnapshot() == expectedCacheGeneration,
+                      cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration,
                       applicationIdentity.matchesCurrentProcess() else {
                     return .captureFailed
                 }
                 guard processSnapshot(
                     of: candidate.processSnapshot.processIdentifier
-                ) == candidate.processSnapshot else { continue }
+                ) == candidate.processSnapshot,
+                      candidate.processIdentity.matchesCurrentProcess(),
+                      areCaptureGenerationsCurrent([candidate.captureGeneration]),
+                      allowsPreviewDiscovery(window: candidate.window) else { continue }
                 switch authorizationState() {
                 case .permissionRequired: return .permissionRequired
                 case .restartRequired: return .restartRequired
@@ -1539,6 +1873,13 @@ enum WindowThumbnailProvider {
                 guard let image = await capture(window: candidate.window) else {
                     continue
                 }
+                guard !Task.isCancelled,
+                      cacheGenerationSnapshot(for: applicationIdentity) == expectedCacheGeneration,
+                      applicationIdentity.matchesCurrentProcess(),
+                      processSnapshot(of: candidate.processSnapshot.processIdentifier) == candidate.processSnapshot,
+                      candidate.processIdentity.matchesCurrentProcess(),
+                      areCaptureGenerationsCurrent([candidate.captureGeneration]),
+                      allowsPreviewDiscovery(window: candidate.window) else { continue }
                 // Do not place cross-process fallback pixels in the ordinary
                 // cache. Renderer lifetime is independent of the AX shell.
                 logger.debug(
@@ -1953,11 +2294,15 @@ enum WindowThumbnailProvider {
     private static func store(
         _ entry: CachedThumbnail,
         keys: [String],
-        expectedGeneration: UInt64
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        expectedGeneration: WindowThumbnailCaptureGeneration
     ) -> Bool {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        guard cacheGeneration == expectedGeneration else { return false }
+        guard captureGenerations.isCurrent(
+            expectedGeneration,
+            for: applicationIdentity.processLifetimeKey
+        ) else { return false }
         let now = Date()
         pruneExpiredEntriesLocked(now: now)
         for key in keys { thumbnailCache[key] = entry }
@@ -1966,10 +2311,17 @@ enum WindowThumbnailProvider {
         return true
     }
 
-    private static func discardCachedCapture(keys: [String], expectedGeneration: UInt64) {
+    private static func discardCachedCapture(
+        keys: [String],
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        expectedGeneration: WindowThumbnailCaptureGeneration
+    ) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        guard cacheGeneration == expectedGeneration else { return }
+        guard captureGenerations.isCurrent(
+            expectedGeneration,
+            for: applicationIdentity.processLifetimeKey
+        ) else { return }
         for key in keys { thumbnailCache.removeValue(forKey: key) }
         scheduleExpirationSweepLocked(now: Date())
     }
@@ -2038,10 +2390,113 @@ enum WindowThumbnailProvider {
         )
     }
 
-    private static func cacheGenerationSnapshot() -> UInt64 {
+    static func cacheGenerationSnapshot(
+        for applicationIdentity: WindowThumbnailApplicationIdentity
+    ) -> WindowThumbnailCaptureGeneration {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        return cacheGeneration
+        return captureGenerations.snapshot(for: applicationIdentity.processLifetimeKey)
+    }
+
+    private static func areCaptureGenerationsCurrent(_ generations: [WindowThumbnailCaptureGeneration]) -> Bool {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return captureGenerations.areCurrent(generations)
+    }
+
+    static func allowsPreviewDiscovery(
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        windowID: CGWindowID
+    ) -> Bool {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return discoveryRetirements.allowsDiscovery(
+            windowID: windowID,
+            processIdentifier: applicationIdentity.processIdentifier,
+            processLifetimeKey: applicationIdentity.processLifetimeKey
+        )
+    }
+
+    static func needsPreviewDiscoveryReestablishment(
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        windowID: CGWindowID
+    ) -> Bool {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return discoveryRetirements.needsReestablishment(
+            windowID: windowID,
+            processIdentifier: applicationIdentity.processIdentifier,
+            processLifetimeKey: applicationIdentity.processLifetimeKey
+        )
+    }
+
+    /// Cross-process preview bridges must respect retirement of their actual
+    /// pixel owner too. Unknown ownership cannot override an existing veto.
+    private static func allowsPreviewDiscovery(window: SCWindow) -> Bool {
+        guard let processIdentifier = window.owningApplication?.processID else { return false }
+        let identity = NSRunningApplication(processIdentifier: processIdentifier)
+            .flatMap { WindowThumbnailApplicationIdentity(application: $0) }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return discoveryRetirements.allowsDiscovery(
+            windowID: window.windowID,
+            processIdentifier: processIdentifier,
+            processLifetimeKey: identity?.processLifetimeKey
+        )
+    }
+
+    static func retirePreviewDiscovery(
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        windowIDs: Set<CGWindowID>
+    ) {
+        guard applicationIdentity.matchesCurrentProcess(), !windowIDs.isEmpty else { return }
+        cacheLock.lock()
+        discoveryRetirements.retire(
+            windowIDs: windowIDs,
+            processIdentifier: applicationIdentity.processIdentifier,
+            processLifetimeKey: applicationIdentity.processLifetimeKey
+        )
+        captureGenerations.invalidate(processLifetimeKey: applicationIdentity.processLifetimeKey)
+        for windowID in windowIDs {
+            thumbnailCache.removeValue(forKey: cacheKey(
+                applicationIdentity: applicationIdentity,
+                windowID: windowID
+            ))
+        }
+        scheduleExpirationSweepLocked(now: Date())
+        cacheLock.unlock()
+    }
+
+    /// Called only after registry validation of a live AX window, its direct
+    /// number, and the current WindowServer owner. A screenshot is insufficient.
+    static func reestablishPreviewDiscovery(
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        windowID: CGWindowID
+    ) {
+        guard applicationIdentity.matchesCurrentProcess() else { return }
+        cacheLock.lock()
+        if discoveryRetirements.reestablish(
+            windowID: windowID,
+            processIdentifier: applicationIdentity.processIdentifier,
+            processLifetimeKey: applicationIdentity.processLifetimeKey
+        ) {
+            captureGenerations.invalidate(processLifetimeKey: applicationIdentity.processLifetimeKey)
+        }
+        cacheLock.unlock()
+    }
+
+    private static func removeRetirementsForTerminatedProcess(_ processIdentifier: pid_t) {
+        let current = NSRunningApplication(processIdentifier: processIdentifier)
+        let identity = current.flatMap { WindowThumbnailApplicationIdentity(application: $0) }
+        // Do not erase metadata when a PID is live but its lifetime cannot be
+        // established, or when this is a delayed notification for an old PID.
+        guard current == nil || current?.isTerminated == true || identity != nil else { return }
+        cacheLock.lock()
+        discoveryRetirements.remove(
+            processIdentifier: processIdentifier,
+            keepingProcessLifetimeKey: identity?.processLifetimeKey
+        )
+        cacheLock.unlock()
     }
 
     private static func markPermissionRevokedAfterLaunch() {
@@ -2091,7 +2546,7 @@ enum WindowThumbnailProvider {
     /// therefore also invalidate every persistent consumer model.
     private static func purgeAllCache() {
         cacheLock.lock()
-        cacheGeneration &+= 1
+        captureGenerations.invalidateAll()
         expirationSweepGeneration &+= 1
         expirationSweepWorkItem?.cancel()
         expirationSweepWorkItem = nil
@@ -2101,7 +2556,7 @@ enum WindowThumbnailProvider {
 
     static func clearCache(processIdentifier: pid_t) {
         cacheLock.lock()
-        cacheGeneration &+= 1
+        captureGenerations.invalidateAll()
         thumbnailCache = thumbnailCache.filter {
             $0.value.processIdentifier != processIdentifier
         }
@@ -2126,7 +2581,7 @@ enum WindowThumbnailProvider {
             keys.append(aliasKey)
         }
         cacheLock.lock()
-        cacheGeneration &+= 1
+        captureGenerations.invalidate(processLifetimeKey: applicationIdentity.processLifetimeKey)
         for key in keys { thumbnailCache.removeValue(forKey: key) }
         scheduleExpirationSweepLocked(now: Date())
         cacheLock.unlock()
@@ -2162,6 +2617,7 @@ enum WindowThumbnailProvider {
                 guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
                     as? NSRunningApplication else { return }
                 clearCache(processIdentifier: application.processIdentifier)
+                removeRetirementsForTerminatedProcess(application.processIdentifier)
                 WindowInventoryBindingHistory.shared.remove(
                     processIdentifier: application.processIdentifier
                 )

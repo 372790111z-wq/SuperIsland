@@ -4,7 +4,11 @@ import OSLog
 import QuartzCore
 import SwiftUI
 
-private struct DockAXHitSnapshot: Sendable {
+/// The AX reference is immutable here and only used for CFEqual after crossing
+/// to the main actor. It distinguishes two tiles for the same application; it
+/// is not interpreted as the PID represented by either tile.
+private struct DockAXHitSnapshot: @unchecked Sendable {
+    let element: AXUIElement
     let applicationURL: URL?
     let title: String
     let quartzFrame: CGRect?
@@ -24,6 +28,46 @@ struct DockApplicationIdentityCandidate: Equatable {
 /// unique. Ambiguity fails closed instead of borrowing the first process's
 /// windows and thumbnails.
 enum DockApplicationIdentityPolicy {
+    /// Preview membership is application-scoped. Multiple processes may share
+    /// one installation, but a different installation must never be joined by
+    /// name or bundle identifier alone. Sorting controls row order only.
+    static func previewProcessIdentifiers(
+        targetBundleIdentifier: String?,
+        targetBundlePath: String?,
+        title: String,
+        candidates: [DockApplicationIdentityCandidate]
+    ) -> [pid_t] {
+        if let targetBundlePath {
+            let exact = candidates.filter {
+                $0.processIdentifier > 0 && $0.isRegular &&
+                    $0.bundlePath == targetBundlePath
+            }
+            guard !exact.isEmpty else { return [] }
+            if let targetBundleIdentifier, !targetBundleIdentifier.isEmpty {
+                guard exact.allSatisfy({
+                    $0.bundleIdentifier?.caseInsensitiveCompare(targetBundleIdentifier)
+                        == .orderedSame
+                }) else { return [] }
+            } else if exact.count > 1 {
+                let identifiers = exact.compactMap { candidate -> String? in
+                    guard let identifier = candidate.bundleIdentifier?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                          !identifier.isEmpty else { return nil }
+                    return identifier.lowercased()
+                }
+                guard identifiers.count == exact.count,
+                      Set(identifiers).count == 1 else { return [] }
+            }
+            return Set(exact.map(\.processIdentifier)).sorted()
+        }
+        return selectProcessIdentifier(
+            targetBundleIdentifier: targetBundleIdentifier,
+            targetBundlePath: nil,
+            title: title,
+            candidates: candidates
+        ).map { [$0] } ?? []
+    }
+
     static func normalizedApplicationURL(_ url: URL) -> URL? {
         if url.isFileURL { return url.standardizedFileURL }
         guard url.scheme == nil else { return nil }
@@ -155,6 +199,7 @@ private final class DockAXHitResolver: @unchecked Sendable {
                     ?? stringAttribute(kAXDescriptionAttribute, of: current)
                     ?? ""
                 return DockAXHitSnapshot(
+                    element: current,
                     applicationURL: urlAttribute(kAXURLAttribute, of: current),
                     title: rawTitle
                         .replacingOccurrences(of: "，有新窗口", with: "")
@@ -271,6 +316,10 @@ final class WindowDockInteractionMonitor {
     private var lastInspectedAt = Date.distantPast
     private var hoveredDockPID: pid_t?
     private var pendingHoverPID: pid_t?
+    private var hoveredDockElement: AXUIElement?
+    private var hoveredApplicationPIDs: [pid_t] = []
+    private var hoveredApplicationIdentities: [WindowThumbnailApplicationIdentity?] = []
+    private var hoveredLifecycleRevisions: [String: WindowAXLifecycleRevision] = [:]
     private var mouseDownTargetPID: pid_t?
     private var mouseDownReverseAction: DockReverseAction?
     private var reverseMinimizedWindows: [pid_t: [AXUIElement]] = [:]
@@ -282,6 +331,7 @@ final class WindowDockInteractionMonitor {
     private var monitorGeneration: UInt64 = 0
     private var lastAcceptedMonitorEvent: MonitoredDockEvent?
     private var previewInvalidationObserver: NSObjectProtocol?
+    private var windowRetirementObserver: NSObjectProtocol?
 
     private enum MonitorSource: Sendable {
         case global
@@ -316,6 +366,9 @@ final class WindowDockInteractionMonitor {
 
     private struct DockHit {
         let application: NSRunningApplication
+        let applications: [NSRunningApplication]
+        let element: AXUIElement
+        let applicationURL: URL?
         /// Preserve the Dock item's own label. Helper Apps such as WeChat mini
         /// programs can have a generic bundle name that differs from the label
         /// the user actually hovered.
@@ -341,6 +394,10 @@ final class WindowDockInteractionMonitor {
         if let previewInvalidationObserver {
             NotificationCenter.default.removeObserver(previewInvalidationObserver)
             self.previewInvalidationObserver = nil
+        }
+        if let windowRetirementObserver {
+            NotificationCenter.default.removeObserver(windowRetirementObserver)
+            self.windowRetirementObserver = nil
         }
     }
 
@@ -444,6 +501,29 @@ final class WindowDockInteractionMonitor {
 
     private func observePreviewInvalidationIfNeeded() {
         guard previewInvalidationObserver == nil else { return }
+        windowRetirementObserver = NotificationCenter.default.addObserver(
+            forName: WindowAXLifecycleRegistry.didRetireWindowsNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let change = notification.object as? WindowAXLifecycleChange else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.hoveredApplicationIdentities.contains(where: {
+                          $0?.processLifetimeKey == change.processLifetimeKey
+                      }),
+                      let capturedRevision = self.hoveredLifecycleRevisions[change.processLifetimeKey],
+                      change.invalidates(capturedRevision),
+                      self.pendingHoverPID != nil || self.preview.containsWindow(retiredBy: change)
+                else { return }
+                // Match the existing close behavior, but never interrupt a
+                // preview belonging to another application or process launch.
+                self.cancelInspection()
+                self.cancelHoverPipeline(clearTarget: true)
+                self.cancelScheduledHide()
+                self.preview.hide()
+            }
+        }
         previewInvalidationObserver = NotificationCenter.default.addObserver(
             forName: WindowThumbnailProvider.didInvalidatePreviewsNotification,
             object: nil,
@@ -647,19 +727,27 @@ final class WindowDockInteractionMonitor {
         }
 
         let applicationPID = application.processIdentifier
+        let memberPIDs = hit.applications.map(\.processIdentifier)
+        let identities = hit.applications.map { WindowThumbnailApplicationIdentity(application: $0) }
         cancelScheduledHide()
 
-        // Mouse-moved events arrive continuously while the pointer is over one
-        // Dock icon. Replacing the delayed task on every event meant the delay
-        // could keep moving forever and the preview would never be shown.
+        // A shared application list can be anchored to different Dock tiles.
+        // Reuse work only for this tile AND this exact set of process launches.
         if hoveredDockPID == applicationPID,
+           hoveredDockElement.map({ CFEqual($0, hit.element) }) == true,
+           hoveredApplicationPIDs == memberPIDs,
+           hoveredApplicationIdentities == identities,
            (pendingHoverPID == applicationPID || preview.applicationPID == applicationPID) {
             schedulePendingInspectionIfNeeded()
             return
         }
 
         cancelHoverPipeline(clearTarget: false)
+        preview.hide()
         hoveredDockPID = applicationPID
+        hoveredDockElement = hit.element
+        hoveredApplicationPIDs = memberPIDs
+        hoveredApplicationIdentities = identities
         pendingHoverPID = applicationPID
         let generation = hoverCaptureGeneration
         let item = DispatchWorkItem { [weak self] in
@@ -673,143 +761,102 @@ final class WindowDockInteractionMonitor {
                   ),
                   self.preferences.isEnabled,
                   self.preferences.dockPreviewEnabled,
-                  let application = NSRunningApplication(processIdentifier: applicationPID),
-                  !application.isTerminated,
-                  !self.preferences.isExcluded(application),
-                  self.hoveredDockPID == applicationPID else {
-                self.handleHoverTargetLoss(
-                    processIdentifier: applicationPID,
-                    generation: generation
-                )
+                  self.hoveredDockPID == applicationPID,
+                  self.previewApplicationsAreCurrent(hit: hit, identities: identities) else {
+                self.handleHoverTargetLoss(processIdentifier: applicationPID, generation: generation)
                 return
             }
-            let windows = self.windows(for: application)
-            if self.pendingHoverPID == applicationPID { self.pendingHoverPID = nil }
-            guard let applicationIdentity = WindowThumbnailApplicationIdentity(
-                application: application
-            ) else {
-                self.thumbnailCaptureTask = nil
-                self.preview.show(
-                    application: application,
-                    displayName: hit.displayName,
-                    rows: self.previewRows(
-                        windows: windows,
-                        thumbnailResults: Array(
-                            repeating: Optional.some(.notEnumerated),
-                            count: windows.count
-                        ),
-                        applicationPID: applicationPID
-                    ),
-                    near: currentSample.appKitLocation,
-                    dockItemFrame: hit.appKitFrame,
-                    canManageWindows: AXIsProcessTrusted()
-                )
-                return
+            // Enumerate and capture each member under its own process lifetime.
+            // The final list is published atomically; a changed member cancels
+            // the old result instead of mixing launches or partially old rows.
+            let memberWindows = hit.applications.map { self.windows(for: $0) }
+            let lifecycleRevisions = identities.map { identity in
+                identity.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) }
             }
-
-            let requests = windows.map {
-                return WindowThumbnailRequest(
-                    title: $0.captureTitle,
-                    occurrence: $0.captureOccurrence,
-                    bounds: $0.captureBounds,
-                    windowID: $0.windowID,
-                    allowsUniformContent: $0.allowsUniformContent
-                )
+            self.hoveredLifecycleRevisions = Dictionary(uniqueKeysWithValues:
+                zip(identities, lifecycleRevisions).compactMap { identity, revision in
+                    guard let identity, let revision else { return nil }
+                    return (identity.processLifetimeKey, revision)
+                }
+            )
+            let cacheGenerations = identities.map { identity in
+                identity.map { WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }
             }
-            guard !requests.isEmpty else {
-                let anchorLocation = currentSample.appKitLocation
-                let dockItemFrame = hit.appKitFrame
-                let displayName = hit.displayName
-                self.thumbnailCaptureTask = Task { @MainActor [weak self] in
-                    let discovery = await WindowThumbnailProvider
-                        .discoverAndCaptureWindows(
-                            applicationIdentity: applicationIdentity
-                        )
-                    guard let self else { return }
-                    guard self.hoverCaptureGeneration == generation else { return }
-                    self.thumbnailCaptureTask = nil
+            self.thumbnailCaptureTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                var rows: [DockPreviewRow] = []
+                for (index, member) in hit.applications.enumerated() {
                     guard !Task.isCancelled,
-                          self.preferences.isEnabled,
-                          self.preferences.dockPreviewEnabled,
-                          self.hoveredDockPID == applicationPID,
-                          self.currentPointerContext(
-                            matching: applicationPID,
-                            fallback: sample,
-                            dockItemFrame: dockItemFrame,
-                            allowPreview: true
-                          ) != nil,
-                          let currentApplication = NSRunningApplication(
-                            processIdentifier: applicationPID
-                          ),
-                          !currentApplication.isTerminated,
-                          WindowThumbnailApplicationIdentity(
-                            application: currentApplication
-                          ) == applicationIdentity,
-                          !self.preferences.isExcluded(currentApplication) else {
-                        self.handleHoverTargetLoss(
-                            processIdentifier: applicationPID,
-                            generation: generation
-                        )
+                          self.hoverCaptureGeneration == generation,
+                          self.previewApplicationsAreCurrent(hit: hit, identities: identities) else {
+                        self.handleHoverTargetLoss(processIdentifier: applicationPID, generation: generation)
                         return
                     }
-                    self.preview.show(
-                        application: currentApplication,
-                        displayName: displayName,
-                        rows: self.previewRows(discovery: discovery),
-                        near: anchorLocation,
-                        dockItemFrame: dockItemFrame,
-                        canManageWindows: AXIsProcessTrusted()
-                    )
+                    let windows = memberWindows[index]
+                    let identity = identities[index]
+                    if let identity {
+                        if windows.isEmpty {
+                            let discovery = await WindowThumbnailProvider.discoverAndCaptureWindows(
+                                applicationIdentity: identity,
+                                expectedCacheGeneration: cacheGenerations[index]
+                            )
+                            rows += self.previewRows(discovery: discovery, applicationIdentity: identity)
+                        } else {
+                            let results = await WindowThumbnailProvider.captureWindows(
+                                applicationIdentity: identity,
+                                requests: windows.map {
+                                    WindowThumbnailRequest(
+                                        title: $0.captureTitle,
+                                        occurrence: $0.captureOccurrence,
+                                        bounds: $0.captureBounds,
+                                        windowID: $0.windowID,
+                                        allowsUniformContent: $0.allowsUniformContent
+                                    )
+                                },
+                                expectedCacheGeneration: cacheGenerations[index]
+                            )
+                            rows += self.previewRows(
+                                windows: windows,
+                                thumbnailResults: results.map(Optional.some),
+                                application: member,
+                                applicationIdentity: identity
+                            )
+                        }
+                    } else {
+                        rows += self.previewRows(
+                            windows: windows,
+                            thumbnailResults: Array(repeating: .notEnumerated, count: windows.count),
+                            application: member,
+                            applicationIdentity: nil
+                        )
+                    }
                 }
-                return
-            }
-
-            let anchorLocation = currentSample.appKitLocation
-            let dockItemFrame = hit.appKitFrame
-            self.thumbnailCaptureTask = Task { @MainActor [weak self] in
-                let thumbnails = await WindowThumbnailProvider.captureWindows(
-                    applicationIdentity: applicationIdentity,
-                    requests: requests
-                )
-                guard let self else { return }
                 guard self.hoverCaptureGeneration == generation else { return }
                 self.thumbnailCaptureTask = nil
                 guard !Task.isCancelled,
                       self.preferences.isEnabled,
                       self.preferences.dockPreviewEnabled,
                       self.hoveredDockPID == applicationPID,
+                      self.previewApplicationsAreCurrent(hit: hit, identities: identities),
+                      identities.map({ identity in
+                          identity.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) }
+                      }) == lifecycleRevisions,
                       self.currentPointerContext(
                         matching: applicationPID,
                         fallback: sample,
-                        dockItemFrame: dockItemFrame,
+                        dockItemFrame: hit.appKitFrame,
                         allowPreview: true
-                      ) != nil,
-                      let currentApplication = NSRunningApplication(
-                        processIdentifier: applicationPID
-                      ),
-                      !currentApplication.isTerminated,
-                      WindowThumbnailApplicationIdentity(
-                        application: currentApplication
-                      ) == applicationIdentity,
-                      !self.preferences.isExcluded(currentApplication) else {
-                    self.handleHoverTargetLoss(
-                        processIdentifier: applicationPID,
-                        generation: generation
-                    )
+                      ) != nil else {
+                    self.handleHoverTargetLoss(processIdentifier: applicationPID, generation: generation)
                     return
                 }
-
-                let rows = self.previewRows(
-                    windows: windows,
-                    thumbnailResults: thumbnails.map(Optional.some),
-                    applicationPID: applicationPID
-                )
+                self.pendingHoverPID = nil
                 self.preview.show(
-                    application: currentApplication,
+                    application: application,
                     displayName: hit.displayName,
                     rows: rows,
-                    near: anchorLocation,
-                    dockItemFrame: dockItemFrame,
+                    near: currentSample.appKitLocation,
+                    dockItemFrame: hit.appKitFrame,
                     canManageWindows: AXIsProcessTrusted()
                 )
             }
@@ -854,7 +901,8 @@ final class WindowDockInteractionMonitor {
     private func previewRows(
         windows: [DockWindowEntry],
         thumbnailResults: [WindowThumbnailResult?],
-        applicationPID: pid_t
+        application: NSRunningApplication,
+        applicationIdentity: WindowThumbnailApplicationIdentity?
     ) -> [DockPreviewRow] {
         windows.enumerated().map { index, window in
             let thumbnailResult = thumbnailResults.indices.contains(index)
@@ -867,24 +915,27 @@ final class WindowDockInteractionMonitor {
             // an AX operation identity.
             return DockPreviewRow(
                 id: window.id,
+                ownerProcessIdentifier: application.processIdentifier,
+                ownerProcessLifetimeKey: applicationIdentity?.processLifetimeKey,
                 title: window.title,
                 isMinimized: window.isMinimized,
-                canActivate: window.element != nil,
+                canActivate: window.element != nil && applicationIdentity != nil,
                 isPreviewOnly: false,
-                canClose: window.element != nil && window.canClose,
+                canClose: window.element != nil && window.canClose && applicationIdentity != nil,
                 thumbnailResult: thumbnailResult,
                 action: { [weak self] in
-                    self?.activate(window: window, applicationPID: applicationPID)
+                    self?.activate(window: window, application: application, identity: applicationIdentity)
                 },
                 closeAction: { [weak self] in
-                    self?.close(window: window, applicationPID: applicationPID)
+                    self?.close(window: window, application: application, identity: applicationIdentity)
                 }
             )
         }
     }
 
     private func previewRows(
-        discovery: WindowThumbnailDiscoveryResult
+        discovery: WindowThumbnailDiscoveryResult,
+        applicationIdentity: WindowThumbnailApplicationIdentity
     ) -> [DockPreviewRow] {
         switch discovery {
         case let .windows(windows):
@@ -894,7 +945,10 @@ final class WindowDockInteractionMonitor {
             let rawTitle = window.request.title
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return [DockPreviewRow(
-                id: Int(window.request.windowID ?? 1),
+                id: window.request.windowID.map(Int.init)
+                    ?? -Int(applicationIdentity.processIdentifier) * 2,
+                ownerProcessIdentifier: applicationIdentity.processIdentifier,
+                ownerProcessLifetimeKey: applicationIdentity.processLifetimeKey,
                 title: rawTitle.isEmpty ? "应用预览" : rawTitle,
                 isMinimized: false,
                 canActivate: false,
@@ -907,7 +961,9 @@ final class WindowDockInteractionMonitor {
         case let .unavailable(result):
             guard result.isEligibleForWindowCard else { return [] }
             return [DockPreviewRow(
-                id: -1,
+                id: -Int(applicationIdentity.processIdentifier) * 2 - 1,
+                ownerProcessIdentifier: applicationIdentity.processIdentifier,
+                ownerProcessLifetimeKey: applicationIdentity.processLifetimeKey,
                 title: "窗口预览",
                 isMinimized: false,
                 canActivate: false,
@@ -967,12 +1023,18 @@ final class WindowDockInteractionMonitor {
     }
 
     private func cancelHoverPipeline(clearTarget: Bool) {
+        hoveredLifecycleRevisions.removeAll()
         hoverWorkItem?.cancel()
         thumbnailCaptureTask?.cancel()
         hoverWorkItem = nil
         thumbnailCaptureTask = nil
         pendingHoverPID = nil
-        if clearTarget { hoveredDockPID = nil }
+        if clearTarget {
+            hoveredDockPID = nil
+            hoveredDockElement = nil
+            hoveredApplicationPIDs = []
+            hoveredApplicationIdentities = []
+        }
         hoverCaptureGeneration &+= 1
     }
 
@@ -1181,10 +1243,11 @@ final class WindowDockInteractionMonitor {
         from snapshot: DockAXHitSnapshot,
         sample: MouseSample
     ) -> DockHit? {
-        guard let application = dockApplication(
+        let applications = previewApplications(
             applicationURL: snapshot.applicationURL,
             title: snapshot.title
-        ) else { return nil }
+        )
+        guard let application = applications.first else { return nil }
         let appKitFrame = snapshot.quartzFrame.map { quartzFrame in
             CGRect(
                 x: sample.appKitLocation.x + quartzFrame.minX - sample.quartzLocation.x,
@@ -1195,6 +1258,9 @@ final class WindowDockInteractionMonitor {
         }
         return DockHit(
             application: application,
+            applications: applications,
+            element: snapshot.element,
+            applicationURL: snapshot.applicationURL,
             displayName: snapshot.title.isEmpty ? nil : snapshot.title,
             appKitFrame: appKitFrame
         )
@@ -1236,6 +1302,9 @@ final class WindowDockInteractionMonitor {
                 let displayName = dockItemTitle(for: current)
                 return DockHit(
                     application: application,
+                    applications: [application],
+                    element: current,
+                    applicationURL: urlAttribute(kAXURLAttribute, of: current),
                     displayName: displayName.isEmpty ? nil : displayName,
                     appKitFrame: appKitFrame
                 )
@@ -1297,6 +1366,45 @@ final class WindowDockInteractionMonitor {
                 candidates: candidates
             ) else { return nil }
         return NSRunningApplication(processIdentifier: processIdentifier)
+    }
+
+    private func previewApplications(applicationURL: URL?, title: String) -> [NSRunningApplication] {
+        let normalizedURL = applicationURL.flatMap(
+            DockApplicationIdentityPolicy.normalizedApplicationURL
+        )
+        let running = NSWorkspace.shared.runningApplications.filter {
+            !$0.isTerminated && $0.activationPolicy == .regular &&
+                $0.processIdentifier != ProcessInfo.processInfo.processIdentifier &&
+                !preferences.isExcluded($0)
+        }
+        let candidates = running.map {
+            DockApplicationIdentityCandidate(
+                processIdentifier: $0.processIdentifier,
+                bundleIdentifier: $0.bundleIdentifier,
+                bundlePath: $0.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path,
+                localizedName: $0.localizedName,
+                isRegular: true
+            )
+        }
+        return DockApplicationIdentityPolicy.previewProcessIdentifiers(
+            targetBundleIdentifier: normalizedURL.flatMap { Bundle(url: $0)?.bundleIdentifier },
+            targetBundlePath: normalizedURL?.resolvingSymlinksInPath().path,
+            title: title,
+            candidates: candidates
+        ).compactMap { pid in running.first { $0.processIdentifier == pid } }
+    }
+
+    private func previewApplicationsAreCurrent(
+        hit: DockHit,
+        identities: [WindowThumbnailApplicationIdentity?]
+    ) -> Bool {
+        guard hit.applications.allSatisfy({ !$0.isTerminated }) else { return false }
+        let current = previewApplications(
+            applicationURL: hit.applicationURL,
+            title: hit.displayName ?? ""
+        )
+        return current.map(\.processIdentifier) == hit.applications.map(\.processIdentifier) &&
+            current.map { WindowThumbnailApplicationIdentity(application: $0) } == identities
     }
 
     private func urlAttribute(_ name: String, of element: AXUIElement) -> URL? {
@@ -1662,14 +1770,47 @@ final class WindowDockInteractionMonitor {
         )
     }
 
-    private func activate(window: DockWindowEntry, applicationPID: pid_t) {
-        guard let application = NSRunningApplication(processIdentifier: applicationPID),
-              !application.isTerminated,
-              !preferences.isExcluded(application),
+    private func isCurrentPreviewAction(
+        window: DockWindowEntry,
+        application: NSRunningApplication,
+        identity: WindowThumbnailApplicationIdentity?
+    ) -> Bool {
+        guard preferences.isEnabled, preferences.dockPreviewEnabled,
+              !application.isTerminated, !preferences.isExcluded(application),
+              let identity, identity.matchesCurrentProcess(),
+              identity.processIdentifier == application.processIdentifier,
+              preview.containsRow(
+                id: window.id,
+                owner: identity.processIdentifier,
+                lifetime: identity.processLifetimeKey
+              ),
+              let element = window.element, let expectedWindowID = window.windowID else { return false }
+        var owner: pid_t = 0
+        guard AXUIElementGetPid(element, &owner) == .success,
+              owner == identity.processIdentifier else { return false }
+        if let currentWindowID = windowDirectWindowNumber(of: element) {
+            return currentWindowID == expectedWindowID
+        }
+        // Some AX proxies have no direct window number. Keep the existing
+        // reconciliation path, but require it to still bind this exact proxy
+        // to this window; never fall back to another window of the same App.
+        return windows(for: application).contains {
+            $0.windowID == expectedWindowID &&
+                $0.element.map { CFEqual($0, element) } == true
+        }
+    }
+
+    private func activate(
+        window: DockWindowEntry,
+        application: NSRunningApplication,
+        identity: WindowThumbnailApplicationIdentity?
+    ) {
+        guard isCurrentPreviewAction(window: window, application: application, identity: identity),
               let element = window.element else {
             dismissPreview(animated: true)
             return
         }
+        let applicationPID = application.processIdentifier
         if window.isMinimized {
             _ = AXUIElementSetAttributeValue(
                 element,
@@ -1695,18 +1836,20 @@ final class WindowDockInteractionMonitor {
         dismissPreview(animated: true)
     }
 
-    private func close(window: DockWindowEntry, applicationPID: pid_t) {
+    private func close(
+        window: DockWindowEntry,
+        application: NSRunningApplication,
+        identity: WindowThumbnailApplicationIdentity?
+    ) {
         guard AXIsProcessTrusted() else {
             preferences.publishFeedback("需要辅助功能权限才能关闭 Dock 预览窗口")
             return
         }
-        guard let application = NSRunningApplication(processIdentifier: applicationPID),
-              !application.isTerminated,
-              !preferences.isExcluded(application),
-              preview.applicationPID == applicationPID else {
+        guard isCurrentPreviewAction(window: window, application: application, identity: identity) else {
             preferences.publishFeedback("Dock 预览窗口状态已变化，请重新悬停后再试")
             return
         }
+        let applicationPID = application.processIdentifier
         guard window.canClose,
               let element = window.element,
               let closeButton = elementAttribute(
@@ -1808,6 +1951,22 @@ private final class DockWindowPreviewController {
     private var visibilityGeneration = 0
     private var recentCacheExpirationGeneration = 0
     private var recentCacheExpirationWorkItem: DispatchWorkItem?
+
+    func containsRow(id: Int, owner: pid_t, lifetime: String) -> Bool {
+        panel.isVisible && applicationPID != nil && contentModel.content.rows.contains {
+            $0.id == id && $0.ownerProcessIdentifier == owner &&
+                $0.ownerProcessLifetimeKey == lifetime
+        }
+    }
+
+    func containsWindow(retiredBy change: WindowAXLifecycleChange) -> Bool {
+        panel.isVisible && contentModel.content.rows.contains {
+            change.affects(
+                processLifetimeKey: $0.ownerProcessLifetimeKey,
+                windowID: CGWindowID(exactly: $0.id)
+            )
+        }
+    }
 
     init() {
         let contentModel = DockWindowPreviewModel()
@@ -2177,7 +2336,9 @@ final class DockWindowPreviewModel: ObservableObject {
         rows: [DockPreviewRow],
         canManageWindows: Bool
     ) {
-        if content.rows.map(\.id) != rows.map(\.id) {
+        if content.rows.map(\.id) != rows.map(\.id) ||
+            content.rows.map(\.ownerProcessIdentifier) != rows.map(\.ownerProcessIdentifier) ||
+            content.rows.map(\.ownerProcessLifetimeKey) != rows.map(\.ownerProcessLifetimeKey) {
             resetPointerGeometry()
         }
         // Publish one complete value so SwiftUI never lays out a transient mix
@@ -2291,6 +2452,8 @@ private struct DockWindowPreviewRootView: View {
 
 struct DockPreviewRow: Identifiable {
     let id: Int
+    var ownerProcessIdentifier: pid_t? = nil
+    var ownerProcessLifetimeKey: String? = nil
     let title: String
     let isMinimized: Bool
     let canActivate: Bool
@@ -2305,6 +2468,8 @@ struct DockPreviewRow: Identifiable {
     ) -> DockPreviewRow {
         DockPreviewRow(
             id: id,
+            ownerProcessIdentifier: ownerProcessIdentifier,
+            ownerProcessLifetimeKey: ownerProcessLifetimeKey,
             title: title,
             isMinimized: isMinimized,
             canActivate: canActivate,

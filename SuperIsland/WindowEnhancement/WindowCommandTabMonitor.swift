@@ -106,6 +106,7 @@ final class WindowCommandTabMonitor {
     private var activationObserver: NSObjectProtocol?
     private var deactivationObserver: NSObjectProtocol?
     private var previewInvalidationObserver: NSObjectProtocol?
+    private var windowRetirementObserver: NSObjectProtocol?
     private var thumbnailCaptureTask: Task<Void, Never>?
     private var postCloseRefreshTask: Task<Void, Never>?
     private var closeWindowRetryTask: Task<Void, Never>?
@@ -127,6 +128,8 @@ final class WindowCommandTabMonitor {
     private struct PrewarmJob: Sendable {
         let applicationIdentity: WindowThumbnailApplicationIdentity
         let requests: [WindowThumbnailRequest]
+        let lifecycleRevision: WindowAXLifecycleRevision?
+        let cacheGeneration: WindowThumbnailCaptureGeneration
     }
 
     /// Prewarming is intentionally serialized. Starting one ScreenCaptureKit
@@ -137,8 +140,12 @@ final class WindowCommandTabMonitor {
     private var pendingPrewarmJobs: [pid_t: PrewarmJob] = [:]
     private var pendingPrewarmOrder: [pid_t] = []
     private var activePrewarmPID: pid_t?
+    private var activePrewarmLifetimeKey: String?
+    private var activePrewarmRevision: WindowAXLifecycleRevision?
+    private var prewarmGeneration: UInt64 = 0
     private var activePrewarmTask: Task<Void, Never>?
     private var candidates: [Candidate] = []
+    private var candidateLifecycleRevisions: [String: WindowAXLifecycleRevision] = [:]
     private var selectedIndex = 0
     private var selectedWindowIndex = 0
     private var isPresenting = false
@@ -236,6 +243,10 @@ final class WindowCommandTabMonitor {
         if let previewInvalidationObserver {
             NotificationCenter.default.removeObserver(previewInvalidationObserver)
             self.previewInvalidationObserver = nil
+        }
+        if let windowRetirementObserver {
+            NotificationCenter.default.removeObserver(windowRetirementObserver)
+            self.windowRetirementObserver = nil
         }
     }
 
@@ -664,6 +675,10 @@ final class WindowCommandTabMonitor {
             ? windowCandidates(for: applications)
             : (candidates.first?.windows ?? windowCandidates(for: applications))
         candidates = [Candidate(applications: applications, windows: windows)]
+        if didChangeApplication {
+            candidateLifecycleRevisions.removeAll()
+            recordLifecycleRevisions(for: applications)
+        }
         selectedIndex = 0
         nativeSwitcherAnchorFrame = nextAnchorFrame
         if didChangeApplication {
@@ -946,6 +961,12 @@ final class WindowCommandTabMonitor {
         let captureApplicationIdentities = batches
             .map(\.applicationIdentity)
             .sorted { $0.processIdentifier < $1.processIdentifier }
+        let lifecycleRevisions = captureApplicationIdentities.map {
+            candidateLifecycleRevisions[$0.processLifetimeKey]
+        }
+        let cacheGenerations = Dictionary(uniqueKeysWithValues: captureApplicationIdentities.map {
+            ($0.processLifetimeKey, WindowThumbnailProvider.cacheGenerationSnapshot(for: $0))
+        })
         let sequenceID = eventSequenceID
         let captureGeneration = thumbnailCaptureGeneration
         let thumbnailCount = selectedWindows.count
@@ -965,7 +986,8 @@ final class WindowCommandTabMonitor {
                 guard !Task.isCancelled else { return }
                 let results = await WindowThumbnailProvider.captureWindows(
                     applicationIdentity: batch.applicationIdentity,
-                    requests: batch.requests.map(\.request)
+                    requests: batch.requests.map(\.request),
+                    expectedCacheGeneration: cacheGenerations[batch.applicationIdentity.processLifetimeKey]
                 )
                 for (indexedRequest, result) in zip(batch.requests, results) {
                     thumbnails[indexedRequest.index] = result
@@ -985,6 +1007,12 @@ final class WindowCommandTabMonitor {
                         for: self.candidates[captureIndex]
                       ) == captureApplicationIdentities,
                       self.thumbnailCaptureGeneration == captureGeneration else { return }
+                guard captureApplicationIdentities.map({
+                    WindowAXLifecycleRegistry.shared.revision(for: $0)
+                }) == lifecycleRevisions else {
+                    self.cancel()
+                    return
+                }
                 // These candidates already passed AX + WindowServer/SkyLight
                 // reconciliation. Thumbnail capture is presentation data and
                 // cannot remove a real window merely because its pixels are
@@ -1055,6 +1083,7 @@ final class WindowCommandTabMonitor {
                       ) == applicationIdentities else { return }
 
                 let refreshedWindows = self.windowCandidates(for: currentApplications)
+                self.recordLifecycleRevisions(for: currentApplications)
                 guard !refreshedWindows.isEmpty else { continue }
                 self.candidates[applicationIndex] = Candidate(
                     applications: currentApplications,
@@ -1077,6 +1106,12 @@ final class WindowCommandTabMonitor {
         let sequence = eventSequenceID
         let generation = thumbnailCaptureGeneration
         let identities = thumbnailApplicationIdentities(for: candidates[index].applications)
+        let lifecycleRevisions = identities.map {
+            candidateLifecycleRevisions[$0.processLifetimeKey]
+        }
+        let cacheGenerations = Dictionary(uniqueKeysWithValues: identities.map {
+            ($0.processLifetimeKey, WindowThumbnailProvider.cacheGenerationSnapshot(for: $0))
+        })
         thumbnailCaptureTask = Task { @MainActor [weak self] in
             var discovered: [(
                 identity: WindowThumbnailApplicationIdentity,
@@ -1084,7 +1119,10 @@ final class WindowCommandTabMonitor {
             )] = []
             for identity in identities {
                 guard !Task.isCancelled else { return }
-                let result = await WindowThumbnailProvider.discoverAndCaptureWindows(applicationIdentity: identity)
+                let result = await WindowThumbnailProvider.discoverAndCaptureWindows(
+                    applicationIdentity: identity,
+                    expectedCacheGeneration: cacheGenerations[identity.processLifetimeKey]
+                )
                 if case let .windows(windows) = result {
                     discovered.append(contentsOf: windows.map { (identity, $0) })
                 }
@@ -1127,6 +1165,11 @@ final class WindowCommandTabMonitor {
                   self.candidates.indices.contains(index),
                   self.thumbnailApplicationIdentities(for: self.candidates[index].applications) == identities,
                   identities.allSatisfy({ $0.matchesCurrentProcess() }) else { return }
+            guard identities.map({ WindowAXLifecycleRegistry.shared.revision(for: $0) })
+                == lifecycleRevisions else {
+                self.cancel()
+                return
+            }
             self.previewOnlyWindows = items
             self.previewLoading = false
             self.thumbnailCaptureTask = nil
@@ -1540,6 +1583,9 @@ final class WindowCommandTabMonitor {
                 applications: reconciledApplications,
                 windows: reconciledWindows
             )
+            if let validatedCurrentApplication {
+                self.recordLifecycleRevisions(for: [validatedCurrentApplication])
+            }
             self.selectedIndex = applicationIndex
             let windowCount = self.candidates[self.selectedIndex].windows.count
             self.selectedWindowIndex = min(self.selectedWindowIndex, max(0, windowCount - 1))
@@ -1747,6 +1793,7 @@ final class WindowCommandTabMonitor {
         eventSequenceID &+= 1
         isPresenting = false
         candidates.removeAll()
+        candidateLifecycleRevisions.removeAll()
         selectedWindowIndex = 0
         currentThumbnailResults.removeAll()
         overlay.hide()
@@ -2184,8 +2231,51 @@ final class WindowCommandTabMonitor {
         // that App opportunistically. This keeps the always-on footprint low.
     }
 
+    private func recordLifecycleRevisions(for applications: [NSRunningApplication]) {
+        for identity in thumbnailApplicationIdentities(for: applications) {
+            candidateLifecycleRevisions[identity.processLifetimeKey] =
+                WindowAXLifecycleRegistry.shared.revision(for: identity)
+        }
+    }
+
     private func observePreviewInvalidationIfNeeded() {
         guard previewInvalidationObserver == nil else { return }
+        windowRetirementObserver = NotificationCenter.default.addObserver(
+            forName: WindowAXLifecycleRegistry.didRetireWindowsNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let change = notification.object as? WindowAXLifecycleChange else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.cancelPrewarmTasks(retiredBy: change)
+                guard self.isPresenting,
+                      self.candidates.indices.contains(self.selectedIndex),
+                      let capturedRevision = self.candidateLifecycleRevisions[change.processLifetimeKey],
+                      change.invalidates(capturedRevision) else { return }
+                let candidate = self.candidates[self.selectedIndex]
+                let affected = candidate.windows.contains { window in
+                    change.affects(
+                        processLifetimeKey: WindowThumbnailApplicationIdentity(
+                            application: window.application
+                        )?.processLifetimeKey,
+                        windowID: window.windowID
+                    )
+                } || self.previewOnlyWindows.contains { window in
+                    candidate.applications.contains { application in
+                        application.processIdentifier == window.identity.processID && change.affects(
+                            processLifetimeKey: WindowThumbnailApplicationIdentity(
+                                application: application
+                            )?.processLifetimeKey,
+                            windowID: window.identity.windowID
+                        )
+                    }
+                }
+                // A window acknowledged by our own close path was already
+                // removed from candidates. Only cancel a still-stale selection.
+                if affected { self.cancel() }
+            }
+        }
         previewInvalidationObserver = NotificationCenter.default.addObserver(
             forName: WindowThumbnailProvider.didInvalidatePreviewsNotification,
             object: nil,
@@ -2229,7 +2319,9 @@ final class WindowCommandTabMonitor {
         let processIdentifier = application.processIdentifier
         let job = PrewarmJob(
             applicationIdentity: applicationIdentity,
-            requests: requests
+            requests: requests,
+            lifecycleRevision: WindowAXLifecycleRegistry.shared.revision(for: applicationIdentity),
+            cacheGeneration: WindowThumbnailProvider.cacheGenerationSnapshot(for: applicationIdentity)
         )
         pendingPrewarmJobs[processIdentifier] = job
         if !pendingPrewarmOrder.contains(processIdentifier) {
@@ -2240,11 +2332,35 @@ final class WindowCommandTabMonitor {
     }
 
     private func cancelPrewarmTasks() {
+        prewarmGeneration &+= 1
         activePrewarmTask?.cancel()
         activePrewarmTask = nil
         activePrewarmPID = nil
+        activePrewarmLifetimeKey = nil
+        activePrewarmRevision = nil
         pendingPrewarmJobs.removeAll(keepingCapacity: false)
         pendingPrewarmOrder.removeAll(keepingCapacity: false)
+    }
+
+    private func cancelPrewarmTasks(retiredBy change: WindowAXLifecycleChange) {
+        let removedPIDs = Set(pendingPrewarmJobs.compactMap { pid, job in
+            guard job.applicationIdentity.processLifetimeKey == change.processLifetimeKey,
+                  let revision = job.lifecycleRevision,
+                  change.invalidates(revision) else { return nil as pid_t? }
+            return pid
+        })
+        for pid in removedPIDs { pendingPrewarmJobs.removeValue(forKey: pid) }
+        pendingPrewarmOrder.removeAll { removedPIDs.contains($0) }
+        if activePrewarmLifetimeKey == change.processLifetimeKey,
+           let revision = activePrewarmRevision, change.invalidates(revision) {
+            prewarmGeneration &+= 1
+            activePrewarmTask?.cancel()
+            activePrewarmTask = nil
+            activePrewarmPID = nil
+            activePrewarmLifetimeKey = nil
+            activePrewarmRevision = nil
+        }
+        drainPrewarmQueueIfNeeded()
     }
 
     private func drainPrewarmQueueIfNeeded() {
@@ -2254,19 +2370,29 @@ final class WindowCommandTabMonitor {
             guard let job = pendingPrewarmJobs.removeValue(
                 forKey: processIdentifier
             ) else { continue }
+            guard WindowAXLifecycleRegistry.shared.revision(for: job.applicationIdentity)
+                == job.lifecycleRevision else { continue }
 
             activePrewarmPID = processIdentifier
+            activePrewarmLifetimeKey = job.applicationIdentity.processLifetimeKey
+            activePrewarmRevision = job.lifecycleRevision
+            prewarmGeneration &+= 1
+            let generation = prewarmGeneration
             activePrewarmTask = Task.detached(priority: .utility) { [weak self] in
                 _ = await WindowThumbnailProvider.captureWindows(
                     applicationIdentity: job.applicationIdentity,
-                    requests: job.requests
+                    requests: job.requests,
+                    expectedCacheGeneration: job.cacheGeneration
                 )
                 guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in
                     guard let self,
-                          self.activePrewarmPID == processIdentifier else { return }
+                          self.activePrewarmPID == processIdentifier,
+                          self.prewarmGeneration == generation else { return }
                     self.activePrewarmTask = nil
                     self.activePrewarmPID = nil
+                    self.activePrewarmLifetimeKey = nil
+                    self.activePrewarmRevision = nil
                     self.drainPrewarmQueueIfNeeded()
                 }
             }

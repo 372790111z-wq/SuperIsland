@@ -1025,6 +1025,35 @@ final class WindowInventoryBindingHistory: @unchecked Sendable {
         }
     }
 
+    /// Explicit AX retirement overrides a lingering WindowServer surface.
+    /// Removing only these exact bindings preserves other windows and process
+    /// launches; later private inventory alone cannot insert the IDs again.
+    func forget(
+        windowIDs: Set<CGWindowID>,
+        processLifetimeKey: String
+    ) {
+        guard !processLifetimeKey.isEmpty, !windowIDs.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entries[processLifetimeKey] else { return }
+        let remaining = entry.completeAbsencesByWindowID.filter {
+            !windowIDs.contains($0.key)
+        }
+        guard remaining.count != entry.completeAbsencesByWindowID.count else {
+            return
+        }
+        if remaining.isEmpty {
+            entries.removeValue(forKey: processLifetimeKey)
+        } else {
+            entries[processLifetimeKey] = Entry(
+                processIdentifier: entry.processIdentifier,
+                completeAbsencesByWindowID: remaining,
+                lastCompleteObservation: entry.lastCompleteObservation,
+                accessSequence: entry.accessSequence
+            )
+        }
+    }
+
     func remove(processIdentifier: pid_t) {
         guard processIdentifier > 0 else { return }
         lock.lock()
@@ -1037,6 +1066,122 @@ final class WindowInventoryBindingHistory: @unchecked Sendable {
         entries.removeAll(keepingCapacity: false)
         accessSequence = 0
         lock.unlock()
+    }
+}
+
+/// Negative identity evidence for WindowServer-only discovery. Positive AX
+/// history may be evicted, but forgetting a confirmed retirement would allow
+/// its lingering compositor surface to become a new preview-only card.
+///
+/// The provider protects this value with its capture/cache lock. There is one
+/// slot per PID, replaced only by a verified newer process lifetime. Individual
+/// slots are bounded; overflow disables only that process's weak discovery.
+/// Ordinary AX windows and other processes remain usable. No LRU or timer may
+/// silently remove a retirement while its process can still own the surface.
+struct WindowPreviewDiscoveryRetirementHistory: Sendable {
+    private struct Entry: Sendable {
+        let processLifetimeKey: String
+        var retiredWindowIDs: Set<CGWindowID>
+        var blocksAllDiscovery = false
+    }
+
+    private var entriesByPID: [pid_t: Entry] = [:]
+    private let maximumWindowIDsPerProcess: Int
+
+    init(maximumWindowIDsPerProcess: Int = 256) {
+        self.maximumWindowIDsPerProcess = max(1, maximumWindowIDsPerProcess)
+    }
+
+    var trackedProcessCount: Int { entriesByPID.count }
+
+    func trackedWindowCount(processIdentifier: pid_t) -> Int {
+        entriesByPID[processIdentifier]?.retiredWindowIDs.count ?? 0
+    }
+
+    func needsReestablishment(
+        windowID: CGWindowID,
+        processIdentifier: pid_t,
+        processLifetimeKey: String
+    ) -> Bool {
+        guard let entry = entriesByPID[processIdentifier],
+              entry.processLifetimeKey == processLifetimeKey,
+              !entry.blocksAllDiscovery else { return false }
+        return entry.retiredWindowIDs.contains(windowID)
+    }
+
+    /// The caller must establish that this is the current process lifetime.
+    mutating func retire(
+        windowIDs: Set<CGWindowID>,
+        processIdentifier: pid_t,
+        processLifetimeKey: String
+    ) {
+        let validIDs = windowIDs.filter { $0 > 0 }
+        guard processIdentifier > 0, !processLifetimeKey.isEmpty,
+              !validIDs.isEmpty else { return }
+        var entry = entriesByPID[processIdentifier].flatMap {
+            $0.processLifetimeKey == processLifetimeKey ? $0 : nil
+        } ?? Entry(processLifetimeKey: processLifetimeKey, retiredWindowIDs: [])
+        guard !entry.blocksAllDiscovery else { return }
+        let combined = entry.retiredWindowIDs.union(validIDs)
+        if combined.count > maximumWindowIDsPerProcess {
+            entry.blocksAllDiscovery = true
+            entry.retiredWindowIDs.removeAll(keepingCapacity: false)
+        } else {
+            entry.retiredWindowIDs = combined
+        }
+        entriesByPID[processIdentifier] = entry
+    }
+
+    /// Only a live exact AX proxy with the correct owner can reestablish an ID.
+    /// A returned true also requires invalidating work captured before this
+    /// identity change. Overflow stays fail-closed until the process exits;
+    /// exact AX windows do not use this weak discovery gate.
+    @discardableResult
+    mutating func reestablish(
+        windowID: CGWindowID,
+        processIdentifier: pid_t,
+        processLifetimeKey: String
+    ) -> Bool {
+        guard windowID > 0, processIdentifier > 0,
+              !processLifetimeKey.isEmpty,
+              var entry = entriesByPID[processIdentifier] else { return false }
+        guard entry.processLifetimeKey == processLifetimeKey else {
+            entriesByPID.removeValue(forKey: processIdentifier)
+            return true
+        }
+        guard !entry.blocksAllDiscovery,
+              entry.retiredWindowIDs.remove(windowID) != nil else { return false }
+        if entry.retiredWindowIDs.isEmpty {
+            entriesByPID.removeValue(forKey: processIdentifier)
+        } else {
+            entriesByPID[processIdentifier] = entry
+        }
+        return true
+    }
+
+    func allowsDiscovery(
+        windowID: CGWindowID,
+        processIdentifier: pid_t,
+        processLifetimeKey: String?
+    ) -> Bool {
+        guard windowID > 0, processIdentifier > 0 else { return false }
+        guard let entry = entriesByPID[processIdentifier] else { return true }
+        // Unknown process identity cannot negate existing retirement evidence.
+        guard let processLifetimeKey else { return false }
+        guard entry.processLifetimeKey == processLifetimeKey else { return true }
+        return !entry.blocksAllDiscovery && !entry.retiredWindowIDs.contains(windowID)
+    }
+
+    /// A delayed exit notification must not erase the replacement lifetime's
+    /// exclusions. Pass the currently verified live lifetime, or nil after
+    /// proving that the PID has no running application.
+    mutating func remove(
+        processIdentifier: pid_t,
+        keepingProcessLifetimeKey: String?
+    ) {
+        guard let entry = entriesByPID[processIdentifier],
+              entry.processLifetimeKey != keepingProcessLifetimeKey else { return }
+        entriesByPID.removeValue(forKey: processIdentifier)
     }
 }
 

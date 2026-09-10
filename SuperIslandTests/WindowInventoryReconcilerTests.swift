@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import XCTest
 @testable import SuperIsland
@@ -834,6 +835,460 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         XCTAssertEqual(history.windowIDs(for: "b"), Set<CGWindowID>([20]))
         history.reset()
         XCTAssertTrue(history.windowIDs(for: "b").isEmpty)
+    }
+
+    func testRetiredBindingCannotReturnFromLingeringPrivateSurface() {
+        let history = WindowInventoryBindingHistory()
+        let lifetime = "wechat|start-a|42"
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 40)
+        let lingeringSurface = surface(
+            id: 259,
+            title: "",
+            bounds: CGRect(x: 616, y: 362, width: 280, height: 380),
+            onScreen: false
+        )
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: lifetime,
+            confirmedExactWindowIDs: [259],
+            liveValidatedWindowIDs: [259],
+            snapshotCapturedAt: capturedAt,
+            snapshotIsComplete: true
+        )
+        XCTAssertEqual(
+            resolve([], [lingeringSurface], retainedWindowIDs: history.windowIDs(for: lifetime))
+                .windows.map(\.surface.windowID),
+            [259]
+        )
+
+        history.forget(windowIDs: [259], processLifetimeKey: lifetime)
+        for offset in 1...3 {
+            history.recordObservation(
+                processIdentifier: 42,
+                processLifetimeKey: lifetime,
+                confirmedExactWindowIDs: [],
+                liveValidatedWindowIDs: [259],
+                snapshotCapturedAt: capturedAt.addingTimeInterval(Double(offset)),
+                snapshotIsComplete: true
+            )
+        }
+
+        XCTAssertTrue(history.windowIDs(for: lifetime).isEmpty)
+        XCTAssertTrue(
+            resolve([], [lingeringSurface], retainedWindowIDs: history.windowIDs(for: lifetime))
+                .windows.isEmpty
+        )
+    }
+
+    func testRetiringOneBindingPreservesOtherWindowsAndProcessLaunches() {
+        let history = WindowInventoryBindingHistory()
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 50)
+        for lifetime in ["wechat|start-a|42", "wechat|start-b|42", "work2|start-c|84"] {
+            history.recordObservation(
+                processIdentifier: lifetime.hasSuffix("84") ? 84 : 42,
+                processLifetimeKey: lifetime,
+                confirmedExactWindowIDs: [259, 879],
+                liveValidatedWindowIDs: [259, 879],
+                snapshotCapturedAt: capturedAt,
+                snapshotIsComplete: true
+            )
+        }
+
+        history.forget(windowIDs: [259], processLifetimeKey: "wechat|start-a|42")
+        history.forget(windowIDs: [259], processLifetimeKey: "wechat|start-a|42")
+
+        XCTAssertEqual(history.windowIDs(for: "wechat|start-a|42"), [879])
+        XCTAssertEqual(history.windowIDs(for: "wechat|start-b|42"), [259, 879])
+        XCTAssertEqual(history.windowIDs(for: "work2|start-c|84"), [259, 879])
+    }
+
+    func testFreshExactBindingCanReestablishRetiredWindowID() {
+        let history = WindowInventoryBindingHistory()
+        let lifetime = "wechat|start-a|42"
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 60)
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: lifetime,
+            confirmedExactWindowIDs: [259],
+            liveValidatedWindowIDs: [259],
+            snapshotCapturedAt: capturedAt,
+            snapshotIsComplete: true
+        )
+        history.forget(windowIDs: [259], processLifetimeKey: lifetime)
+        history.recordObservation(
+            processIdentifier: 42,
+            processLifetimeKey: lifetime,
+            confirmedExactWindowIDs: [259],
+            liveValidatedWindowIDs: [259],
+            snapshotCapturedAt: capturedAt.addingTimeInterval(1),
+            snapshotIsComplete: true
+        )
+
+        XCTAssertEqual(history.windowIDs(for: lifetime), [259])
+    }
+
+    func testLateDestroyedProxyCannotRetireReplacementWithSameWindowID() {
+        struct Proxy: Equatable {
+            let reportedWindowID: CGWindowID?
+            let identity: Int
+        }
+        let old = Proxy(reportedWindowID: 259, identity: 1)
+        let replacement = Proxy(reportedWindowID: 259, identity: 2)
+        let current = [CGWindowID(259): replacement]
+
+        XCTAssertTrue(WindowAXLifecycleRetirementPolicy.matchingWindowIDs(
+            for: old,
+            currentWindows: current,
+            sameElement: { $0.identity == $1.identity }
+        ).isEmpty)
+        XCTAssertEqual(WindowAXLifecycleRetirementPolicy.matchingWindowIDs(
+            for: replacement,
+            currentWindows: current,
+            sameElement: { $0.identity == $1.identity }
+        ), [259])
+    }
+
+    func testDestroyedProxyWithoutReadableWindowIDStillMatchesCurrentIdentity() {
+        struct Proxy {
+            let reportedWindowID: CGWindowID?
+            let identity: Int
+        }
+        let current = [CGWindowID(259): Proxy(reportedWindowID: 259, identity: 1)]
+        let destroyed = Proxy(reportedWindowID: nil, identity: 1)
+
+        XCTAssertEqual(WindowAXLifecycleRetirementPolicy.matchingWindowIDs(
+            for: destroyed,
+            currentWindows: current,
+            sameElement: { $0.identity == $1.identity }
+        ), [259])
+    }
+
+    func testOnlyExplicitInvalidAXElementProvesRetirement() {
+        XCTAssertTrue(WindowAXLifecycleRetirementPolicy.shouldRetire(
+            roleReadResult: .invalidUIElement
+        ))
+        for result: AXError in [
+            .success, .cannotComplete, .noValue, .attributeUnsupported,
+            .apiDisabled, .failure, .notImplemented
+        ] {
+            XCTAssertFalse(WindowAXLifecycleRetirementPolicy.shouldRetire(
+                roleReadResult: result
+            ), "Transient or unsupported AX result must preserve the window: \(result)")
+        }
+    }
+
+    func testRetirementRevisionRejectsOldCaptureAndObserverRecreation() {
+        let captureRevision = WindowAXLifecycleRevision()
+        let afterRetirement = captureRevision.advanced()
+        let recreatedObserver = WindowAXLifecycleRevision(
+            generation: captureRevision.generation
+        )
+
+        XCTAssertNotEqual(captureRevision, afterRetirement)
+        XCTAssertEqual(captureRevision.observationID, afterRetirement.observationID)
+        XCTAssertNotEqual(captureRevision, recreatedObserver)
+        XCTAssertNotEqual(afterRetirement, afterRetirement.advanced())
+    }
+
+    func testRetirementChangeMatchesOnlyExactWindowAndProcessLaunch() {
+        let change = WindowAXLifecycleChange(
+            processLifetimeKey: "wechat|start-a|42",
+            windowIDs: [259],
+            revision: WindowAXLifecycleRevision()
+        )
+
+        XCTAssertTrue(change.affects(processLifetimeKey: "wechat|start-a|42", windowID: 259))
+        XCTAssertFalse(change.affects(processLifetimeKey: "wechat|start-a|42", windowID: 879))
+        XCTAssertFalse(change.affects(processLifetimeKey: "wechat|start-b|42", windowID: 259))
+        XCTAssertFalse(change.affects(processLifetimeKey: nil, windowID: 259))
+        XCTAssertFalse(change.affects(processLifetimeKey: "wechat|start-a|42", windowID: nil))
+    }
+
+    func testRetirementChangeInvalidatesOlderSnapshotButPreservesFreshWork() {
+        let original = WindowAXLifecycleRevision()
+        let change = WindowAXLifecycleChange(
+            processLifetimeKey: "wechat|start-a|42",
+            windowIDs: [259],
+            revision: original.advanced()
+        )
+
+        XCTAssertTrue(change.invalidates(original))
+        XCTAssertFalse(change.invalidates(change.revision))
+        XCTAssertFalse(change.invalidates(change.revision.advanced()))
+    }
+
+    func testDelayedRetirementChangeCannotInvalidateNewObserverInstallation() {
+        let previousObserver = WindowAXLifecycleRevision(generation: 12)
+        let change = WindowAXLifecycleChange(
+            processLifetimeKey: "wechat|start-a|42",
+            windowIDs: [259],
+            revision: previousObserver.advanced()
+        )
+        let replacementObserver = WindowAXLifecycleRevision(generation: 0)
+
+        XCTAssertFalse(change.invalidates(replacementObserver))
+    }
+
+    func testCaptureGenerationRetirementRejectsOnlyTargetProcessLaunch() {
+        var tracker = WindowThumbnailCaptureGenerationTracker()
+        let main = "wechat|start-a|42"
+        let work2 = "work2|start-b|84"
+        let mainCapture = tracker.snapshot(for: main)
+        let work2Capture = tracker.snapshot(for: work2)
+
+        tracker.invalidate(processLifetimeKey: main)
+
+        XCTAssertFalse(tracker.isCurrent(mainCapture, for: main))
+        XCTAssertTrue(tracker.isCurrent(work2Capture, for: work2))
+        XCTAssertTrue(tracker.isCurrent(tracker.snapshot(for: main), for: main))
+        XCTAssertFalse(tracker.isCurrent(work2Capture, for: main))
+    }
+
+    func testRetiredExactWindowCannotReenterThroughFreshPreviewOnlyDiscovery() {
+        let history = WindowInventoryBindingHistory()
+        var exclusions = WindowPreviewDiscoveryRetirementHistory()
+        let lifetime = "zcode|start-a|551"
+        history.recordObservation(
+            processIdentifier: 551,
+            processLifetimeKey: lifetime,
+            confirmedExactWindowIDs: [131],
+            liveValidatedWindowIDs: [131],
+            snapshotCapturedAt: Date(timeIntervalSinceReferenceDate: 100),
+            snapshotIsComplete: true
+        )
+        history.forget(windowIDs: [131], processLifetimeKey: lifetime)
+        exclusions.retire(windowIDs: [131], processIdentifier: 551, processLifetimeKey: lifetime)
+
+        // The compositor can still return a visually valid image after close.
+        // Neither empty ordinary inventory nor fresh pixels revoke retirement.
+        let discovered = WindowThumbnailDiscoveredWindow(
+            request: WindowThumbnailRequest(title: "App", occurrence: 0, bounds: nil, windowID: 131),
+            result: .fresh(NSImage(size: NSSize(width: 1512, height: 864)))
+        )
+        XCTAssertTrue(history.windowIDs(for: lifetime).isEmpty)
+        XCTAssertNotNil(WindowPreviewOnlySelectionPolicy.selectOne(from: [discovered]))
+        let admitted = [discovered].filter {
+            exclusions.allowsDiscovery(windowID: $0.request.windowID!, processIdentifier: 551, processLifetimeKey: lifetime)
+        }
+        XCTAssertNil(WindowPreviewOnlySelectionPolicy.selectOne(from: admitted))
+    }
+
+    func testDiscoveryRetirementDoesNotBlockUnrelatedNoAXWindowsOrProcessLaunches() {
+        var exclusions = WindowPreviewDiscoveryRetirementHistory()
+        exclusions.retire(windowIDs: [131], processIdentifier: 551, processLifetimeKey: "zcode|old|551")
+        // No absence/off-screen/geometry heuristic is part of this gate.
+        // A real no-AX, minimized or fullscreen window without exact retirement
+        // evidence retains the existing provider/reconciler admission behavior.
+        XCTAssertTrue(exclusions.allowsDiscovery(windowID: 132, processIdentifier: 551, processLifetimeKey: "zcode|old|551"))
+        XCTAssertTrue(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 552, processLifetimeKey: "other|start|552"))
+        XCTAssertTrue(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 551, processLifetimeKey: "zcode|new|551"))
+        XCTAssertFalse(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 551, processLifetimeKey: nil))
+    }
+
+    func testFreshExactReestablishmentClearsOnlyItsOwnDiscoveryExclusion() {
+        var exclusions = WindowPreviewDiscoveryRetirementHistory()
+        exclusions.retire(windowIDs: [131, 132], processIdentifier: 551, processLifetimeKey: "a")
+        exclusions.retire(windowIDs: [131], processIdentifier: 552, processLifetimeKey: "b")
+        XCTAssertTrue(exclusions.needsReestablishment(windowID: 131, processIdentifier: 551, processLifetimeKey: "a"))
+        XCTAssertFalse(exclusions.needsReestablishment(windowID: 133, processIdentifier: 551, processLifetimeKey: "a"))
+        XCTAssertTrue(exclusions.reestablish(windowID: 131, processIdentifier: 551, processLifetimeKey: "a"))
+        XCTAssertFalse(exclusions.needsReestablishment(windowID: 131, processIdentifier: 551, processLifetimeKey: "a"))
+        XCTAssertTrue(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 551, processLifetimeKey: "a"))
+        XCTAssertFalse(exclusions.allowsDiscovery(windowID: 132, processIdentifier: 551, processLifetimeKey: "a"))
+        XCTAssertFalse(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 552, processLifetimeKey: "b"))
+        XCTAssertFalse(exclusions.reestablish(windowID: 131, processIdentifier: 551, processLifetimeKey: "a"))
+    }
+
+    func testDiscoveryRetirementCapacityCannotEvictAndReviveOldSurface() {
+        var exclusions = WindowPreviewDiscoveryRetirementHistory(maximumWindowIDsPerProcess: 2)
+        exclusions.retire(windowIDs: [131, 132], processIdentifier: 551, processLifetimeKey: "a")
+        exclusions.retire(windowIDs: [133], processIdentifier: 551, processLifetimeKey: "a")
+        XCTAssertLessThanOrEqual(exclusions.trackedWindowCount(processIdentifier: 551), 2)
+        XCTAssertFalse(exclusions.needsReestablishment(windowID: 131, processIdentifier: 551, processLifetimeKey: "a"))
+        for windowID in [CGWindowID(131), 132, 133, 134] {
+            XCTAssertFalse(exclusions.allowsDiscovery(windowID: windowID, processIdentifier: 551, processLifetimeKey: "a"))
+        }
+        XCTAssertTrue(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 552, processLifetimeKey: "b"))
+        XCTAssertTrue(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 551, processLifetimeKey: "new-a"))
+    }
+
+    func testVerifiedNewLifetimeReplacesSinglePIDRetirementSlot() {
+        var exclusions = WindowPreviewDiscoveryRetirementHistory(maximumWindowIDsPerProcess: 2)
+        for index in 0..<100 {
+            exclusions.retire(windowIDs: [CGWindowID(index + 1)], processIdentifier: 551, processLifetimeKey: "launch-\(index)")
+            XCTAssertEqual(exclusions.trackedProcessCount, 1)
+            XCTAssertEqual(exclusions.trackedWindowCount(processIdentifier: 551), 1)
+        }
+        XCTAssertTrue(exclusions.allowsDiscovery(windowID: 1, processIdentifier: 551, processLifetimeKey: "launch-99"))
+        XCTAssertFalse(exclusions.allowsDiscovery(windowID: 100, processIdentifier: 551, processLifetimeKey: "launch-99"))
+    }
+
+    func testDelayedExitCannotRemoveReplacementLifetimeRetirement() {
+        var exclusions = WindowPreviewDiscoveryRetirementHistory()
+        exclusions.retire(windowIDs: [131], processIdentifier: 551, processLifetimeKey: "new")
+        exclusions.remove(processIdentifier: 551, keepingProcessLifetimeKey: "new")
+        XCTAssertFalse(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 551, processLifetimeKey: "new"))
+        exclusions.remove(processIdentifier: 551, keepingProcessLifetimeKey: nil)
+        XCTAssertEqual(exclusions.trackedProcessCount, 0)
+    }
+
+    func testNewCaptureEpochAfterRetirementStillCannotDiscoverRetiredWindow() {
+        var exclusions = WindowPreviewDiscoveryRetirementHistory()
+        var generations = WindowThumbnailCaptureGenerationTracker()
+        let lifetime = "zcode|start|551"
+        let before = generations.snapshot(for: lifetime)
+        exclusions.retire(windowIDs: [131], processIdentifier: 551, processLifetimeKey: lifetime)
+        generations.invalidate(processLifetimeKey: lifetime)
+        XCTAssertFalse(generations.isCurrent(before, for: lifetime))
+        let after = generations.snapshot(for: lifetime)
+        XCTAssertTrue(generations.isCurrent(after, for: lifetime))
+        XCTAssertFalse(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 551, processLifetimeKey: lifetime))
+
+        // Privacy/cache resets and observer recreation cannot erase negative
+        // window metadata while the old compositor surface remains alive.
+        generations.invalidateAll()
+        XCTAssertFalse(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 551, processLifetimeKey: lifetime))
+    }
+
+    func testRetiredRenderersCannotSetBestScoreOrConsumeCaptureLimit() {
+        struct Candidate {
+            let id: CGWindowID
+            let score: CGFloat
+        }
+        var exclusions = WindowPreviewDiscoveryRetirementHistory()
+        exclusions.retire(windowIDs: [1, 2, 3, 4], processIdentifier: 42, processLifetimeKey: "renderer")
+        let candidates = [
+            Candidate(id: 1, score: 1),
+            Candidate(id: 2, score: 2),
+            Candidate(id: 3, score: 3),
+            Candidate(id: 4, score: 4),
+            Candidate(id: 5, score: 100),
+            Candidate(id: 6, score: 108),
+            Candidate(id: 7, score: 116)
+        ]
+        let selected = WindowRendererSelectionPolicy.nearBest(
+            from: candidates,
+            isAllowed: {
+                exclusions.allowsDiscovery(windowID: $0.id, processIdentifier: 42, processLifetimeKey: "renderer")
+            },
+            score: { $0.score },
+            overlap: { _ in 1 },
+            windowID: { $0.id }
+        )
+        XCTAssertEqual(selected.map(\.id), [5, 6])
+    }
+
+    func testLiveRendererSelectionPreservesScoreOverlapAndFourCaptureBound() {
+        struct Candidate {
+            let id: CGWindowID
+            let score: CGFloat
+            let overlap: CGFloat
+        }
+        let candidates = [
+            Candidate(id: 9, score: 0, overlap: 1),
+            Candidate(id: 1, score: 0, overlap: 1),
+            Candidate(id: 2, score: 1, overlap: 0.90),
+            Candidate(id: 3, score: 2, overlap: 1),
+            Candidate(id: 4, score: 3, overlap: 1),
+            Candidate(id: 5, score: 4, overlap: 1),
+            Candidate(id: 6, score: 20, overlap: 1)
+        ]
+        let selected = WindowRendererSelectionPolicy.nearBest(
+            from: candidates,
+            isAllowed: { _ in true },
+            score: { $0.score },
+            overlap: { $0.overlap },
+            windowID: { $0.id }
+        )
+        XCTAssertEqual(selected.map(\.id), [1, 9, 3, 4])
+    }
+
+    func testRendererRetireThenReestablishCannotValidateItsOldPixels() {
+        var exclusions = WindowPreviewDiscoveryRetirementHistory()
+        var generations = WindowThumbnailCaptureGenerationTracker()
+        let target = generations.snapshot(for: "shell")
+        let renderer = generations.snapshot(for: "renderer")
+        let capturedOwnerTokens = [target, renderer]
+        XCTAssertTrue(generations.areCurrent(capturedOwnerTokens))
+
+        exclusions.retire(windowIDs: [131], processIdentifier: 42, processLifetimeKey: "renderer")
+        generations.invalidate(processLifetimeKey: "renderer")
+        XCTAssertTrue(exclusions.reestablish(windowID: 131, processIdentifier: 42, processLifetimeKey: "renderer"))
+        generations.invalidate(processLifetimeKey: "renderer")
+
+        XCTAssertTrue(exclusions.allowsDiscovery(windowID: 131, processIdentifier: 42, processLifetimeKey: "renderer"))
+        XCTAssertTrue(generations.isCurrent(target, for: "shell"))
+        XCTAssertFalse(generations.areCurrent(capturedOwnerTokens))
+        XCTAssertTrue(generations.areCurrent([target, generations.snapshot(for: "renderer")]))
+    }
+
+    func testAncestorBridgeRejectsOldCaptureWhenEitherOtherOwnerRetires() {
+        for retiredLifetime in ["parent", "ancestor"] {
+            var generations = WindowThumbnailCaptureGenerationTracker()
+            let target = generations.snapshot(for: "target")
+            let ownerTokens = [generations.snapshot(for: "parent"), generations.snapshot(for: "ancestor")]
+            XCTAssertTrue(generations.areCurrent(ownerTokens))
+            generations.invalidate(processLifetimeKey: retiredLifetime)
+            generations.invalidate(processLifetimeKey: retiredLifetime) // valid reestablishment
+            XCTAssertTrue(generations.isCurrent(target, for: "target"))
+            XCTAssertFalse(generations.areCurrent(ownerTokens))
+            XCTAssertTrue(generations.areCurrent([generations.snapshot(for: "parent"), generations.snapshot(for: "ancestor")]))
+        }
+    }
+
+    func testDelayedCaptureCannotUseTokenRecordedBeforeRetirement() {
+        var tracker = WindowThumbnailCaptureGenerationTracker()
+        let lifetime = "wechat|start-a|42"
+        let queuedJobToken = tracker.snapshot(for: lifetime)
+
+        tracker.invalidate(processLifetimeKey: lifetime)
+        let tokenWhenDetachedWorkEventuallyStarts = tracker.snapshot(for: lifetime)
+
+        XCTAssertNotEqual(queuedJobToken, tokenWhenDetachedWorkEventuallyStarts)
+        XCTAssertFalse(tracker.isCurrent(queuedJobToken, for: lifetime))
+        XCTAssertTrue(tracker.isCurrent(tokenWhenDetachedWorkEventuallyStarts, for: lifetime))
+    }
+
+    func testGlobalCaptureGenerationResetInvalidatesEveryProcessLaunch() {
+        var tracker = WindowThumbnailCaptureGenerationTracker()
+        let main = "wechat|start-a|42"
+        let work2 = "work2|start-b|84"
+        tracker.invalidate(processLifetimeKey: main)
+        let mainCapture = tracker.snapshot(for: main)
+        let work2Capture = tracker.snapshot(for: work2)
+
+        tracker.invalidateAll()
+
+        XCTAssertEqual(tracker.trackedProcessCount, 0)
+        XCTAssertFalse(tracker.isCurrent(mainCapture, for: main))
+        XCTAssertFalse(tracker.isCurrent(work2Capture, for: work2))
+        XCTAssertTrue(tracker.isCurrent(tracker.snapshot(for: main), for: main))
+        XCTAssertTrue(tracker.isCurrent(tracker.snapshot(for: work2), for: work2))
+    }
+
+    func testCaptureGenerationCapacityRecyclingCannotAliasOldZeroEpoch() {
+        var tracker = WindowThumbnailCaptureGenerationTracker(maximumProcessEntries: 2)
+        let originalZeroEpoch = tracker.snapshot(for: "a")
+        tracker.invalidate(processLifetimeKey: "a")
+        let invalidatedEpoch = tracker.snapshot(for: "a")
+        tracker.invalidate(processLifetimeKey: "b")
+        XCTAssertEqual(tracker.trackedProcessCount, 2)
+
+        tracker.invalidate(processLifetimeKey: "c")
+        let recycledZeroEpoch = tracker.snapshot(for: "a")
+
+        XCTAssertEqual(tracker.trackedProcessCount, 1)
+        XCTAssertEqual(originalZeroEpoch.processEpoch, recycledZeroEpoch.processEpoch)
+        XCTAssertNotEqual(originalZeroEpoch.globalEpoch, recycledZeroEpoch.globalEpoch)
+        XCTAssertFalse(tracker.isCurrent(originalZeroEpoch, for: "a"))
+        XCTAssertFalse(tracker.isCurrent(invalidatedEpoch, for: "a"))
+        XCTAssertTrue(tracker.isCurrent(recycledZeroEpoch, for: "a"))
+
+        for index in 0..<10 {
+            tracker.invalidate(processLifetimeKey: "process-\(index)")
+            XCTAssertLessThanOrEqual(tracker.trackedProcessCount, 2)
+            XCTAssertFalse(tracker.isCurrent(originalZeroEpoch, for: "a"))
+        }
     }
 
     func testSharedAXPreDeduplicatorUsesOnlyOwnerAndExactIdentity() {

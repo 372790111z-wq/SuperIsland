@@ -355,6 +355,294 @@ final class WindowPreviewInteractionTests: XCTestCase {
         XCTAssertEqual(model.content.rows.map(\.id), [100])
     }
 
+    func testDockSharedPreviewSecondInstanceDispatchesItsOwnActivationAndClose() {
+        let model = DockWindowPreviewModel()
+        var activated: [pid_t] = []
+        var closed: [pid_t] = []
+        let rows = [(100, pid_t(10)), (200, pid_t(20))].map { id, owner in
+            DockPreviewRow(
+                id: id,
+                ownerProcessIdentifier: owner,
+                title: "Chrome",
+                isMinimized: false,
+                canActivate: true,
+                isPreviewOnly: false,
+                canClose: true,
+                thumbnailResult: nil,
+                action: { activated.append(owner) },
+                closeAction: { closed.append(owner) }
+            )
+        }
+        model.update(appName: "Chrome", icon: nil, rows: rows, canManageWindows: true)
+        model.setPreviewFrames([
+            100: CGRect(x: 0, y: 0, width: 100, height: 100),
+            200: CGRect(x: 110, y: 0, width: 100, height: 100)
+        ])
+
+        model.handlePointer(.leftMouseDown, at: bodyB)
+        model.handlePointer(.leftMouseUp, at: bodyB)
+        model.handlePointer(.leftMouseUp, at: bodyB)
+        let closeB = CGPoint(x: 122, y: 12)
+        model.handlePointer(.leftMouseDown, at: closeB)
+        model.handlePointer(.leftMouseUp, at: closeB)
+        model.handlePointer(.leftMouseUp, at: closeB)
+
+        XCTAssertEqual(activated, [20])
+        XCTAssertEqual(closed, [20])
+        XCTAssertEqual(model.hoveredRowID, 200)
+    }
+
+    func testDockModelOwnerReplacementCancelsPendingActivationAndClose() {
+        for point in [bodyA, closeA] {
+            let model = DockWindowPreviewModel()
+            var operations: [pid_t] = []
+            func row(owner: pid_t) -> DockPreviewRow {
+                DockPreviewRow(
+                    id: 100,
+                    ownerProcessIdentifier: owner,
+                    title: "Chrome",
+                    isMinimized: false,
+                    canActivate: true,
+                    isPreviewOnly: false,
+                    canClose: true,
+                    thumbnailResult: nil,
+                    action: { operations.append(owner) },
+                    closeAction: { operations.append(owner) }
+                )
+            }
+            let frames = [100: CGRect(x: 0, y: 0, width: 100, height: 100)]
+            model.update(appName: "Chrome", icon: nil, rows: [row(owner: 10)], canManageWindows: true)
+            model.setPreviewFrames(frames)
+            model.handlePointer(.leftMouseDown, at: point)
+
+            // WindowServer may reuse the numeric ID after its former owner
+            // exits. A fresh layout for the replacement must not revive a press.
+            model.update(appName: "Chrome", icon: nil, rows: [row(owner: 20)], canManageWindows: true)
+            XCTAssertNil(model.hoveredRowID)
+            model.setPreviewFrames(frames)
+            model.handlePointer(.leftMouseUp, at: point)
+            XCTAssertTrue(operations.isEmpty)
+
+            model.handlePointer(.leftMouseDown, at: point)
+            model.handlePointer(.leftMouseUp, at: point)
+            XCTAssertEqual(operations, [20])
+        }
+    }
+
+    func testDockModelProcessLifetimeReplacementCancelsPendingClick() {
+        let model = DockWindowPreviewModel()
+        var operations: [String] = []
+        func row(lifetime: String) -> DockPreviewRow {
+            DockPreviewRow(
+                id: 100,
+                ownerProcessIdentifier: 10,
+                ownerProcessLifetimeKey: lifetime,
+                title: "Chrome",
+                isMinimized: false,
+                canActivate: true,
+                isPreviewOnly: false,
+                canClose: true,
+                thumbnailResult: nil,
+                action: { operations.append(lifetime) },
+                closeAction: { operations.append(lifetime) }
+            )
+        }
+        let frames = [100: CGRect(x: 0, y: 0, width: 100, height: 100)]
+        model.update(appName: "Chrome", icon: nil, rows: [row(lifetime: "old-launch")], canManageWindows: true)
+        model.setPreviewFrames(frames)
+        model.handlePointer(.leftMouseDown, at: bodyA)
+
+        // A new process can reuse both PID and window ID; its launch identity
+        // must prevent a press intended for the old process from reaching it.
+        model.update(appName: "Chrome", icon: nil, rows: [row(lifetime: "new-launch")], canManageWindows: true)
+        XCTAssertNil(model.hoveredRowID)
+        model.setPreviewFrames(frames)
+        model.handlePointer(.leftMouseUp, at: bodyA)
+        XCTAssertTrue(operations.isEmpty)
+
+        model.handlePointer(.leftMouseDown, at: bodyA)
+        model.handlePointer(.leftMouseUp, at: bodyA)
+        XCTAssertEqual(operations, ["new-launch"])
+    }
+
+    func testDockThumbnailExpirationPreservesOwnerAndPendingClick() {
+        let model = DockWindowPreviewModel()
+        var activated: [pid_t] = []
+        var closed: [pid_t] = []
+        let capturedAt = Date(timeIntervalSince1970: 1_000)
+        let row = DockPreviewRow(
+            id: 200,
+            ownerProcessIdentifier: 20,
+            ownerProcessLifetimeKey: "second-launch",
+            title: "Second Chrome instance",
+            isMinimized: false,
+            canActivate: true,
+            isPreviewOnly: false,
+            canClose: true,
+            thumbnailResult: .recentCache(NSImage(size: NSSize(width: 80, height: 60)), timestamp: capturedAt),
+            action: { activated.append(20) },
+            closeAction: { closed.append(20) }
+        )
+        model.update(appName: "Chrome", icon: nil, rows: [row], canManageWindows: true)
+        model.setPreviewFrames([200: CGRect(x: 0, y: 0, width: 100, height: 100)])
+        model.handlePointer(.leftMouseDown, at: bodyA)
+        XCTAssertNil(model.expireRecentCaches(
+            now: capturedAt.addingTimeInterval(WindowThumbnailProvider.recentCacheTTL)
+        ))
+
+        let replacement = model.content.rows[0]
+        XCTAssertEqual(replacement.id, 200)
+        XCTAssertEqual(replacement.ownerProcessIdentifier, 20)
+        XCTAssertEqual(replacement.ownerProcessLifetimeKey, "second-launch")
+        XCTAssertEqual(replacement.title, row.title)
+        guard case .notEnumerated? = replacement.thumbnailResult else {
+            return XCTFail("Expired thumbnail must be replaced without changing its window owner")
+        }
+        model.handlePointer(.leftMouseUp, at: bodyA)
+        model.handlePointer(.leftMouseDown, at: closeA)
+        model.handlePointer(.leftMouseUp, at: closeA)
+        XCTAssertEqual(activated, [20])
+        XCTAssertEqual(closed, [20])
+    }
+
+    private func dockCandidate(
+        _ processIdentifier: pid_t,
+        bundleIdentifier: String? = "com.google.Chrome",
+        bundlePath: String? = "/Applications/Google Chrome.app",
+        localizedName: String? = "Google Chrome",
+        isRegular: Bool = true
+    ) -> DockApplicationIdentityCandidate {
+        DockApplicationIdentityCandidate(
+            processIdentifier: processIdentifier,
+            bundleIdentifier: bundleIdentifier,
+            bundlePath: bundlePath,
+            localizedName: localizedName,
+            isRegular: isRegular
+        )
+    }
+
+    func testDockSharedChromePreviewUsesSortedUniqueProcessesAtCanonicalPath() {
+        let canonicalPath = DockApplicationIdentityPolicy.normalizedApplicationURL(
+            from: "/Applications/./Google Chrome.app"
+        )?.path
+        XCTAssertEqual(canonicalPath, "/Applications/Google Chrome.app")
+        let candidates = [
+            dockCandidate(20),
+            dockCandidate(10, bundlePath: canonicalPath),
+            dockCandidate(20)
+        ]
+        XCTAssertEqual(DockApplicationIdentityPolicy.previewProcessIdentifiers(
+            targetBundleIdentifier: "com.google.Chrome",
+            targetBundlePath: "/Applications/Google Chrome.app",
+            title: "Google Chrome",
+            candidates: candidates
+        ), [10, 20])
+    }
+
+    func testDockSharedPreviewDoesNotCombineSameBundleAtDifferentPaths() {
+        let candidates = [
+            dockCandidate(10),
+            dockCandidate(20, bundlePath: "/Applications/Other Chrome.app")
+        ]
+        for (path, expectedPID) in [
+            ("/Applications/Google Chrome.app", pid_t(10)),
+            ("/Applications/Other Chrome.app", pid_t(20))
+        ] {
+            XCTAssertEqual(DockApplicationIdentityPolicy.previewProcessIdentifiers(
+                targetBundleIdentifier: "com.google.Chrome",
+                targetBundlePath: path,
+                title: "Google Chrome",
+                candidates: candidates
+            ), [expectedPID])
+        }
+    }
+
+    func testDockSharedPreviewMissingTargetPathCannotBorrowBundleOrTitleMatch() {
+        XCTAssertEqual(DockApplicationIdentityPolicy.previewProcessIdentifiers(
+            targetBundleIdentifier: "com.google.Chrome",
+            targetBundlePath: "/Applications/Stopped Chrome.app",
+            title: "Google Chrome",
+            candidates: [dockCandidate(10)]
+        ), [])
+    }
+
+    func testDockSharedPreviewKeepsTwoWechatInstallationsSeparate() {
+        let paths = ["/Applications/WeChat.app", "/Applications/WeChat-Work2.app"]
+        let candidates = paths.enumerated().map { index, path in
+            dockCandidate(
+                pid_t(index + 10),
+                bundleIdentifier: "com.tencent.xinWeChat",
+                bundlePath: path,
+                localizedName: "微信"
+            )
+        }
+        for (index, path) in paths.enumerated() {
+            XCTAssertEqual(DockApplicationIdentityPolicy.previewProcessIdentifiers(
+                targetBundleIdentifier: "com.tencent.xinWeChat",
+                targetBundlePath: path,
+                title: "微信",
+                candidates: candidates
+            ), [pid_t(index + 10)])
+        }
+    }
+
+    func testDockSharedPreviewExcludesHelpersAndInvalidProcessesBeforeGrouping() {
+        let candidates = [
+            dockCandidate(10),
+            dockCandidate(40, bundleIdentifier: "com.example.helper", isRegular: false),
+            dockCandidate(0, bundleIdentifier: nil),
+            dockCandidate(-1, bundleIdentifier: "com.example.other")
+        ]
+        XCTAssertEqual(DockApplicationIdentityPolicy.previewProcessIdentifiers(
+            targetBundleIdentifier: "com.google.Chrome",
+            targetBundlePath: "/Applications/Google Chrome.app",
+            title: "Google Chrome",
+            candidates: candidates
+        ), [10])
+    }
+
+    func testDockSharedPreviewRejectsWholeGroupWithConflictingOrMissingBundle() {
+        let targetIdentifiers: [String?] = ["com.google.Chrome", nil]
+        let uncertainIdentifiers: [String?] = ["com.example.other", nil]
+        for targetIdentifier in targetIdentifiers {
+            for uncertainIdentifier in uncertainIdentifiers {
+                XCTAssertEqual(DockApplicationIdentityPolicy.previewProcessIdentifiers(
+                    targetBundleIdentifier: targetIdentifier,
+                    targetBundlePath: "/Applications/Google Chrome.app",
+                    title: "Google Chrome",
+                    candidates: [dockCandidate(10), dockCandidate(20, bundleIdentifier: uncertainIdentifier)]
+                ), [])
+            }
+        }
+    }
+
+    func testDockPreviewWithoutURLStillRequiresUniqueProcess() {
+        let bundleIdentifiers: [String?] = [nil, "com.google.Chrome"]
+        for bundleIdentifier in bundleIdentifiers {
+            XCTAssertEqual(DockApplicationIdentityPolicy.previewProcessIdentifiers(
+                targetBundleIdentifier: bundleIdentifier,
+                targetBundlePath: nil,
+                title: "Google Chrome",
+                candidates: [dockCandidate(10), dockCandidate(20)]
+            ), [])
+            XCTAssertEqual(DockApplicationIdentityPolicy.previewProcessIdentifiers(
+                targetBundleIdentifier: bundleIdentifier,
+                targetBundlePath: nil,
+                title: "Google Chrome",
+                candidates: [dockCandidate(10)]
+            ), [10])
+        }
+    }
+
+    func testDockReverseSelectionStillRejectsMultipleProcessesAtOnePath() {
+        XCTAssertNil(DockApplicationIdentityPolicy.selectProcessIdentifier(
+            targetBundleIdentifier: "com.google.Chrome",
+            targetBundlePath: "/Applications/Google Chrome.app",
+            title: "Google Chrome",
+            candidates: [dockCandidate(10), dockCandidate(20)]
+        ))
+    }
+
     func testDockIdentityUsesExactPathForSameNamedApplications() {
         let candidates = [
             DockApplicationIdentityCandidate(
