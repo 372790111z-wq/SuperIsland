@@ -68,6 +68,7 @@ final class IslandWindowController {
     private var isWindowEnhancementFeedbackPresented = false
     private var isShowing = false
     private let contentMode: IslandContentMode
+    private let zilanInputSuppression = IslandPanelInputSuppression()
 
     init(contentMode: IslandContentMode = .production) {
         self.contentMode = contentMode
@@ -104,6 +105,19 @@ final class IslandWindowController {
             panel.orderOut(nil)
         }
         refreshWindowEnhancementFeedbackAvailability()
+    }
+
+    func beginZilanSuppression(requestID: String) -> Bool {
+        guard isShowing, contentMode == .production, !panels.isEmpty else { return false }
+        return zilanInputSuppression.begin(requestID: requestID, panels: Array(panels.values))
+    }
+
+    @discardableResult
+    func endZilanSuppression(requestID: String) -> Bool {
+        zilanInputSuppression.release(requestID: requestID)
+        // Restoring mouse routing can refresh tracking areas under a stationary
+        // pointer. Require an exit before that pointer can trigger hover again.
+        return panels.values.contains { $0.isVisible && $0.frame.contains(NSEvent.mouseLocation) }
     }
 
     // MARK: - Panel lifecycle
@@ -175,6 +189,7 @@ final class IslandWindowController {
         let containerView = CenteringContainerView()
         containerView.addSubview(hostingView)
         panel.contentView = containerView
+        zilanInputSuppression.include(panel)
 
         return panel
     }
@@ -739,5 +754,38 @@ final class IslandWindowController {
         }
         fullscreenPollTimer?.invalidate()
         cancellables.removeAll()
+    }
+}
+
+/// Keeps each panel's original input policy, including panels created while a
+/// lease is active. This changes input routing only, never visibility or Space.
+@MainActor
+final class IslandPanelInputSuppression {
+    private var requestID: String?
+    private var originalPolicies: [ObjectIdentifier: (panel: NSPanel, ignoresMouseEvents: Bool)] = [:]
+
+    func begin(requestID: String, panels: [NSPanel]) -> Bool {
+        guard self.requestID == nil else { return false }
+        self.requestID = requestID
+        panels.forEach(include)
+        return true
+    }
+
+    func include(_ panel: NSPanel) {
+        guard requestID != nil else { return }
+        let key = ObjectIdentifier(panel)
+        if originalPolicies[key] == nil {
+            originalPolicies[key] = (panel, panel.ignoresMouseEvents)
+        }
+        panel.ignoresMouseEvents = true
+    }
+
+    func release(requestID: String) {
+        guard self.requestID == requestID else { return }
+        for original in originalPolicies.values {
+            original.panel.ignoresMouseEvents = original.ignoresMouseEvents
+        }
+        originalPolicies.removeAll()
+        self.requestID = nil
     }
 }

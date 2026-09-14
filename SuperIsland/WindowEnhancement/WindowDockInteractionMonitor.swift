@@ -643,7 +643,7 @@ final class WindowDockInteractionMonitor {
         }
 
         // Keep replacing only the sample, not the scheduled item. The item runs
-        // at the trailing edge of the 120 ms window and therefore always
+        // at the trailing edge of the inspection window and therefore always
         // inspects the final cursor position even if movement stops immediately.
         latestMouseSample = sample
         scheduleTrailingInspection()
@@ -652,7 +652,8 @@ final class WindowDockInteractionMonitor {
     private func scheduleTrailingInspection() {
         guard inspectionWorkItem == nil else { return }
         let elapsed = Date().timeIntervalSince(lastInspectedAt)
-        let delay = max(0, 0.12 - elapsed)
+        let interval: TimeInterval = pendingHoverPID != nil || preview.isVisible ? 0.04 : 0.12
+        let delay = max(0, interval - elapsed)
         let generation = inspectionGeneration
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.inspectionGeneration == generation else { return }
@@ -742,6 +743,11 @@ final class WindowDockInteractionMonitor {
             return
         }
 
+        let resolvedTargetAt = ProcessInfo.processInfo.systemUptime
+        // Crossing a gap between Dock tiles may clear the remembered hover
+        // element while the panel remains visible during its hide grace period.
+        // The validated new hit still belongs to that open preview session.
+        let isWarmSwitch = preview.isVisible
         cancelHoverPipeline(clearTarget: false)
         preview.hide()
         hoveredDockPID = applicationPID
@@ -766,9 +772,8 @@ final class WindowDockInteractionMonitor {
                 self.handleHoverTargetLoss(processIdentifier: applicationPID, generation: generation)
                 return
             }
-            // Enumerate and capture each member under its own process lifetime.
-            // The final list is published atomically; a changed member cancels
-            // the old result instead of mixing launches or partially old rows.
+            // Establish all real window identities before displaying any rows.
+            // Pixels can arrive later without holding this validated list back.
             let memberWindows = hit.applications.map { self.windows(for: $0) }
             let lifecycleRevisions = identities.map { identity in
                 identity.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) }
@@ -782,13 +787,69 @@ final class WindowDockInteractionMonitor {
             let cacheGenerations = identities.map { identity in
                 identity.map { WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }
             }
+            let memberRequests = memberWindows.map { windows in
+                windows.map {
+                    WindowThumbnailRequest(
+                        title: $0.captureTitle,
+                        occurrence: $0.captureOccurrence,
+                        bounds: $0.captureBounds,
+                        windowID: $0.windowID,
+                        allowsUniformContent: $0.allowsUniformContent
+                    )
+                }
+            }
+            let initialRows = hit.applications.enumerated().flatMap { index, member in
+                let windows = memberWindows[index]
+                let cachedResults: [WindowThumbnailResult?]
+                if let identity = identities[index], let cacheGeneration = cacheGenerations[index] {
+                    cachedResults = WindowThumbnailProvider.validatedCachedResults(
+                        applicationIdentity: identity,
+                        requests: memberRequests[index],
+                        expectedCacheGeneration: cacheGeneration
+                    )
+                } else {
+                    cachedResults = Array(repeating: nil, count: windows.count)
+                }
+                return self.previewRows(
+                    windows: windows,
+                    thumbnailResults: cachedResults,
+                    application: member,
+                    applicationIdentity: identities[index]
+                )
+            }
+            let hasInitialRows = !initialRows.isEmpty
+            if hasInitialRows {
+                guard self.publishPreview(
+                    rows: initialRows,
+                    hit: hit,
+                    identities: identities,
+                    lifecycleRevisions: lifecycleRevisions,
+                    cacheGenerations: cacheGenerations,
+                    generation: generation,
+                    sample: currentSample,
+                    allowPreview: false,
+                    animateAppearance: !isWarmSwitch,
+                    stage: "initial",
+                    resolvedTargetAt: resolvedTargetAt
+                ) else {
+                    self.handleHoverTargetLoss(processIdentifier: applicationPID, generation: generation)
+                    return
+                }
+            }
             self.thumbnailCaptureTask = Task { @MainActor [weak self] in
                 guard let self else { return }
+                if hasInitialRows {
+                    // Let the just-published model reach AppKit's layout and
+                    // display work before the nonisolated async capture path.
+                    // This is a scheduling opportunity, not a measured frame.
+                    await Task.yield()
+                }
                 var rows: [DockPreviewRow] = []
                 for (index, member) in hit.applications.enumerated() {
                     guard !Task.isCancelled,
                           self.hoverCaptureGeneration == generation,
                           self.previewApplicationsAreCurrent(hit: hit, identities: identities) else {
+                        self.hidePreviewIfCurrent(hit: hit, generation: generation)
                         self.handleHoverTargetLoss(processIdentifier: applicationPID, generation: generation)
                         return
                     }
@@ -804,15 +865,7 @@ final class WindowDockInteractionMonitor {
                         } else {
                             let results = await WindowThumbnailProvider.captureWindows(
                                 applicationIdentity: identity,
-                                requests: windows.map {
-                                    WindowThumbnailRequest(
-                                        title: $0.captureTitle,
-                                        occurrence: $0.captureOccurrence,
-                                        bounds: $0.captureBounds,
-                                        windowID: $0.windowID,
-                                        allowsUniformContent: $0.allowsUniformContent
-                                    )
-                                },
+                                requests: memberRequests[index],
                                 expectedCacheGeneration: cacheGenerations[index]
                             )
                             rows += self.previewRows(
@@ -833,37 +886,109 @@ final class WindowDockInteractionMonitor {
                 }
                 guard self.hoverCaptureGeneration == generation else { return }
                 self.thumbnailCaptureTask = nil
-                guard !Task.isCancelled,
-                      self.preferences.isEnabled,
-                      self.preferences.dockPreviewEnabled,
-                      self.hoveredDockPID == applicationPID,
-                      self.previewApplicationsAreCurrent(hit: hit, identities: identities),
-                      identities.map({ identity in
-                          identity.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) }
-                      }) == lifecycleRevisions,
-                      self.currentPointerContext(
-                        matching: applicationPID,
-                        fallback: sample,
-                        dockItemFrame: hit.appKitFrame,
-                        allowPreview: true
-                      ) != nil else {
+                guard self.publishPreview(
+                    rows: rows,
+                    hit: hit,
+                    identities: identities,
+                    lifecycleRevisions: lifecycleRevisions,
+                    cacheGenerations: cacheGenerations,
+                    generation: generation,
+                    sample: currentSample,
+                    allowPreview: true,
+                    animateAppearance: !isWarmSwitch && !hasInitialRows,
+                    stage: "freshPresented",
+                    resolvedTargetAt: resolvedTargetAt
+                ) else {
                     self.handleHoverTargetLoss(processIdentifier: applicationPID, generation: generation)
                     return
                 }
                 self.pendingHoverPID = nil
-                self.preview.show(
-                    application: application,
-                    displayName: hit.displayName,
-                    rows: rows,
-                    near: currentSample.appKitLocation,
-                    dockItemFrame: hit.appKitFrame,
-                    canManageWindows: AXIsProcessTrusted()
-                )
             }
         }
         hoverWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (isWarmSwitch ? 0 : 0.28), execute: item)
         schedulePendingInspectionIfNeeded()
+    }
+
+    private func publishPreview(
+        rows: [DockPreviewRow],
+        hit: DockHit,
+        identities: [WindowThumbnailApplicationIdentity?],
+        lifecycleRevisions: [WindowAXLifecycleRevision?],
+        cacheGenerations: [WindowThumbnailCaptureGeneration?],
+        generation: Int,
+        sample: MouseSample,
+        allowPreview: Bool,
+        animateAppearance: Bool,
+        stage: String,
+        resolvedTargetAt: TimeInterval
+    ) -> Bool {
+        guard !Task.isCancelled,
+              hoverCaptureGeneration == generation,
+              preferences.isEnabled,
+              preferences.dockPreviewEnabled,
+              hoveredDockPID == hit.application.processIdentifier,
+              hoveredDockElement.map({ CFEqual($0, hit.element) }) == true,
+              hoveredApplicationIdentities == identities,
+              previewApplicationsAreCurrent(hit: hit, identities: identities),
+              identities.map({ identity in
+                  identity.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) }
+              }) == lifecycleRevisions else {
+            hidePreviewIfCurrent(hit: hit, generation: generation)
+            return false
+        }
+        // Recheck privacy once at the publication boundary. Revocation can
+        // invalidate all image tokens while these real window identities stay
+        // valid; retain only the provider's explicit permission/restart state.
+        let privacyFailure = WindowThumbnailProvider.presentationFailureResult()
+        let currentCacheGenerations = identities.map { identity in
+            identity.map { WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }
+        }
+        guard privacyFailure != nil || currentCacheGenerations == cacheGenerations else {
+            hidePreviewIfCurrent(hit: hit, generation: generation)
+            return false
+        }
+        guard let currentSample = currentPointerContext(
+                matching: hit.application.processIdentifier,
+                fallback: sample,
+                dockItemFrame: hit.appKitFrame,
+                allowPreview: allowPreview
+              ) else { return false }
+        let displayedRows = privacyFailure.map { failure in
+            rows.map { $0.replacingThumbnailResult(failure) }
+        } ?? rows
+        preview.show(
+            application: hit.application,
+            displayName: hit.displayName,
+            rows: displayedRows,
+            near: currentSample.appKitLocation,
+            dockItemFrame: hit.appKitFrame,
+            canManageWindows: AXIsProcessTrusted(),
+            animateAppearance: animateAppearance
+        )
+        guard preview.isVisible else { return false }
+        logPreviewPresentation(stage: stage, rows: displayedRows, resolvedTargetAt: resolvedTargetAt)
+        return true
+    }
+
+    private func hidePreviewIfCurrent(hit: DockHit, generation: Int) {
+        guard hoverCaptureGeneration == generation,
+              preview.applicationPID == hit.application.processIdentifier else { return }
+        preview.hide()
+    }
+
+    private func logPreviewPresentation(
+        stage: String,
+        rows: [DockPreviewRow],
+        resolvedTargetAt: TimeInterval
+    ) {
+        let elapsedMilliseconds = Int((ProcessInfo.processInfo.systemUptime - resolvedTargetAt) * 1_000)
+        let cachedCount = rows.reduce(into: 0) { count, row in
+            if case .recentCache? = row.thumbnailResult { count += 1 }
+        }
+        logger.debug(
+            "Dock preview latency origin=resolvedTarget stage=\(stage, privacy: .public) elapsedMs=\(elapsedMilliseconds, privacy: .public) windows=\(rows.count, privacy: .public) cachedCount=\(cachedCount, privacy: .public)"
+        )
     }
 
     private func schedulePendingInspectionIfNeeded() {
@@ -1948,6 +2073,7 @@ private final class DockWindowPreviewController {
     private let contentModel: DockWindowPreviewModel
     private let contentView: DockWindowPreviewContentView
     private(set) var applicationPID: pid_t?
+    var isVisible: Bool { panel.isVisible && applicationPID != nil }
     private var visibilityGeneration = 0
     private var recentCacheExpirationGeneration = 0
     private var recentCacheExpirationWorkItem: DispatchWorkItem?
@@ -2015,7 +2141,8 @@ private final class DockWindowPreviewController {
         rows: [DockPreviewRow],
         near location: CGPoint,
         dockItemFrame: CGRect?,
-        canManageWindows: Bool
+        canManageWindows: Bool,
+        animateAppearance: Bool = true
     ) {
         visibilityGeneration &+= 1
         if applicationPID != application.processIdentifier {
@@ -2077,7 +2204,7 @@ private final class DockWindowPreviewController {
         rescheduleRecentCacheExpiration()
 
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if wasVisible || reduceMotion {
+        if wasVisible || reduceMotion || !animateAppearance {
             panel.alphaValue = 1
             if !wasVisible { panel.orderFrontRegardless() }
         } else {

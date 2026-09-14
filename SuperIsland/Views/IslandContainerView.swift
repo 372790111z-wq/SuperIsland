@@ -71,6 +71,15 @@ struct IslandContainerView: View {
         .onChange(of: isShelfDropTargeted) { _, isTargeted in
             handleShelfDropTargetChange(isTargeted)
         }
+        .onChange(of: appState.zilanSuppressionRequestID) { _, requestID in
+            guard requestID != nil else { return }
+            shelfDragEndWorkItem?.cancel()
+            shelfDragEndWorkItem = nil
+            isHoveringIslandSurface = false
+            isHoveringPreviousButton = false
+            isHoveringNextButton = false
+            isShelfDropTargeted = false
+        }
         .onChange(of: showModuleCycler) { _, isVisible in
             guard !isVisible else { return }
             setCycleButtonHover(false, forward: false)
@@ -93,6 +102,7 @@ struct IslandContainerView: View {
     // MARK: - Surface
 
     private var islandSurface: some View {
+        let inputGeneration = appState.islandInputGeneration
         let surfaceSize: CGSize
         if contentMode == .windowEnhancementShell {
             surfaceSize = windowEnhancementFeedback == nil
@@ -139,20 +149,31 @@ struct IslandContainerView: View {
         }
         .contentShape(islandShape)
         .modifier(IslandSurfaceSwipeModifier(
-            enabled: contentMode == .production && appState.islandSurfaceSwipeEnabled,
+            enabled: contentMode == .production && appState.islandSurfaceSwipeEnabled
+                && !appState.isZilanInteractionSuppressed,
             isCompact: appState.currentState == .compact,
-            onTrackpad: { handleHorizontalSwipe($0) },
-            onDragEnded: { handleSwipe(value: $0) }
+            inputGeneration: inputGeneration,
+            onTrackpad: {
+                guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
+                handleHorizontalSwipe($0)
+            },
+            onDragEnded: { value, generation in
+                guard appState.canHandleIslandInput(generation: generation) else { return }
+                handleSwipe(value: value)
+            }
         ))
         .onContinuousHover(coordinateSpace: .local) { phase in
+            guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
             handleSurfaceHover(phase: phase)
         }
         .onTapGesture {
+            guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
             handleSurfaceTap()
         }
         .gesture(
             LongPressGesture(minimumDuration: 0.5)
                 .onEnded { _ in
+                    guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
                     AppDelegate.showSettingsWindow(
                         initialPane: contentMode == .windowEnhancementShell
                             ? .windowEnhancement
@@ -161,14 +182,17 @@ struct IslandContainerView: View {
                 }
         )
         .onDrop(of: ShelfStore.acceptedDropTypes, isTargeted: $isShelfDropTargeted) { providers in
-            guard contentMode == .production, appState.shelfEnabled else { return false }
+            guard contentMode == .production, appState.shelfEnabled,
+                  appState.canHandleIslandInput(generation: inputGeneration) else { return false }
             return ShelfStore.shared.handleDrop(providers: providers) { addedCount in
-                guard addedCount > 0 else { return }
+                guard addedCount > 0,
+                      appState.canHandleIslandInput(generation: inputGeneration) else { return }
                 shelfDragEndWorkItem?.cancel()
                 shelfDragEndWorkItem = nil
                 appState.presentShelfAfterDrop()
             }
         }
+        .allowsHitTesting(!appState.isZilanInteractionSuppressed)
         .animation(islandSurfaceAnimation, value: appState.activeModule)
         .animation(windowEnhancementFeedbackAnimation, value: windowEnhancementFeedback?.id)
     }
@@ -411,6 +435,7 @@ struct IslandContainerView: View {
     // MARK: - Gestures
 
     private func handleSwipe(value: DragGesture.Value) {
+        guard !appState.isZilanInteractionSuppressed else { return }
         let horizontal = value.translation.width
         let vertical = value.translation.height
         let velocity = sqrt(pow(value.velocity.width, 2) + pow(value.velocity.height, 2))
@@ -433,6 +458,7 @@ struct IslandContainerView: View {
     }
 
     private func handleHorizontalSwipe(_ direction: SwipeDirection) {
+        guard !appState.isZilanInteractionSuppressed else { return }
         if appState.currentState == .expanded && appState.activeBuiltInModule == .nowPlaying {
             NowPlayingManager.shared.skipTrack(forward: direction == .left)
         } else {
@@ -441,6 +467,7 @@ struct IslandContainerView: View {
     }
 
     private func handleSurfaceTap() {
+        guard !appState.isZilanInteractionSuppressed else { return }
         if contentMode == .windowEnhancementShell {
             AppDelegate.showSettingsWindow(initialPane: .windowEnhancement)
             return
@@ -480,7 +507,8 @@ struct IslandContainerView: View {
     // MARK: - Shelf Drop
 
     private func handleShelfDropTargetChange(_ isTargeted: Bool) {
-        guard contentMode == .production, appState.shelfEnabled else { return }
+        guard contentMode == .production, appState.shelfEnabled,
+              !appState.isZilanInteractionSuppressed else { return }
 
         if isTargeted {
             shelfDragEndWorkItem?.cancel()
@@ -489,8 +517,10 @@ struct IslandContainerView: View {
             return
         }
 
+        let inputGeneration = appState.islandInputGeneration
         let workItem = DispatchWorkItem {
-            guard !isShelfDropTargeted else { return }
+            guard !isShelfDropTargeted,
+                  appState.canHandleIslandInput(generation: inputGeneration) else { return }
             appState.endShelfDragPresentation()
             shelfDragEndWorkItem = nil
         }
@@ -529,7 +559,9 @@ struct IslandContainerView: View {
     }
 
     private func moduleCycleButton(systemName: String, forward: Bool) -> some View {
-        Button {
+        let inputGeneration = appState.islandInputGeneration
+        return Button {
+            guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
             appState.cycleModule(forward: forward)
         } label: {
             Image(systemName: systemName)
@@ -550,6 +582,7 @@ struct IslandContainerView: View {
         .buttonStyle(.plain)
         .hoverPointer()
         .onHover { hovering in
+            guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
             setCycleButtonHover(hovering, forward: forward)
         }
         .help(forward ? "Next module" : "Previous module")
@@ -609,8 +642,10 @@ struct IslandContainerView: View {
 private struct IslandSurfaceSwipeModifier: ViewModifier {
     let enabled: Bool
     let isCompact: Bool
+    let inputGeneration: UInt64
     let onTrackpad: (SwipeDirection) -> Void
-    let onDragEnded: (DragGesture.Value) -> Void
+    let onDragEnded: (DragGesture.Value, UInt64) -> Void
+    @State private var dragInputGeneration: UInt64?
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -622,8 +657,15 @@ private struct IslandSurfaceSwipeModifier: ViewModifier {
                 }
                 .gesture(
                     DragGesture(minimumDistance: 8)
+                        .onChanged { _ in
+                            if dragInputGeneration == nil {
+                                dragInputGeneration = inputGeneration
+                            }
+                        }
                         .onEnded { value in
-                            onDragEnded(value)
+                            let generation = dragInputGeneration ?? inputGeneration
+                            dragInputGeneration = nil
+                            onDragEnded(value, generation)
                         }
                 )
         } else {

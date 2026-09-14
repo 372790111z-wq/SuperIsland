@@ -1044,6 +1044,136 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         XCTAssertFalse(tracker.isCurrent(work2Capture, for: main))
     }
 
+    func testValidatedCacheReadsDoNotRenewOriginalCaptureDeadline() {
+        let generation = WindowThumbnailCaptureGenerationTracker().snapshot(for: "zcode|start|551")
+        let entry = cachedThumbnailMetadata(generation: generation)
+
+        XCTAssertTrue(canReadCachedThumbnail(entry, expected: generation, current: generation, age: 0))
+        XCTAssertTrue(canReadCachedThumbnail(entry, expected: generation, current: generation, age: 59.9))
+        XCTAssertFalse(canReadCachedThumbnail(entry, expected: generation, current: generation, age: 60))
+        XCTAssertFalse(canReadCachedThumbnail(entry, expected: generation, current: generation, age: 61))
+        XCTAssertEqual(entry.capturedAt, Date(timeIntervalSinceReferenceDate: 100))
+    }
+
+    func testValidatedCacheCannotUseMissingZeroOrDifferentWindowIDAsAlias() {
+        let generation = WindowThumbnailCaptureGenerationTracker().snapshot(for: "zcode|start|551")
+        let entry = cachedThumbnailMetadata(generation: generation)
+
+        // Matching title and geometry cannot turn a missing/different exact ID
+        // into the old window, even when the cached pixels are still recent.
+        let windowIDs: [CGWindowID?] = [nil, 0, 132]
+        for windowID in windowIDs {
+            let request = WindowThumbnailRequest(
+                title: "Document", occurrence: 0, bounds: rect(), windowID: windowID
+            )
+            XCTAssertFalse(canReadCachedThumbnail(
+                entry, expected: generation, current: generation, windowID: request.windowID
+            ))
+        }
+        XCTAssertTrue(canReadCachedThumbnail(entry, expected: generation, current: generation))
+    }
+
+    func testValidatedCacheRejectsOtherPIDAndReusedPIDLifetime() {
+        let generations = WindowThumbnailCaptureGenerationTracker()
+        let old = generations.snapshot(for: "zcode|old|551")
+        let replacement = generations.snapshot(for: "zcode|new|551")
+        let entry = cachedThumbnailMetadata(generation: old)
+
+        XCTAssertFalse(canReadCachedThumbnail(entry, expected: old, current: old, pid: 552))
+        XCTAssertFalse(canReadCachedThumbnail(entry, expected: old, current: old, pid: 0))
+        XCTAssertFalse(canReadCachedThumbnail(entry, expected: replacement, current: replacement))
+        XCTAssertFalse(canReadCachedThumbnail(entry, expected: old, current: replacement))
+    }
+
+    func testValidatedCacheRequiresBothRequestAndEntryCaptureEpochToBeCurrent() {
+        var generations = WindowThumbnailCaptureGenerationTracker()
+        let lifetime = "zcode|start|551"
+        let old = generations.snapshot(for: lifetime)
+        generations.invalidate(processLifetimeKey: lifetime)
+        let current = generations.snapshot(for: lifetime)
+
+        XCTAssertFalse(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: old), expected: current, current: current
+        ))
+        XCTAssertFalse(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: current), expected: old, current: current
+        ))
+        XCTAssertTrue(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: current), expected: current, current: current
+        ))
+    }
+
+    func testValidatedCacheRejectsOldGlobalPrivacyEpochEvenWhenProcessEpochMatches() {
+        var generations = WindowThumbnailCaptureGenerationTracker()
+        let lifetime = "zcode|start|551"
+        let old = generations.snapshot(for: lifetime)
+        generations.invalidateAll()
+        let current = generations.snapshot(for: lifetime)
+        XCTAssertEqual(old.processEpoch, current.processEpoch)
+
+        XCTAssertFalse(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: old), expected: current, current: current
+        ))
+        XCTAssertFalse(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: old), expected: old, current: current
+        ))
+    }
+
+    func testValidatedCacheRetirementVetoSurvivesNewTokenAndReestablishmentRejectsOldPixels() {
+        var generations = WindowThumbnailCaptureGenerationTracker()
+        var retirements = WindowPreviewDiscoveryRetirementHistory()
+        let lifetime = "zcode|start|551"
+        let original = cachedThumbnailMetadata(generation: generations.snapshot(for: lifetime))
+        retirements.retire(windowIDs: [131], processIdentifier: 551, processLifetimeKey: lifetime)
+        generations.invalidate(processLifetimeKey: lifetime)
+        let retiredGeneration = generations.snapshot(for: lifetime)
+        let permitsRetired = retirements.allowsDiscovery(
+            windowID: 131, processIdentifier: 551, processLifetimeKey: lifetime
+        )
+        XCTAssertFalse(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: retiredGeneration),
+            expected: retiredGeneration, current: retiredGeneration, allowsDiscovery: permitsRetired
+        ))
+
+        XCTAssertTrue(retirements.reestablish(
+            windowID: 131, processIdentifier: 551, processLifetimeKey: lifetime
+        ))
+        generations.invalidate(processLifetimeKey: lifetime)
+        let reestablished = generations.snapshot(for: lifetime)
+        let permitsReestablished = retirements.allowsDiscovery(
+            windowID: 131, processIdentifier: 551, processLifetimeKey: lifetime
+        )
+        XCTAssertTrue(permitsReestablished)
+        XCTAssertFalse(canReadCachedThumbnail(
+            original, expected: reestablished, current: reestablished,
+            allowsDiscovery: permitsReestablished
+        ))
+        XCTAssertTrue(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: reestablished),
+            expected: reestablished, current: reestablished, allowsDiscovery: permitsReestablished
+        ))
+    }
+
+    func testValidatedCachePreservesUnrelatedProcessEntryAfterRetirement() {
+        var generations = WindowThumbnailCaptureGenerationTracker()
+        let lifetime = "zcode|start|551"
+        let generation = generations.snapshot(for: lifetime)
+        generations.invalidate(processLifetimeKey: "wechat|start|552")
+
+        XCTAssertTrue(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: generation),
+            expected: generation, current: generations.snapshot(for: lifetime)
+        ))
+    }
+
+    func testValidatedCacheRejectsFutureCaptureDateAfterClockMovesBackwards() {
+        let generation = WindowThumbnailCaptureGenerationTracker().snapshot(for: "zcode|start|551")
+        XCTAssertFalse(canReadCachedThumbnail(
+            cachedThumbnailMetadata(generation: generation),
+            expected: generation, current: generation, age: -1
+        ))
+    }
+
     func testRetiredExactWindowCannotReenterThroughFreshPreviewOnlyDiscovery() {
         let history = WindowInventoryBindingHistory()
         var exclusions = WindowPreviewDiscoveryRetirementHistory()
@@ -1530,6 +1660,38 @@ final class WindowInventoryReconcilerTests: XCTestCase {
             capturedAt: Date(),
             mode: mode,
             surfaces: surfaces
+        )
+    }
+
+    private func cachedThumbnailMetadata(
+        generation: WindowThumbnailCaptureGeneration
+    ) -> WindowThumbnailCacheMetadata {
+        WindowThumbnailCacheMetadata(
+            processIdentifier: 551,
+            windowID: 131,
+            captureGeneration: generation,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 100)
+        )
+    }
+
+    private func canReadCachedThumbnail(
+        _ entry: WindowThumbnailCacheMetadata,
+        expected: WindowThumbnailCaptureGeneration,
+        current: WindowThumbnailCaptureGeneration,
+        windowID: CGWindowID? = 131,
+        pid: pid_t = 551,
+        allowsDiscovery: Bool = true,
+        age: TimeInterval = 1
+    ) -> Bool {
+        WindowThumbnailCachePolicy.canRead(
+            entry: entry,
+            requestedWindowID: windowID,
+            processIdentifier: pid,
+            expectedGeneration: expected,
+            currentGeneration: current,
+            allowsDiscovery: allowsDiscovery,
+            now: entry.capturedAt.addingTimeInterval(age),
+            ttl: WindowThumbnailProvider.recentCacheTTL
         )
     }
 

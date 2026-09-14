@@ -231,7 +231,7 @@ final class AppState: ObservableObject {
     /// is invisible to SwiftUI — the surface stays centered on the notch.
     var didChangeState: ((_ from: IslandState, _ to: IslandState) -> Void)?
 
-    @Published var currentState: IslandState = .compact {
+    @Published private(set) var currentState: IslandState = .compact {
         didSet {
             if oldValue != currentState {
                 didChangeState?(oldValue, currentState)
@@ -252,6 +252,9 @@ final class AppState: ObservableObject {
     }
     @Published private(set) var isAppActive: Bool = true
     @Published private(set) var isShelfDragActive = false
+    @Published private(set) var zilanSuppressionRequestID: String?
+    @Published private(set) var islandInputGeneration: UInt64 = 0
+    var isZilanInteractionSuppressed: Bool { zilanSuppressionRequestID != nil }
     /// Set by IslandWindowController during overshoot animations to prevent
     /// hover-triggered dismiss from firing while the window frame is resizing.
     var suppressDismissScheduling: Bool = false
@@ -320,7 +323,43 @@ final class AppState: ObservableObject {
     private var systemEmojiInteractionExpiry: Date?
     private var presentationHoldModule: ActiveModule?
     private var lastNotchEntryHapticDate: Date = .distantPast
-    private init() {}
+    private var requiresHoverExitAfterZilanSuppression = false
+    private let synchronizesRuntimeEnergyState: Bool
+
+    init(synchronizesRuntimeEnergyState: Bool = true) {
+        self.synchronizesRuntimeEnergyState = synchronizesRuntimeEnergyState
+    }
+
+    /// A lease never dismisses an existing presentation or interrupts input.
+    /// The receiver calls this on MainActor before acknowledging the request.
+    func beginZilanSuppression(_ lease: ZilanSuppressionLease) -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard zilanSuppressionRequestID == nil,
+              lease.expiresAtUptimeNanoseconds > now,
+              lease.expiresAtUptimeNanoseconds - now <= 2_000_000_000,
+              currentState == .compact,
+              !isHovering, !isShelfDragActive, !isSystemEmojiInteractionActive,
+              presentationHoldModule == nil, !suppressDismissScheduling else { return false }
+        cancelHoverActivation()
+        cancelAutoDismiss()
+        cancelFullExpandedDismiss()
+        islandInputGeneration &+= 1
+        zilanSuppressionRequestID = lease.requestID
+        return true
+    }
+
+    func endZilanSuppression(requestID: String, requiresHoverExit: Bool = false) {
+        guard zilanSuppressionRequestID == requestID else { return }
+        cancelHoverActivation()
+        islandInputGeneration &+= 1
+        requiresHoverExitAfterZilanSuppression = requiresHoverExit
+        zilanSuppressionRequestID = nil
+        // No saved hover or delayed gesture is replayed after release.
+    }
+
+    func canHandleIslandInput(generation: UInt64) -> Bool {
+        !isZilanInteractionSuppressed && generation == islandInputGeneration
+    }
 
     // MARK: - Animations
 
@@ -432,6 +471,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshEnergyState() {
+        guard synchronizesRuntimeEnergyState else { return }
         let activity = IslandActivityState(
             islandState: currentState,
             activeModule: activeModule,
@@ -477,6 +517,7 @@ final class AppState: ObservableObject {
     // MARK: - State Transitions
 
     func toggleExpansion() {
+        guard !isZilanInteractionSuppressed else { return }
         switch currentState {
         case .compact:
             open()
@@ -490,6 +531,7 @@ final class AppState: ObservableObject {
     }
 
     func expand() {
+        guard !isZilanInteractionSuppressed else { return }
         guard currentState == .compact else { return }
         withAnimation(notchAnimation) {
             currentState = .expanded
@@ -497,6 +539,7 @@ final class AppState: ObservableObject {
     }
 
     func open() {
+        guard !isZilanInteractionSuppressed else { return }
         guard currentState != .fullExpanded else { return }
 
         prepareFullExpandedPresentation(prefersHome: currentState == .compact)
@@ -509,6 +552,7 @@ final class AppState: ObservableObject {
     }
 
     func fullyExpand() {
+        guard !isZilanInteractionSuppressed else { return }
         prepareFullExpandedPresentation(prefersHome: false)
         withAnimation(notchAnimation) {
             currentState = .fullExpanded
@@ -550,6 +594,14 @@ final class AppState: ObservableObject {
     }
 
     func handleHoverChange(_ hovering: Bool) {
+        guard !isZilanInteractionSuppressed else {
+            cancelHoverActivation()
+            return
+        }
+        if requiresHoverExitAfterZilanSuppression {
+            if !hovering { requiresHoverExitAfterZilanSuppression = false }
+            return
+        }
         let wasHovering = isHovering
         isHovering = hovering
 
@@ -604,6 +656,7 @@ final class AppState: ObservableObject {
     }
 
     func showHUD(module: ActiveModule, autoDismiss: Bool = true, autoDismissDelay: TimeInterval? = nil) {
+        guard !isZilanInteractionSuppressed else { return }
         if case .builtIn(let builtIn) = module, !isModuleEnabled(builtIn) {
             return
         }
@@ -750,14 +803,17 @@ final class AppState: ObservableObject {
     }
 
     private func scheduleHoverActivation(wasHovering: Bool) {
+        guard !isZilanInteractionSuppressed else { return }
         guard !wasHovering else { return }
         guard !isSystemEmojiInteractionActive else { return }
 
         cancelHoverActivation()
 
         let startingState = currentState
+        let inputGeneration = islandInputGeneration
         let workItem = DispatchWorkItem { [weak self] in
-            guard let self, self.isHovering, self.currentState != .fullExpanded else { return }
+            guard let self, self.canHandleIslandInput(generation: inputGeneration),
+                  self.isHovering, self.currentState != .fullExpanded else { return }
 
             if self.shouldHoverExpandNotifications(from: startingState) {
                 self.presentNotificationsFullExpanded()
@@ -852,6 +908,7 @@ final class AppState: ObservableObject {
     // MARK: - Module Cycling
 
     func cycleModule(forward: Bool) {
+        guard !isZilanInteractionSuppressed else { return }
         if currentState == .fullExpanded {
             cycleFullExpandedTab(forward: forward)
             return
@@ -1448,6 +1505,7 @@ final class AppState: ObservableObject {
     }
 
     func presentShelfAfterDrop() {
+        guard !isZilanInteractionSuppressed else { return }
         isShelfDragActive = false
         rememberShelfAsDefault()
         guard shelfEnabled, shelfAutoOpenOnDrop else { return }
@@ -1464,6 +1522,7 @@ final class AppState: ObservableObject {
     }
 
     func beginShelfDragPresentation() {
+        guard !isZilanInteractionSuppressed else { return }
         guard shelfEnabled else { return }
 
         isShelfDragActive = true
@@ -1492,6 +1551,7 @@ final class AppState: ObservableObject {
     }
 
     func presentNotificationsFullExpanded() {
+        guard !isZilanInteractionSuppressed else { return }
         guard notificationsEnabled, NotificationManager.shared.latestNotification != nil else { return }
 
         cancelAutoDismiss()

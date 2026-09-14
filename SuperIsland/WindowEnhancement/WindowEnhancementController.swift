@@ -66,6 +66,20 @@ final class WindowEnhancementController {
         }
     }
 
+    func beginZilanSuppression(requestID: String) -> Bool {
+        ZilanSuppressionAcquisition.acquire([
+            .init(acquire: { self.missionControlMonitor.beginZilanSuppression(requestID: requestID) },
+                  rollback: { self.missionControlMonitor.endZilanSuppression(requestID: requestID) }),
+            .init(acquire: { self.commandTabMonitor.beginZilanSuppression(requestID: requestID) },
+                  rollback: { self.commandTabMonitor.endZilanSuppression(requestID: requestID) }),
+        ])
+    }
+
+    func endZilanSuppression(requestID: String) {
+        commandTabMonitor.endZilanSuppression(requestID: requestID)
+        missionControlMonitor.endZilanSuppression(requestID: requestID)
+    }
+
     func start() {
         preparingForTermination = false
         if activeWindowMutationTask == nil {

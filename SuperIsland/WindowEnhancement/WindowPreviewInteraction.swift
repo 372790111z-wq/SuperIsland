@@ -194,6 +194,16 @@ enum WindowAXOperationProxyPolicy {
     }
 }
 
+@MainActor
+private enum WindowPreviewFrameReporterOwner {
+    private static var lastIssued: UInt64 = 0
+
+    static func issue() -> UInt64 {
+        lastIssued += 1
+        return lastIssued
+    }
+}
+
 /// An AppKit-backed frame reporter for cards drawn by SwiftUI. PreferenceKey
 /// propagation is not a reliable interaction boundary inside a nonactivating
 /// NSPanel: the card can be visible before its preference reaches the model.
@@ -202,15 +212,24 @@ enum WindowAXOperationProxyPolicy {
 @MainActor
 final class WindowPreviewFrameReportingView<Target: Hashable>: NSView {
     private(set) var target: Target
-    private var onChange: (Target, CGRect?) -> Void
+    let frameOwner = WindowPreviewFrameReporterOwner.issue()
+    private var generation: UInt64
+    private var onOwnedChange: (Target, CGRect?, UInt64) -> Void
     private var lastReportedFrame: CGRect?
     private var frameObserver: NSObjectProtocol?
     private var scrollObserver: NSObjectProtocol?
     private var isDetached = false
 
-    init(target: Target, onChange: @escaping (Target, CGRect?) -> Void) {
+    convenience init(target: Target, generation: UInt64 = 0, onChange: @escaping (Target, CGRect?) -> Void) {
+        self.init(target: target, generation: generation, onOwnedChange: { target, frame, _ in
+            onChange(target, frame)
+        })
+    }
+
+    init(target: Target, generation: UInt64 = 0, onOwnedChange: @escaping (Target, CGRect?, UInt64) -> Void) {
         self.target = target
-        self.onChange = onChange
+        self.generation = generation
+        self.onOwnedChange = onOwnedChange
         super.init(frame: .zero)
         postsFrameChangedNotifications = true
         frameObserver = NotificationCenter.default.addObserver(
@@ -232,20 +251,32 @@ final class WindowPreviewFrameReportingView<Target: Hashable>: NSView {
         if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
     }
 
-    func update(target: Target, onChange: @escaping (Target, CGRect?) -> Void) {
+    func update(target: Target, generation: UInt64 = 0, onChange: @escaping (Target, CGRect?) -> Void) {
+        update(target: target, generation: generation, onOwnedChange: { target, frame, _ in
+            onChange(target, frame)
+        })
+    }
+
+    func update(target: Target, generation: UInt64 = 0, onOwnedChange: @escaping (Target, CGRect?, UInt64) -> Void) {
         isDetached = false
         if self.target != target {
-            self.onChange(self.target, nil)
+            self.onOwnedChange(self.target, nil, frameOwner)
+        }
+        // The owner can invalidate its hit-test table while SwiftUI retains
+        // this view at the same target and rectangle. A new generation needs
+        // a fresh report even when AppKit has no geometry change to announce.
+        if self.target != target || self.generation != generation {
             lastReportedFrame = nil
         }
         self.target = target
-        self.onChange = onChange
+        self.generation = generation
+        self.onOwnedChange = onOwnedChange
         scheduleReport()
     }
 
     func detach() {
         isDetached = true
-        onChange(target, nil)
+        onOwnedChange(target, nil, frameOwner)
         lastReportedFrame = nil
         stopObservingScroll()
     }
@@ -296,7 +327,7 @@ final class WindowPreviewFrameReportingView<Target: Hashable>: NSView {
               bounds.height > 0 else {
             if lastReportedFrame != nil {
                 lastReportedFrame = nil
-                onChange(target, nil)
+                onOwnedChange(target, nil, frameOwner)
             }
             return
         }
@@ -317,23 +348,36 @@ final class WindowPreviewFrameReportingView<Target: Hashable>: NSView {
               reported.height > 0,
               reported != lastReportedFrame else { return }
         lastReportedFrame = reported
-        onChange(target, reported)
+        onOwnedChange(target, reported, frameOwner)
     }
 }
 
 struct WindowPreviewFrameReporter<Target: Hashable>: NSViewRepresentable {
     let target: Target
-    let onChange: (Target, CGRect?) -> Void
+    var generation: UInt64 = 0
+    private let onOwnedChange: (Target, CGRect?, UInt64) -> Void
+
+    init(target: Target, generation: UInt64 = 0, onChange: @escaping (Target, CGRect?) -> Void) {
+        self.init(target: target, generation: generation, onOwnedChange: { target, frame, _ in
+            onChange(target, frame)
+        })
+    }
+
+    init(target: Target, generation: UInt64 = 0, onOwnedChange: @escaping (Target, CGRect?, UInt64) -> Void) {
+        self.target = target
+        self.generation = generation
+        self.onOwnedChange = onOwnedChange
+    }
 
     func makeNSView(context: Context) -> WindowPreviewFrameReportingView<Target> {
-        WindowPreviewFrameReportingView(target: target, onChange: onChange)
+        WindowPreviewFrameReportingView(target: target, generation: generation, onOwnedChange: onOwnedChange)
     }
 
     func updateNSView(
         _ nsView: WindowPreviewFrameReportingView<Target>,
         context: Context
     ) {
-        nsView.update(target: target, onChange: onChange)
+        nsView.update(target: target, generation: generation, onOwnedChange: onOwnedChange)
     }
 
     static func dismantleNSView(
