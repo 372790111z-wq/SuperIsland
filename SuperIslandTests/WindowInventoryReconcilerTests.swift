@@ -129,6 +129,118 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         ))
     }
 
+    func testDocumentKeepsExactOperationAcrossStandardMinimizedDialogAndRestore() throws {
+        let stages = [
+            (subrole: kAXStandardWindowSubrole as String, minimized: false),
+            (subrole: kAXDialogSubrole as String, minimized: true),
+            (subrole: kAXStandardWindowSubrole as String, minimized: false)
+        ]
+        for stage in stages {
+            let included = WindowAXCandidatePolicy.shouldInclude(
+                role: kAXWindowRole as String, subrole: stage.subrole,
+                isModal: false, title: "Document", isMinimized: stage.minimized,
+                isPreferredWindow: false, isHidden: nil, isVisible: nil,
+                hasDocument: true
+            )
+            XCTAssertTrue(included)
+            let result = resolve(
+                included ? [candidate(token: 7, id: 10, minimized: stage.minimized)] : [],
+                [surface(id: 10, onScreen: !stage.minimized)],
+                retainedWindowIDs: [10]
+            )
+            XCTAssertEqual(result.windows.count, 1)
+            let window = try XCTUnwrap(result.windows.first)
+            XCTAssertEqual(window.surface.windowID, 10)
+            XCTAssertEqual(window.operationToken, 7)
+            XCTAssertEqual(window.confidence, .exactWindowServerID)
+            XCTAssertTrue(result.rejections.isEmpty)
+        }
+    }
+
+    func testMinimizedDocumentDialogExceptionRejectsMissingOrConflictingEvidence() {
+        let cases: [(name: String, role: String, subrole: String, minimized: Bool,
+                     modal: Bool?, document: Bool, hidden: Bool?)] = [
+            ("noDocument", "AXWindow", "AXDialog", true, false, false, nil),
+            ("unknownModal", "AXWindow", "AXDialog", true, nil, true, nil),
+            ("modal", "AXWindow", "AXDialog", true, true, true, nil),
+            ("hidden", "AXWindow", "AXDialog", true, false, true, true),
+            ("notMinimized", "AXWindow", "AXDialog", false, false, true, nil),
+            ("notWindow", "AXGroup", "AXDialog", true, false, true, nil),
+            ("otherSubrole", "AXWindow", "AXFloatingWindow", true, false, true, nil)
+        ]
+        for value in cases {
+            XCTAssertFalse(WindowAXCandidatePolicy.shouldInclude(
+                role: value.role, subrole: value.subrole, isModal: value.modal,
+                title: "Document", isMinimized: value.minimized,
+                isPreferredWindow: true, isHidden: value.hidden, isVisible: true,
+                hasDocument: value.document
+            ), value.name)
+        }
+    }
+
+    func testStandardWindowPolicyRemainsIndependentOfDocumentEvidence() {
+        let cases: [(minimized: Bool, modal: Bool?, hidden: Bool?, visible: Bool?, expected: Bool)] = [
+            (false, nil, nil, true, true),
+            (true, nil, nil, false, true),
+            (false, false, nil, false, false),
+            (true, false, true, nil, false),
+            (false, true, nil, true, false)
+        ]
+        for value in cases {
+            for hasDocument in [false, true] {
+                XCTAssertEqual(WindowAXCandidatePolicy.shouldInclude(
+                    role: kAXWindowRole as String, subrole: kAXStandardWindowSubrole as String,
+                    isModal: value.modal, title: "", isMinimized: value.minimized,
+                    isPreferredWindow: false, isHidden: value.hidden, isVisible: value.visible,
+                    hasDocument: hasDocument
+                ), value.expected)
+            }
+        }
+    }
+
+    func testAdmittedMinimizedDialogCannotGetOperationsByFuzzyOrWrongWindowID() throws {
+        let windowIDs: [CGWindowID?] = [nil, 11]
+        for id in windowIDs {
+            let admitted = try XCTUnwrap(admittedMinimizedDocumentDialog(id: id))
+            let result = resolve(
+                [admitted], [surface(id: 10, onScreen: false)], retainedWindowIDs: [10]
+            )
+            // A retained surface can still be displayed, but identical title
+            // and bounds must never attach the rejected dialog's operations.
+            XCTAssertEqual(result.windows.count, 1)
+            XCTAssertEqual(result.windows.first?.surface.windowID, 10)
+            XCTAssertNil(result.windows.first?.operationToken)
+            XCTAssertEqual(result.windows.first?.confidence, .privateWindowServerEvidence)
+            XCTAssertEqual(result.rejections.first?.reason, id == nil ? .noUniqueSurface : .exactWindowMissing)
+        }
+    }
+
+    func testDocumentDialogExceptionCannotBypassOwnerOrPrivateInventoryChecks() throws {
+        let admitted = try XCTUnwrap(admittedMinimizedDocumentDialog(id: 10))
+        let cases: [(name: String, surface: WindowServerSurface, mode: WindowServerInventoryMode)] = [
+            ("wrongOwner", surface(id: 10, pid: 99, onScreen: false), .skyLight),
+            ("unvalidatedOwner", surface(id: 10, onScreen: false, ownerValidated: false), .skyLight),
+            ("publicFallback", surface(id: 10, onScreen: true, source: .publicWindowList), .publicFallback)
+        ]
+        for value in cases {
+            let result = resolve([admitted], [value.surface], mode: value.mode)
+            XCTAssertTrue(result.windows.isEmpty, value.name)
+            XCTAssertEqual(result.rejections.first?.reason, .exactWindowMissing, value.name)
+        }
+    }
+
+    func testMinimizedDialogWithoutDocumentCannotBorrowRetainedOperations() {
+        let admitted = admittedMinimizedDocumentDialog(id: 10, hasDocument: false)
+        XCTAssertNil(admitted)
+        let result = resolve(
+            admitted.map { [$0] } ?? [],
+            [surface(id: 10, onScreen: false)], retainedWindowIDs: [10]
+        )
+        XCTAssertEqual(result.windows.count, 1)
+        XCTAssertNil(result.windows.first?.operationToken)
+        XCTAssertEqual(result.windows.first?.confidence, .privateWindowServerEvidence)
+    }
+
     func testDockGuardTimerRunsOnlyForCommittedActiveRequest() {
         XCTAssertTrue(DockDisplayLockActivityPolicy.shouldRunGuardTimer(
             started: true,
@@ -1627,6 +1739,18 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         XCTAssertEqual(result.matches.count, 1, file: file, line: line)
         XCTAssertEqual(result.matches.first?.windowID, surface.windowID, file: file, line: line)
         XCTAssertTrue(result.rejections.isEmpty, file: file, line: line)
+    }
+
+    private func admittedMinimizedDocumentDialog(
+        id: CGWindowID?, hasDocument: Bool = true
+    ) -> WindowInventoryCandidate? {
+        guard WindowAXCandidatePolicy.shouldInclude(
+            role: kAXWindowRole as String, subrole: kAXDialogSubrole as String,
+            isModal: false, title: "Document", isMinimized: true,
+            isPreferredWindow: false, isHidden: nil, isVisible: nil,
+            hasDocument: hasDocument
+        ) else { return nil }
+        return candidate(id: id, minimized: true)
     }
 
     private func reconcile(

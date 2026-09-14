@@ -1,3 +1,23 @@
+## 2026-09-14 — tested fullscreen cross-desktop return passes
+
+The user accepts same TextEdit A fullscreen preview, click return and native strip dismissal on145456. Exact commit/focus, one actionable image card and retained fullscreen status corroborate it. This closes the single-window fullscreen scenario, not all Spaces/displays/apps or deferred primary-WeChat capture. Temporary A is closed and source test files are preserved. See cmdtab-fullscreen-validation/native-acceptance.json; earlier pending-retest notes are historical.
+
+## 2026-09-14 — minimized TextEdit scenario now passes
+
+145456 is installed and the user confirms thumbnail, exact window restore and native strip disappearance. Same15569/45691 post-state is restored/onscreen; commit logs verify exact focus. The scoped minimized-document blocker is closed. Fullscreen/other Spaces and broader app/WeChat capture coverage remain separate, not covered by this result. See native-acceptance.json.
+
+## 2026-09-14 — 145456 installation complete; awaiting same-window result
+
+The authorized candidate is installed as WE1 PID61954, signature/manifest/startup permissions verified. The same TextEdit test A (15569/45691) remains minimized. User retest is pending for real thumbnail, exact restoration and native Cmd-Tab dismissal. Do not repeat installation approval or claim success from266 tests/settings alone. Actual114254 recovery is preserved in the named Trash backup; see installation-state.json. Earlier candidate-not-installed entries below are historical.
+
+## 2026-09-14 — minimized document candidate awaits installation and native retest
+
+User sees a card but no image for minimized TextEdit A. The installed114254 prefilter discards its AXDialog/nonmodal/minimized document object, leaving an unoperable retained card. Candidate20260914145456 narrowly restores document admission;266 tests/build/Analyze/signature pass, but it is not installed and its real thumbnail/restore behavior is unverified. Same exact15569 target is available for retest; do not treat SCK enumeration or unit tests as pixel acceptance. Current114254 and checkpoint recovery remain intact. Primary-WeChat capture and broader application/fullscreen/Space cases remain separate.
+
+## 2026-09-14 — disposable TextEdit close flow passes; window-state coverage open
+
+User confirms both tested close controls, the remaining window, and clean Cmd-Tab reentry. Exact post-state confirms both disposable document windows are gone while TextEdit stays running; source files are unchanged. This closes the saved TextEdit A/B close scenario, not every application, unsaved dialog, minimized/fullscreen/Space case, or deferred WeChat capture. Current installed build remains 20260914114254; checkpoint 69cc592 and recovery archive are preserved. Next: one exact saved test window minimized, previewed, and restored.
+
 ## 2026-09-14 — tested native click and session cleanup now pass
 
 User accepted installed20260914114254 card switching, system icon-strip disappearance and hover after reentry. These specific blockers are closed. Broader app/window-state/close and separately deferred capture scenarios are not covered by this confirmation. No further installation approval is needed for this already installed version. See native-acceptance.json; earlier pending-retest notes below are historical.

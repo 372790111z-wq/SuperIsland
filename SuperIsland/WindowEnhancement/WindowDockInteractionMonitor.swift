@@ -1651,6 +1651,11 @@ final class WindowDockInteractionMonitor {
             let isModal = boolAttribute("AXModal", of: window)
             let isHidden = boolAttribute(kAXHiddenAttribute, of: window)
             let isVisible = boolAttribute("AXVisible", of: window)
+            let hasMinimizedDocument = isMinimized
+                && subrole == kAXDialogSubrole as String
+                && isModal == false
+                && isHidden != true
+                && WindowPreviewCaptureEvidence.hasDocument(of: window)
             let shouldInclude = WindowAXCandidatePolicy.shouldInclude(
                 role: role,
                 subrole: subrole,
@@ -1659,7 +1664,8 @@ final class WindowDockInteractionMonitor {
                 isMinimized: isMinimized,
                 isPreferredWindow: isPreferredWindow,
                 isHidden: isHidden,
-                isVisible: isVisible
+                isVisible: isVisible,
+                hasDocument: hasMinimizedDocument
             )
             let diagnosticWindowID = diagnosticsEnabled ? windowIDAttribute(window) : nil
             let diagnosticBounds = diagnosticsEnabled ? elementBounds(window) : nil
@@ -1702,7 +1708,8 @@ final class WindowDockInteractionMonitor {
                 isMinimized: isMinimized,
                 isPreferredWindow: isPreferredWindow,
                 canClose: elementAttribute(kAXCloseButtonAttribute, of: window) != nil,
-                allowsUniformContent: WindowPreviewCaptureEvidence.allowsUniformContent(of: window)
+                allowsUniformContent: hasMinimizedDocument
+                    || WindowPreviewCaptureEvidence.allowsUniformContent(of: window)
             ))
         }
 

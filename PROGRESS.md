@@ -1,3 +1,37 @@
+## 2026-09-14 — fullscreen TextEdit cross-desktop return accepted; temporary test closed
+
+User replied “可以” to the fullscreen A preview/click-return/native-strip test on145456. The single commit targets the original15569/45691; native visibility becomes absent and exact AX/frontmost focus reassert succeeds. Before click the offscreen canonical target remains bound to Space611 with a real operationToken, and the model has one image-bearing actionable card. A later focused-object readback confirms the same window still has AXFullScreen=true even though AXWindows is empty on the other desktop. No standalone active-Space-ID sample was taken at click time, so desktop arrival also relies on the user's report.
+
+This passes the scoped fullscreen test, alongside the previously accepted minimized-document repair. It does not extend acceptance to every app/Space/display or all reentry previews. The self-created saved A window was then returned to normal mode and closed; its exactID is absent and A/B files remain unchanged. Current145456 and the source branch are preserved, with no further source/install/commit/push change. Evidence: parent .codex-audit/wins/2026-09-14/cmdtab-fullscreen-validation/native-acceptance.json.
+
+## 2026-09-14 — minimized document preview and restore accepted on 145456
+
+User confirmed “三项都正常”: the minimized TextEdit A thumbnail appears, card click restores A, and the native Cmd-Tab strip disappears. Runtime hit records include an image-bearing actionable target, followed by native absence and exact15569/45691 AX/frontmost focus readback. Post-state confirms the same process/lifetime/windowID, AXMinimized=false and WindowServer onscreen=true. The later frontmost app is Codex for the reply, so current frontmost focus is not inferred.
+
+This accepts the single saved TextEdit minimized-document scenario on installed20260914145456, not all apps or fullscreen/Space coverage. Evidence: parent .codex-audit/wins/2026-09-14/cmdtab-minimized-validation/native-acceptance.json. Next is the same disposable document in fullscreen from another desktop; source and installation stay unchanged.
+
+## 2026-09-14 — 20260914145456 installed; minimized document retest pending
+
+Following the user's explicit confirmation, candidate20260914145456 replaced the installed114254 after normal WE1-only exit. The staging/installed129-entry manifest and strict stable signature match the reviewed candidate. Native Recheck shows Accessibility and Screen Recording effective; master/Dock/Cmd-Tab/Mission Control/Command-W remain enabled and settings is closed. New WE1 PID61954 writes build145456 runtime metadata. Both main WeChat processes17311/17755 and Dock570 retain their PIDs.
+
+Actual old114254 is preserved at /Users/muyz/.Trash/SuperIsland-WE1-Debug-pre-20260914145456.app with its complete manifest verified, alongside the prior package/checkpoint copies. TextEdit still owns the exact minimized test A WID15569/PID45691; the user has been asked to verify thumbnail, card restore and native strip disappearance on that same window. This is installation/startup verification, not functional acceptance. Evidence: parent .codex-audit/wins/2026-09-14/cmdtab-minimized-validation/installation-state.json. No additional source, Git commit/push, dependency or permission changes.
+
+## 2026-09-14 — minimized TextEdit document diagnosis; candidate 20260914145456 ready
+
+The user reports a card without a thumbnail for the minimized saved TextEdit A window. Exact PID45691/WID15569 remains alive. In the same installed114254 session, its normal AXStandardWindow becomes nonmodal AXDialog when minimized. The shared AX policy rejects it before reconciliation; the historical WindowServer-retained card has no operationToken, so activation/close and document capture evidence are lost. Read-only metadata confirms AXDocument and controls exist and ScreenCaptureKit enumerates the same exact 656x422 offscreen window. This establishes the admission bug, not successful pixel capture.
+
+Candidate20260914145456 admits only explicitly minimized, nonmodal, nonhidden AXDialog documents with current AXDocument evidence, then retains canonical exact-ID/private-owner validation. Dock and Cmd-Tab use the same rule and document evidence; no-ID minimized fuzzy binding, public fallback, hidden/modal rejection and transparent-pixel filtering remain unchanged. Six new regressions plus the full266 tests, independent Debug build/Analyze,125-source hash stability,129-entry manifest,34 resources and stable signature pass. The tested source payload SHA256 is6471765a12f5ec4b63c4139fe30b25738556767d615b3a53a9eaad0d0809b734; signed binaries are separately hashed in the manifest.
+
+The candidate is not installed. Current114254 remains running and unchanged; its identical package backup is build/WE1-Debug/backups/SuperIsland-WE1-Debug-20260914-145456.app, alongside checkpoint69cc592/full archive. No commit/push, permission or dependency change. Next gate is explicit installation confirmation, then same minimized-window thumbnail, exact restore and native-strip/reentry validation. Evidence: parent .codex-audit/wins/2026-09-14/cmdtab-minimized-validation/.
+
+## 2026-09-14 — local checkpoint saved; disposable Cmd-Tab close test accepted
+
+Installed 20260914114254 is preserved with the full source and app archive. Commit 69cc592 saves the complete reviewed implementation; the next branch is test/we1-cmdtab-close-20260914. No remote push. Recovery inputs and checked manifests are in parent .codex-audit/checkpoints/we1-20260914114254-native-accepted/.
+
+User replied “正常” to the saved TextEdit A/B close test, confirming the tested preview ×, Command-W, remaining-window behavior and clean reentry. Post-close readback found both exact document IDs 15313/15372 absent from full WindowServer inventory, no AX test document, unchanged source files, and the same TextEdit PID/lifetime still running. Exact action order and which close method removed each ID were not independently instrumented; the bounded sampler ended before the gesture. This accepts only this temporary-document scenario. Minimized restore is next, followed by fullscreen/Space coverage; primary-WeChat capture remains deferred.
+
+Evidence: parent .codex-audit/wins/2026-09-14/cmdtab-close-validation/verification-state.json. This acceptance update changes documentation only; existing source, installation and checkpoint stay intact.
+
 ## 2026-09-14 — 20260914114254 native click/dismiss/reentry accepted
 
 User confirmed “能切换”, then “图标条消失，再次悬停也正常”. The tested card activation, native Cmd-Tab strip dismissal and mouse hover after reentry pass on installed20260914114254/PID41649. Runtime records contain validated native-absence readbacks and successful exact AX/frontmost focus readbacks, consistent with that report. Acceptance is scoped to the tested interactions; it does not establish every app/window state, destructive close, or deferred primary-WeChat capture coverage.

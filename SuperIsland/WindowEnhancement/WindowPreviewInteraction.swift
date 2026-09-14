@@ -136,6 +136,17 @@ final class WindowPreviewInteractionPanel: NSPanel {
 /// normal window-control evidence permits a uniform content image; a title,
 /// main/focused flag, or one close dot alone does not prove a document window.
 enum WindowPreviewCaptureEvidence {
+    static func hasDocument(of window: AXUIElement) -> Bool {
+        // Only the minimized-dialog admission path needs this extra read.
+        // Unknown/error values cannot authorize that exception.
+        AXUIElementSetMessagingTimeout(window, 0.075)
+        var document: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window, kAXDocumentAttribute as CFString, &document
+        ) == .success else { return false }
+        return (document as? String)?.isEmpty == false || document is URL
+    }
+
     static func allowsUniformContent(hasDocument: Bool, hasClose: Bool, hasMinimize: Bool, hasZoom: Bool) -> Bool {
         hasDocument || (hasClose && (hasMinimize || hasZoom))
     }
