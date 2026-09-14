@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let lastFmExtensionID = "superisland.lastfm-scrobbler"
     private static let lastFmOAuthStoreKey = "extensions.\(lastFmExtensionID).store.oauth"
     private var islandWindowController: IslandWindowController?
+    private var zilanSuppressionReceiver: ZilanSuppressionReceiver?
     private var onboardingWindowController: OnboardingWindowController?
     private var updateWindowController: UpdateWindowController?
     private var updateCancellable: AnyCancellable?
@@ -113,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !Self.isRunningUnitTests else { return }
+        zilanSuppressionReceiver?.stop()
         WindowEnhancementController.shared.stop()
         if didInitializeNowPlayingManager {
             NowPlayingManager.shared.shutdownExternalProcesses()
@@ -189,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func bootstrapApp() {
         guard !didBootstrapApp else { return }
         didBootstrapApp = true
+        defer { startZilanSuppressionReceiver() }
 
         // The WE1 bundle remains isolated from production analytics, updates,
         // URL handling, and extension subprocesses, but its island must use the
@@ -215,6 +218,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeMenuBarSetting()
         observePowerState()
         initializeManagers()
+    }
+
+    private func startZilanSuppressionReceiver() {
+        guard !Self.isRunningUnitTests, zilanSuppressionReceiver == nil else { return }
+        let receiver = ZilanSuppressionReceiver(acquire: { [weak self] lease in
+            let bundles: Set<String> = ["com.workview.SuperIsland", "com.workview.SuperIsland.WE1Debug"]
+            let processes = NSWorkspace.shared.runningApplications.compactMap { application -> pid_t? in
+                guard let bundle = application.bundleIdentifier, bundles.contains(bundle) else { return nil }
+                return application.processIdentifier
+            }
+            guard let self, let controller = self.islandWindowController,
+                  Self.isSoleZilanSuppressionInstance(processIdentifiers: processes, ownPID: getpid()) else { return false }
+            return ZilanSuppressionAcquisition.acquire([
+                .init(acquire: { AppState.shared.beginZilanSuppression(lease) },
+                      rollback: { AppState.shared.endZilanSuppression(requestID: lease.requestID) }),
+                .init(acquire: { WindowEnhancementController.shared.beginZilanSuppression(requestID: lease.requestID) },
+                      rollback: { WindowEnhancementController.shared.endZilanSuppression(requestID: lease.requestID) }),
+                .init(acquire: { controller.beginZilanSuppression(requestID: lease.requestID) },
+                      rollback: { _ = controller.endZilanSuppression(requestID: lease.requestID) }),
+            ])
+        }, release: { [weak self] requestID in
+            let requiresHoverExit = self?.islandWindowController?.endZilanSuppression(requestID: requestID) ?? false
+            AppState.shared.endZilanSuppression(requestID: requestID, requiresHoverExit: requiresHoverExit)
+            WindowEnhancementController.shared.endZilanSuppression(requestID: requestID)
+        })
+        do {
+            try receiver.start()
+            zilanSuppressionReceiver = receiver
+        } catch {
+            // Receiver failure leaves the normal island unchanged. Zilan's
+            // existing protocol gate will refuse an unprotected menu click.
+            NSLog("Zilan compatibility receiver unavailable: %@", String(describing: error))
+        }
+    }
+
+    static func isSoleZilanSuppressionInstance(processIdentifiers: [pid_t], ownPID: pid_t) -> Bool {
+        ownPID > 0 && processIdentifiers == [ownPID]
     }
 
     private func showOnboardingIfNeeded() {

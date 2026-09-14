@@ -254,12 +254,287 @@ final class WindowPreviewInteractionTests: XCTestCase {
         XCTAssertFalse(panel.isVisible)
     }
 
-    private func cmdItem(_ identities: [WindowPreviewIdentity], selected: Int = 0, canClose: Bool = true) -> CommandTabDisplayItem {
+    private func cmdItem(_ identities: [WindowPreviewIdentity], selected: Int = 0, canClose: Bool = true,
+                         thumbnails: [WindowThumbnailResult?] = []) -> CommandTabDisplayItem {
         CommandTabDisplayItem(id: 0, appName: "Test", icon: nil, isLoading: false,
                               windows: identities.enumerated().map { index, identity in
             CommandTabWindowDisplayItem(id: index, identity: identity, title: "Test", isMinimized: false,
-                                        canClose: canClose, isSelected: index == selected, thumbnailResult: nil)
+                                        canClose: canClose, isSelected: index == selected,
+                                        thumbnailResult: thumbnails.indices.contains(index) ? thumbnails[index] : nil)
         })
+    }
+
+    private func makeCommandTabFrameReporter(
+        model: CommandTabOverlayModel,
+        target: CommandTabPreviewTarget
+    ) -> (NSPanel, WindowPreviewFrameReportingView<CommandTabPreviewTarget>) {
+        // Exercise the real NSView rectangle reporter in a hidden test-owned
+        // panel; no desktop input or application window is touched.
+        let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 240, height: 180),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        let container = NSView(frame: CGRect(x: 0, y: 0, width: 240, height: 180))
+        panel.contentView = container
+        let reporter = addCommandTabFrameReporter(to: panel, model: model, target: target,
+                                                  frame: CGRect(x: 0, y: 80, width: 100, height: 100))
+        return (panel, reporter)
+    }
+
+    private func addCommandTabFrameReporter(
+        to panel: NSPanel,
+        model: CommandTabOverlayModel,
+        target: CommandTabPreviewTarget,
+        frame: CGRect
+    ) -> WindowPreviewFrameReportingView<CommandTabPreviewTarget> {
+        let generation = model.previewFrameGeneration
+        let reporter = WindowPreviewFrameReportingView(target: target, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        reporter.frame = frame
+        panel.contentView!.addSubview(reporter)
+        reporter.layout()
+        return reporter
+    }
+
+    func testRetainedAppKitReporterRestoresHoverAfterOtherWindowRemoved() {
+        let model = CommandTabOverlayModel()
+        let third = WindowPreviewIdentity(processID: 10, windowID: 300)
+        let target = CommandTabPreviewTarget(applicationIndex: 0, windowIndex: 0, identity: a)
+        model.update(items: [cmdItem([a, b, third])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        let (panel, reporter) = makeCommandTabFrameReporter(model: model, target: target)
+        defer { panel.close() }
+        let oldGeneration = model.previewFrameGeneration
+        _ = model.handlePointer(.leftMouseDown, at: closeA)
+        XCTAssertEqual(model.pointerHoveredTarget, target)
+
+        // ForEach keeps the first card at the same identity and rectangle,
+        // although removal of another card invalidates the model's frames.
+        model.update(items: [cmdItem([a, b])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        let generation = model.previewFrameGeneration
+        XCTAssertNotEqual(generation, oldGeneration)
+        _ = model.handlePointer(.mouseMoved, at: closeA)
+        XCTAssertNil(model.pointerHoveredTarget)
+        reporter.update(target: target, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        reporter.layout()
+        _ = model.handlePointer(.mouseMoved, at: closeA)
+        XCTAssertEqual(model.pointerHoveredTarget, target)
+        XCTAssertNil(model.handlePointer(.leftMouseUp, at: closeA), "Old presses must remain invalidated")
+        _ = model.handlePointer(.leftMouseDown, at: closeA)
+        XCTAssertEqual(model.handlePointer(.leftMouseUp, at: closeA), .close(target))
+
+        // A delayed detach from the prior view generation cannot erase the
+        // new frame, even if that generation used the identical window ID.
+        model.setPreviewFrame(nil, for: target, generation: oldGeneration)
+        _ = model.handlePointer(.mouseMoved, at: closeA)
+        XCTAssertEqual(model.pointerHoveredTarget, target)
+    }
+
+    func testRetainedAppKitReporterRestoresFramesAfterLoadingSameWindow() {
+        let model = CommandTabOverlayModel()
+        let target = CommandTabPreviewTarget(applicationIndex: 0, windowIndex: 0, identity: a)
+        model.update(items: [cmdItem([a])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        let (panel, reporter) = makeCommandTabFrameReporter(model: model, target: target)
+        defer { panel.close() }
+        let oldGeneration = model.previewFrameGeneration
+        // Model updates can outpace a view refresh. Retain the actual NSView
+        // while the owner passes through its empty loading presentation.
+        model.update(items: [cmdItem([])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        model.update(items: [cmdItem([a])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        let generation = model.previewFrameGeneration
+        XCTAssertNotEqual(generation, oldGeneration)
+        reporter.update(target: target, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        reporter.layout()
+        _ = model.handlePointer(.mouseMoved, at: bodyA)
+        XCTAssertEqual(model.pointerHoveredTarget, target)
+
+        let fresh = WindowThumbnailResult.fresh(NSImage(size: NSSize(width: 20, height: 20)))
+        _ = model.handlePointer(.leftMouseDown, at: bodyA)
+        model.update(items: [cmdItem([a], thumbnails: [fresh])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        XCTAssertEqual(model.previewFrameGeneration, generation, "Pixels do not invalidate hit geometry")
+        reporter.update(target: target, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        reporter.layout()
+        XCTAssertEqual(model.handlePointer(.leftMouseUp, at: bodyA), .activate(target))
+    }
+
+    func testReplacementReporterPreservesRealWindowHitFrameWhenSharedFallbackArrives() {
+        let model = CommandTabOverlayModel()
+        let target = CommandTabPreviewTarget(applicationIndex: 0, windowIndex: 0, identity: a)
+        let fallbackIdentity = WindowPreviewIdentity(processID: 20, windowID: 200)
+        let fallbackTarget = CommandTabPreviewTarget(applicationIndex: 0, windowIndex: 1, identity: fallbackIdentity)
+        let realItem = cmdItem([a])
+        model.update(items: [realItem], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        let (panel, retiring) = makeCommandTabFrameReporter(model: model, target: target)
+        defer { panel.close() }
+
+        // Appending the other owner's preview changes the single-card SwiftUI
+        // branch to the scrolling branch. Both NSViews can briefly report the
+        // real window under the same current frame generation.
+        let fallback = CommandTabWindowDisplayItem(
+            id: 1, identity: fallbackIdentity, title: "应用预览", isMinimized: false,
+            canClose: false, isSelected: false, thumbnailResult: nil, canActivate: false
+        )
+        model.update(items: [realItem.replacingWindows(realItem.windows + [fallback])],
+                     selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        let generation = model.previewFrameGeneration
+        retiring.update(target: target, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        retiring.layout()
+        let replacement = addCommandTabFrameReporter(
+            to: panel, model: model, target: target,
+            frame: CGRect(x: 0, y: 80, width: 100, height: 100)
+        )
+        let fallbackReporter = addCommandTabFrameReporter(
+            to: panel, model: model, target: fallbackTarget,
+            frame: CGRect(x: 110, y: 80, width: 100, height: 100)
+        )
+        XCTAssertLessThan(retiring.frameOwner, replacement.frameOwner)
+
+        // Force a positive old report; an unchanged rectangle would be
+        // deduplicated and would not exercise the ownership race.
+        retiring.frame = CGRect(x: 0, y: 0, width: 100, height: 100)
+        retiring.layout()
+        XCTAssertNil(model.handlePointer(.leftMouseDown, at: bodyA))
+        retiring.detach()
+        XCTAssertEqual(model.handlePointer(.leftMouseUp, at: bodyA), .activate(target))
+        XCTAssertEqual(model.diagnosticMetadata()["frameCount"], .integer(2))
+        _ = model.handlePointer(.mouseMoved, at: closeA)
+        XCTAssertEqual(model.pointerHoveredTarget, target)
+        _ = model.handlePointer(.leftMouseDown, at: closeA)
+        XCTAssertEqual(model.handlePointer(.leftMouseUp, at: closeA), .close(target))
+        _ = model.handlePointer(.mouseMoved, at: bodyB)
+        XCTAssertEqual(model.pointerHoveredTarget, fallbackTarget)
+        _ = model.handlePointer(.leftMouseDown, at: bodyB)
+        XCTAssertNil(model.handlePointer(.leftMouseUp, at: bodyB))
+        let fallbackClose = CGPoint(x: 122, y: 12)
+        _ = model.handlePointer(.leftMouseDown, at: fallbackClose)
+        XCTAssertNil(model.handlePointer(.leftMouseUp, at: fallbackClose))
+        XCTAssertEqual(model.previewFrameGeneration, generation)
+        XCTAssertEqual(fallbackReporter.window, panel)
+        XCTAssertFalse(panel.isVisible)
+    }
+
+    func testRetiredFrameOwnerCannotResurrectUntilGenerationChanges() {
+        let model = CommandTabOverlayModel()
+        let target = CommandTabPreviewTarget(applicationIndex: 0, windowIndex: 0, identity: a)
+        model.update(items: [cmdItem([a])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        let (panel, older) = makeCommandTabFrameReporter(model: model, target: target)
+        defer { panel.close() }
+        let replacement = addCommandTabFrameReporter(
+            to: panel, model: model, target: target,
+            frame: CGRect(x: 0, y: 80, width: 100, height: 100)
+        )
+        let oldGeneration = model.previewFrameGeneration
+        _ = model.handlePointer(.leftMouseDown, at: bodyA)
+        replacement.detach()
+        XCTAssertNil(model.handlePointer(.leftMouseUp, at: bodyA))
+        XCTAssertEqual(model.diagnosticMetadata()["frameCount"], .integer(0))
+
+        older.frame = CGRect(x: 1, y: 80, width: 100, height: 100)
+        older.layout()
+        _ = model.handlePointer(.mouseMoved, at: bodyA)
+        XCTAssertNil(model.pointerHoveredTarget)
+        XCTAssertEqual(model.diagnosticMetadata()["frameCount"], .integer(0))
+
+        model.clear()
+        model.update(items: [cmdItem([a])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        let generation = model.previewFrameGeneration
+        XCTAssertNotEqual(generation, oldGeneration)
+        older.update(target: target, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        older.layout()
+        // The newer token belongs to an obsolete generation and must not
+        // replace or erase the retained NSView's registration in this one.
+        replacement.update(target: target, generation: oldGeneration, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: oldGeneration, owner: $2)
+        })
+        replacement.frame = CGRect(x: 110, y: 0, width: 100, height: 100)
+        replacement.layout()
+        replacement.detach()
+        _ = model.handlePointer(.mouseMoved, at: bodyA)
+        XCTAssertEqual(model.pointerHoveredTarget, target)
+        _ = model.handlePointer(.leftMouseDown, at: bodyA)
+        XCTAssertEqual(model.handlePointer(.leftMouseUp, at: bodyA), .activate(target))
+        older.detach()
+        XCTAssertEqual(model.diagnosticMetadata()["frameCount"], .integer(0))
+        XCTAssertFalse(panel.isVisible)
+    }
+
+    func testCmdTabPartialCacheThenFreshPreservesOrderAndPendingFirstClick() {
+        let model = CommandTabOverlayModel()
+        let cachedImage = NSImage(size: NSSize(width: 20, height: 20))
+        let freshImage = NSImage(size: NSSize(width: 24, height: 24))
+        let capturedAt = Date().addingTimeInterval(-2)
+        let cached: WindowThumbnailResult = .recentCache(cachedImage, timestamp: capturedAt)
+        let target = CommandTabPreviewTarget(applicationIndex: 0, windowIndex: 1, identity: b)
+        model.update(items: [cmdItem([a, b], thumbnails: [cached, nil])],
+                     selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        model.setPreviewFrames([target: CGRect(x: 110, y: 0, width: 100, height: 100)])
+        XCTAssertEqual(model.selectedItem?.windows.map(\.identity), [a, b])
+        XCTAssertEqual(model.selectedItem?.windows[0].thumbnailResult?.cachedAt, capturedAt)
+        XCTAssertNil(model.selectedItem?.windows[1].thumbnailResult)
+
+        _ = model.handlePointer(.leftMouseDown, at: bodyB)
+        model.update(items: [cmdItem([a, b], thumbnails: [.fresh(freshImage), .fresh(freshImage)])],
+                     selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+
+        XCTAssertEqual(model.selectedItem?.windows.map(\.identity), [a, b])
+        XCTAssertTrue(model.selectedItem?.windows[1].thumbnailResult?.image === freshImage)
+        XCTAssertEqual(model.handlePointer(.leftMouseUp, at: bodyB), .activate(target))
+        XCTAssertNil(model.handlePointer(.leftMouseUp, at: bodyB))
+    }
+
+    func testDockLoadingCacheAndFreshUpdatesPreservePendingClose() {
+        let model = DockWindowPreviewModel()
+        let image = NSImage(size: NSSize(width: 20, height: 20))
+        var closes = 0
+        func row(_ result: WindowThumbnailResult?) -> DockPreviewRow {
+            DockPreviewRow(id: 100, ownerProcessIdentifier: 10, ownerProcessLifetimeKey: "launch-a",
+                           title: "Test", isMinimized: false, canActivate: true, isPreviewOnly: false,
+                           canClose: true, thumbnailResult: result, action: {}, closeAction: { closes += 1 })
+        }
+        model.update(appName: "Test", icon: nil, rows: [row(nil)], canManageWindows: true)
+        model.setPreviewFrames([100: CGRect(x: 0, y: 0, width: 100, height: 100)])
+        model.handlePointer(.leftMouseDown, at: closeA)
+        model.update(appName: "Test", icon: nil,
+                     rows: [row(.recentCache(image, timestamp: Date().addingTimeInterval(-2)))],
+                     canManageWindows: true)
+        model.update(appName: "Test", icon: nil, rows: [row(.fresh(image))], canManageWindows: true)
+        XCTAssertTrue(model.content.rows[0].thumbnailResult?.image === image)
+        model.handlePointer(.leftMouseUp, at: closeA)
+        model.handlePointer(.leftMouseUp, at: closeA)
+        XCTAssertEqual(closes, 1)
+    }
+
+    func testFailedRefreshReplacesCachedPixelsWithoutRemovingRealWindow() {
+        let image = NSImage(size: NSSize(width: 20, height: 20))
+        let cached: WindowThumbnailResult = .recentCache(image, timestamp: Date())
+        let commandTab = CommandTabOverlayModel()
+        commandTab.update(items: [cmdItem([a], thumbnails: [cached])],
+                          selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        commandTab.update(items: [cmdItem([a], thumbnails: [.captureFailed])],
+                          selectedID: 0, previewTileWidth: 100, reduceMotion: true)
+        XCTAssertEqual(commandTab.selectedItem?.windows.map(\.identity), [a])
+        XCTAssertNil(commandTab.selectedItem?.windows[0].thumbnailResult?.image)
+
+        let dock = DockWindowPreviewModel()
+        func row(_ result: WindowThumbnailResult) -> DockPreviewRow {
+            DockPreviewRow(id: 100, ownerProcessIdentifier: 10, ownerProcessLifetimeKey: "launch-a",
+                           title: "Test", isMinimized: false, canActivate: true, isPreviewOnly: false,
+                           canClose: true, thumbnailResult: result, action: {}, closeAction: {})
+        }
+        dock.update(appName: "Test", icon: nil, rows: [row(cached)], canManageWindows: true)
+        dock.update(appName: "Test", icon: nil, rows: [row(.captureFailed)], canManageWindows: true)
+        XCTAssertEqual(dock.content.rows.map(\.id), [100])
+        XCTAssertNil(dock.content.rows[0].thumbnailResult?.image)
+        XCTAssertTrue(dock.content.rows[0].canActivate)
     }
 
     func testCmdTabModelHoverThenPublishedSelectionDoesNotLoseFirstClick() {

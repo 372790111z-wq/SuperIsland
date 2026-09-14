@@ -85,6 +85,14 @@ func windowDirectWindowNumber(
     return numbers.first
 }
 
+private func weChatSharingApplication(_ application: NSRunningApplication) -> WindowCommandTabSharingPolicy.Application {
+    WindowCommandTabSharingPolicy.Application(
+        processID: application.processIdentifier,
+        bundlePath: application.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path,
+        bundleIdentifier: application.bundleIdentifier
+    )
+}
+
 @MainActor
 final class WindowCommandTabMonitor {
     private let preferences = WindowEnhancementPreferences.shared
@@ -95,7 +103,8 @@ final class WindowCommandTabMonitor {
         category: "CmdTabPlus"
     )
     private var eventTap: CFMachPort?
-    private var nativePointerClickCaptured = false
+    private let zilanPointerInteraction: ZilanEventTapInteractionState
+    private var nativePointerClickCaptured: Bool { zilanPointerInteraction.isCapturing }
     private var nativePointerReleaseCleanup: DispatchWorkItem?
     private var runLoopSource: CFRunLoopSource?
     private var eventTapRetryTask: Task<Void, Never>?
@@ -108,13 +117,20 @@ final class WindowCommandTabMonitor {
     private var previewInvalidationObserver: NSObjectProtocol?
     private var windowRetirementObserver: NSObjectProtocol?
     private var thumbnailCaptureTask: Task<Void, Never>?
+    private var sharedPreviewFallbackTask: Task<Void, Never>?
     private var postCloseRefreshTask: Task<Void, Never>?
     private var closeWindowRetryTask: Task<Void, Never>?
     private var selectedApplicationRefreshTask: Task<Void, Never>?
     private var concreteWindowActivationTask: Task<Void, Never>?
+    private var nativeWindowCommit = WindowCommandTabCommitCoordinator()
+    private var nativeWindowCommitTask: Task<Void, Never>?
+    private var nativeSessionReconciliationTask: Task<Void, Never>?
+    private var nativeSessionReconciliationGeneration: UInt64 = 0
+    private var nativeSelectionPending = false
     private var nativeSwitcherSyncTask: Task<Void, Never>?
     private var nativePointerSyncWorkItem: DispatchWorkItem?
     private var nativePointerEventTap: CFMachPort?
+    private var lastPointerDiagnosticTime: TimeInterval = 0
     private var nativePointerRunLoopSource: CFRunLoopSource?
     private var pendingNativePointerLocation: CGPoint?
     private var loggedNativePointerActivity = false
@@ -123,6 +139,7 @@ final class WindowCommandTabMonitor {
     private var previewOnlyWindows: [CommandTabWindowDisplayItem] = []
     private var previewLoading = false
     private var nativeSwitcherAnchorFrame: CGRect?
+    private var nativeCommitContext: NativeProcessSwitcherBridge.CommitContext?
     private var hasExplicitWindowSelection = false
     private var reportedAccessibilityUnavailable = false
     private struct PrewarmJob: Sendable {
@@ -159,8 +176,8 @@ final class WindowCommandTabMonitor {
         case syncNativeSelection(sequenceID: Int)
         case moveWindowSelection(reverse: Bool, sequenceID: Int)
         case selectWindow(index: Int, sequenceID: Int)
-        case commitWindow(applicationIndex: Int, windowIndex: Int, sequenceID: Int)
-        case closeWindow(applicationIndex: Int, windowIndex: Int, sequenceID: Int)
+        case commitWindow(target: WindowActionTarget, sequenceID: Int)
+        case closeWindow(target: WindowActionTarget, sequenceID: Int)
         case closeSelectedWindow(sequenceID: Int)
         case quitSelectedApplication(sequenceID: Int)
         case finish(sequenceID: Int)
@@ -170,8 +187,8 @@ final class WindowCommandTabMonitor {
             case let .syncNativeSelection(sequenceID),
                  let .moveWindowSelection(_, sequenceID),
                  let .selectWindow(_, sequenceID),
-                 let .commitWindow(_, _, sequenceID),
-                 let .closeWindow(_, _, sequenceID),
+                 let .commitWindow(_, sequenceID),
+                 let .closeWindow(_, sequenceID),
                  let .closeSelectedWindow(sequenceID),
                  let .quitSelectedApplication(sequenceID),
                  let .finish(sequenceID):
@@ -192,9 +209,15 @@ final class WindowCommandTabMonitor {
         var allowsUniformContent = false
     }
 
+    private struct WindowActionTarget {
+        let window: WindowCandidate
+        let applicationIdentity: WindowThumbnailApplicationIdentity
+    }
+
     private struct Candidate {
         let applications: [NSRunningApplication]
         let windows: [WindowCandidate]
+        var isSharedWeChat = false
 
         var application: NSRunningApplication {
             applications[0]
@@ -213,6 +236,23 @@ final class WindowCommandTabMonitor {
     private struct ThumbnailCaptureBatch: Sendable {
         let applicationIdentity: WindowThumbnailApplicationIdentity
         let requests: [IndexedThumbnailRequest]
+    }
+
+    init(zilanPointerInteraction: ZilanEventTapInteractionState = ZilanEventTapInteractionState()) {
+        self.zilanPointerInteraction = zilanPointerInteraction
+    }
+
+    func beginZilanSuppression(requestID: String) -> Bool {
+        // Do not split an existing keyboard sequence or its queued completion.
+        // These fields and both callbacks are confined to the main run loop.
+        guard !commandSequenceActive, !isPresenting, queuedEventActions.isEmpty,
+              eventActionDrainTask == nil, nativeSwitcherSyncTask == nil,
+              nativePointerSyncWorkItem == nil, !nativeWindowCommit.isPending else { return false }
+        return zilanPointerInteraction.beginSuppression(requestID: requestID)
+    }
+
+    func endZilanSuppression(requestID: String) {
+        zilanPointerInteraction.endSuppression(requestID: requestID)
     }
 
     func start() {
@@ -410,18 +450,48 @@ final class WindowCommandTabMonitor {
     private func handleEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             logger.warning("Cmd-Tab event tap was disabled by the system (type \(type.rawValue, privacy: .public)); re-enabling")
-            // A disabled tap can miss the physical Command release. Tear down
-            // the transient preview before re-enabling so stale state can
-            // never swallow a later Up/Down/number key in the foreground App.
-            cancel()
             reenableTap()
+            // AX work cannot run inside a disabled tap callback. Stop stale
+            // actions immediately, then reconcile the original native list.
+            abortNativeWindowCommit(reason: "keyboardTapDisabled", reconcile: false)
+            cancelQueuedEventActions()
+            concreteWindowActivationTask?.cancel()
+            concreteWindowActivationTask = nil
+            hasExplicitWindowSelection = false
+            nativeSelectionPending = true
+            overlay.clearPointerSelection()
+            scheduleNativeSessionReconciliation(reason: "keyboardTapDisabled")
             return Unmanaged.passUnretained(event)
+        }
+
+        guard !zilanPointerInteraction.isSuppressed else { return Unmanaged.passUnretained(event) }
+        if event.getIntegerValueField(.eventSourceUserData) == NativeProcessSwitcherBridge.sharedCommitEventMarker {
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .keyDown {
+            cancelNativeSessionReconciliation()
+            abortNativeWindowCommit(reason: "newKeyDown", reconcile: false)
+            concreteWindowActivationTask?.cancel()
+            concreteWindowActivationTask = nil
         }
 
         if type == .keyDown {
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
+            if keyCode != 53, !event.flags.contains(.maskCommand),
+               commandSequenceActive || isPresenting {
+                // A lost Command-up or a failed native dismissal must never
+                // turn the next ordinary arrow/number key into a WE1 action.
+                hasExplicitWindowSelection = false
+                scheduleNativeSessionReconciliation(reason: "keyWithoutCommand")
+                return Unmanaged.passUnretained(event)
+            }
+
             if keyCode == 48, event.flags.contains(.maskCommand) {
+                nativeSelectionPending = true
+                hasExplicitWindowSelection = false
+                concreteWindowActivationTask?.cancel()
+                concreteWindowActivationTask = nil
                 if !commandSequenceActive {
                     logger.debug("Observed a new native Cmd-Tab sequence")
                     commandSequenceActive = true
@@ -429,6 +499,10 @@ final class WindowCommandTabMonitor {
                     loggedNativePointerActivity = false
                     nativeSwitcher.reset()
                     eventSequenceID &+= 1
+                    WindowInteractionDiagnosticRecorder.shared.record(
+                        component: "cmdTab", event: "sequenceStart",
+                        metadata: ["sequence": .integer(Int64(clamping: eventSequenceID))]
+                    )
                     installNativePointerTapIfNeeded()
                 }
                 let sequenceID = eventSequenceID
@@ -465,10 +539,14 @@ final class WindowCommandTabMonitor {
                     enqueueEventAction(.quitSelectedApplication(sequenceID: sequenceID))
                     return nil
                 case 123: // Left arrow
+                    nativeSelectionPending = true
+                    hasExplicitWindowSelection = false
                     let sequenceID = eventSequenceID
                     enqueueEventAction(.syncNativeSelection(sequenceID: sequenceID))
                     return Unmanaged.passUnretained(event)
                 case 124: // Right arrow
+                    nativeSelectionPending = true
+                    hasExplicitWindowSelection = false
                     let sequenceID = eventSequenceID
                     enqueueEventAction(.syncNativeSelection(sequenceID: sequenceID))
                     return Unmanaged.passUnretained(event)
@@ -501,6 +579,9 @@ final class WindowCommandTabMonitor {
         if type == .flagsChanged,
            (commandSequenceActive || isPresenting),
            !event.flags.contains(.maskCommand) {
+            if nativeWindowCommit.markCommandReleased() {
+                return Unmanaged.passUnretained(event)
+            }
             commandSequenceActive = false
             let sequenceID = eventSequenceID
             enqueueEventAction(.finish(sequenceID: sequenceID))
@@ -529,15 +610,20 @@ final class WindowCommandTabMonitor {
             guard action.sequenceID == eventSequenceID else { continue }
             switch action {
             case .syncNativeSelection:
+                hasExplicitWindowSelection = false
                 scheduleNativeSwitcherSync()
             case let .moveWindowSelection(reverse, _):
                 moveWindowSelection(reverse: reverse)
             case let .selectWindow(index, _):
                 selectWindow(index: index)
-            case let .commitWindow(applicationIndex, windowIndex, _):
-                commit(applicationIndex: applicationIndex, windowIndex: windowIndex)
-            case let .closeWindow(applicationIndex, windowIndex, _):
-                closeWindow(applicationIndex: applicationIndex, windowIndex: windowIndex)
+            case let .commitWindow(target, _):
+                if let location = location(of: target) {
+                    commit(applicationIndex: location.application, windowIndex: location.window)
+                }
+            case let .closeWindow(target, _):
+                if let location = location(of: target) {
+                    closeWindow(applicationIndex: location.application, windowIndex: location.window)
+                }
             case .closeSelectedWindow:
                 closeSelectedWindow()
             case .quitSelectedApplication:
@@ -558,8 +644,12 @@ final class WindowCommandTabMonitor {
     }
 
     private func finishCommandSequence() {
+        guard !nativeWindowCommit.isPending else {
+            nativeWindowCommit.markCommandReleased()
+            return
+        }
         let explicitSelection: (Candidate, WindowCandidate)? = {
-            guard !nativePointerClickCaptured,
+            guard !nativePointerClickCaptured, !nativeSelectionPending,
                   hasExplicitWindowSelection,
                   isPresenting,
                   candidates.indices.contains(selectedIndex),
@@ -572,6 +662,10 @@ final class WindowCommandTabMonitor {
                 candidates[selectedIndex].windows[selectedWindowIndex]
             )
         }()
+        if let explicitSelection, explicitSelection.0.isSharedWeChat {
+            commitNativeWindow(candidate: explicitSelection.0, window: explicitSelection.1)
+            return
+        }
         cancel()
         if let explicitSelection {
             focusAfterNativeCommit(
@@ -641,6 +735,13 @@ final class WindowCommandTabMonitor {
             self.logger.debug(
                 "Native Process Switcher preview unavailable; ambiguousSelection=\(sawAmbiguousSelection, privacy: .public)"
             )
+            WindowInteractionDiagnosticRecorder.shared.record(
+                component: "cmdTab", event: "selectionUnavailable",
+                metadata: [
+                    "sequence": .integer(Int64(clamping: sequenceID)),
+                    "ambiguous": .flag(sawAmbiguousSelection)
+                ]
+            )
             self.overlay.hide()
             self.isPresenting = false
             self.candidates.removeAll(keepingCapacity: false)
@@ -663,9 +764,23 @@ final class WindowCommandTabMonitor {
             return
         }
         let processIdentifiers = applications.map(\.processIdentifier).sorted()
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "cmdTab", event: "selectionResolved",
+            metadata: [
+                "sequence": .integer(Int64(clamping: eventSequenceID)),
+                "processCount": .integer(Int64(processIdentifiers.count)),
+                "firstPID": .integer(Int64(processIdentifiers.first ?? 0)),
+                "sharedWeChat": .flag(snapshot.isSharedWeChat),
+                "hasCommitContext": .flag(snapshot.commitContext != nil)
+            ]
+        )
         let didChangeApplication = candidates.first?.processIdentifiers != processIdentifiers
+            || candidates.first?.isSharedWeChat != snapshot.isSharedWeChat
         let nextAnchorFrame = snapshot.selectedItemFrame ?? snapshot.listFrame
         let didChangeAnchor = nativeSwitcherAnchorFrame != nextAnchorFrame
+        if snapshot.isSharedWeChat && didChangeAnchor { hasExplicitWindowSelection = false }
+        nativeCommitContext = snapshot.commitContext
+        nativeSelectionPending = false
         if !didChangeApplication,
            !didChangeAnchor,
            isPresenting {
@@ -674,7 +789,7 @@ final class WindowCommandTabMonitor {
         let windows = didChangeApplication
             ? windowCandidates(for: applications)
             : (candidates.first?.windows ?? windowCandidates(for: applications))
-        candidates = [Candidate(applications: applications, windows: windows)]
+        candidates = [Candidate(applications: applications, windows: windows, isSharedWeChat: snapshot.isSharedWeChat)]
         if didChangeApplication {
             candidateLifecycleRevisions.removeAll()
             recordLifecycleRevisions(for: applications)
@@ -708,7 +823,7 @@ final class WindowCommandTabMonitor {
             // Dock does not update AXSelected/AXFocused when the pointer merely
             // hovers a native Cmd-Tab tile. Query the actual global pointer and
             // hit-test Dock's Process Switcher instead of re-reading the
-            // keyboard selection. This stays coalesced by the existing 45ms
+            // keyboard selection. This stays coalesced by one 20ms
             // work item and does not add polling.
             guard let pointer = self.pendingNativePointerLocation
                     ?? CGEvent(source: nil)?.location else { return }
@@ -718,13 +833,13 @@ final class WindowCommandTabMonitor {
             }
         }
         nativePointerSyncWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.045, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.020, execute: workItem)
     }
 
     /// Observe native switcher pointer movement independently of the custom
     /// preview panel. The tap exists only during a Command sequence (plus a
     /// bounded paired-release drain); only clicks begun in our panel are
-    /// consumed. All native AX hit-testing remains coalesced to 45 ms.
+    /// consumed. All native AX hit-testing remains coalesced to 20 ms.
     private func installNativePointerTapIfNeeded() {
         nativePointerReleaseCleanup?.cancel()
         nativePointerReleaseCleanup = nil
@@ -749,6 +864,9 @@ final class WindowCommandTabMonitor {
         }.first
         guard let tap else {
             logger.error("Native Cmd-Tab pointer event tap could not be installed")
+            WindowInteractionDiagnosticRecorder.shared.record(
+                component: "cmdTab", event: "pointerTapInstall", metadata: ["installed": .flag(false)]
+            )
             return
         }
         nativePointerEventTap = tap
@@ -756,6 +874,9 @@ final class WindowCommandTabMonitor {
         nativePointerRunLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "cmdTab", event: "pointerTapInstall", metadata: ["installed": .flag(true)]
+        )
     }
 
     private static let nativePointerEventCallback: CGEventTapCallBack = {
@@ -771,16 +892,44 @@ final class WindowCommandTabMonitor {
     }
 
     private func handleNativePointerEvent(type: CGEventType, event: CGEvent) -> Bool {
+        if WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: Bundle.main.bundleIdentifier) {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastPointerDiagnosticTime >= 0.5 {
+                lastPointerDiagnosticTime = now
+                WindowInteractionDiagnosticRecorder.shared.record(
+                    component: "cmdTab", event: "pointerTap",
+                    metadata: [
+                        "eventType": .integer(Int64(type.rawValue)),
+                        "sequenceActive": .flag(commandSequenceActive),
+                        "suppressed": .flag(zilanPointerInteraction.isSuppressed),
+                        "insidePanel": .flag(overlay.containsPointer(NSEvent.mouseLocation))
+                    ]
+                )
+            }
+        }
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             overlay.clearPointerSelection()
             if let nativePointerEventTap { CGEvent.tapEnable(tap: nativePointerEventTap, enable: true) }
+            abortNativeWindowCommit(reason: "pointerTapDisabled", reconcile: false)
+            cancelQueuedEventActions()
+            hasExplicitWindowSelection = false
+            scheduleNativeSessionReconciliation(reason: "pointerTapDisabled")
             return false
+        }
+        guard !zilanPointerInteraction.isSuppressed else { return false }
+        if type == .leftMouseDown {
+            cancelNativeSessionReconciliation()
+            abortNativeWindowCommit(reason: "newPointerDown", reconcile: false)
+            if !overlay.containsPointer(NSEvent.mouseLocation), commandSequenceActive || isPresenting {
+                hasExplicitWindowSelection = false
+                scheduleNativeSessionReconciliation(reason: "outsidePointerDown")
+            }
         }
         // Consume both halves only for a click that began in our visible
         // panel. A listen-only release used to race Dock's own selection and
         // dismiss the preview before the specific window action ran.
         if type == .leftMouseUp, nativePointerClickCaptured {
-            nativePointerClickCaptured = false
+            zilanPointerInteraction.endCapture()
             _ = overlay.handleExternalPointer(
                 type: .leftMouseUp,
                 at: NSEvent.mouseLocation,
@@ -794,9 +943,12 @@ final class WindowCommandTabMonitor {
             }
             return true
         }
+        if type == .leftMouseUp, commandSequenceActive || isPresenting {
+            scheduleNativeSessionReconciliation(reason: "outsidePointerUp")
+        }
         guard commandSequenceActive else { return false }
         if type == .leftMouseDown, overlay.containsPointer(NSEvent.mouseLocation) {
-            nativePointerClickCaptured = true
+            guard zilanPointerInteraction.beginCapture() else { return false }
             _ = overlay.handleExternalPointer(type: .leftMouseDown, at: NSEvent.mouseLocation, deferAction: true)
             return true
         }
@@ -840,7 +992,7 @@ final class WindowCommandTabMonitor {
         }
         nativePointerReleaseCleanup?.cancel()
         nativePointerReleaseCleanup = nil
-        nativePointerClickCaptured = false
+        zilanPointerInteraction.endCapture()
         if let nativePointerEventTap {
             CGEvent.tapEnable(tap: nativePointerEventTap, enable: false)
         }
@@ -858,7 +1010,7 @@ final class WindowCommandTabMonitor {
     }
 
     private func moveWindowSelection(reverse: Bool) {
-        guard isPresenting,
+        guard isPresenting, !nativeSelectionPending,
               candidates.indices.contains(selectedIndex),
               !candidates[selectedIndex].windows.isEmpty else { return }
         let windowCount = candidates[selectedIndex].windows.count
@@ -870,7 +1022,7 @@ final class WindowCommandTabMonitor {
     }
 
     private func selectWindow(index: Int) {
-        guard isPresenting,
+        guard isPresenting, !nativeSelectionPending,
               candidates.indices.contains(selectedIndex),
               candidates[selectedIndex].windows.indices.contains(index) else { return }
         overlay.clearPointerSelection()
@@ -879,26 +1031,33 @@ final class WindowCommandTabMonitor {
         presentOverlay(thumbnails: currentThumbnailResults, for: selectedIndex)
     }
 
-    private func renderOverlay() {
+    private func renderOverlay(retryMissingWindows: Bool = true) {
         guard isPresenting, candidates.indices.contains(selectedIndex) else { return }
+        let renderStartedAt = ProcessInfo.processInfo.systemUptime
         selectedApplicationRefreshTask?.cancel()
         selectedApplicationRefreshTask = nil
         thumbnailCaptureTask?.cancel()
         thumbnailCaptureTask = nil
+        sharedPreviewFallbackTask?.cancel()
+        sharedPreviewFallbackTask = nil
         thumbnailCaptureGeneration &+= 1
 
         currentThumbnailResults = []
         previewOnlyWindows = []
         previewLoading = true
-        // Do not render AX placeholders while the WindowServer/ScreenCapture
-        // proof is still pending. A stale helper proxy must never flash as a
-        // real selectable window, even briefly.
-        overlay.hide()
-        // Show one explicit loading state, never fake selectable window cards.
-        // AX-less helpers must not leave Cmd-Tab with no feedback at all.
+        // Updating to an empty loading model clears the previous target's
+        // identities and pointer state without hiding and reopening the panel.
+        // AX-less helpers keep this state until their original discovery path
+        // produces independently validated windows.
         presentOverlay(thumbnails: [], for: selectedIndex)
 
         let selectedWindows = candidates[selectedIndex].windows
+        if candidates[selectedIndex].isSharedWeChat && !selectedWindows.isEmpty {
+            discoverSharedPreviewFallbacks()
+            if retryMissingWindows {
+                scheduleSelectedApplicationWindowRefresh()
+            }
+        }
         guard !selectedWindows.isEmpty else {
             scheduleSelectedApplicationWindowRefresh()
             return
@@ -971,6 +1130,92 @@ final class WindowCommandTabMonitor {
         let captureGeneration = thumbnailCaptureGeneration
         let thumbnailCount = selectedWindows.count
 
+        // Both phases publish against the same request-time identities. A
+        // cache read or screenshot can finish before a lifecycle/privacy change
+        // yet wait for the main actor until after it; recheck every epoch here.
+        let publishThumbnails: @MainActor @Sendable ([WindowThumbnailResult?], Bool) -> Bool = {
+            [weak self] thumbnails, isFinal in
+            guard !Task.isCancelled,
+                  let self,
+                  self.commandSequenceActive,
+                  self.preferences.isEnabled,
+                  self.preferences.cmdTabPlusEnabled,
+                  self.isPresenting,
+                  self.nativeSwitcherAnchorFrame != nil,
+                  self.eventSequenceID == sequenceID,
+                  self.selectedIndex == captureIndex,
+                  self.candidates.indices.contains(captureIndex),
+                  self.thumbnailCaptureGeneration == captureGeneration else { return false }
+            guard self.candidates[captureIndex].processIdentifiers == captureProcessIdentifiers,
+                  self.thumbnailApplicationIdentities(for: self.candidates[captureIndex])
+                    == captureApplicationIdentities,
+                  captureApplicationIdentities.map({
+                WindowAXLifecycleRegistry.shared.revision(for: $0)
+            }) == lifecycleRevisions,
+                  captureApplicationIdentities.allSatisfy({ identity in
+                    identity.matchesCurrentProcess()
+                  }) else {
+                self.cancel()
+                return false
+            }
+            let presentationFailure = WindowThumbnailProvider.presentationFailureResult()
+            let epochsAreCurrent = captureApplicationIdentities.allSatisfy { identity in
+                WindowThumbnailProvider.cacheGenerationSnapshot(for: identity)
+                    == cacheGenerations[identity.processLifetimeKey]
+            }
+            // A provider permission failure purges its cache and advances its
+            // epoch. Preserve that typed final failure so it replaces any
+            // cached pixels; every image still requires the original epoch.
+            guard epochsAreCurrent || presentationFailure != nil else {
+                self.cancel()
+                return false
+            }
+            let now = Date()
+            var publishedThumbnails = thumbnails.map { result -> WindowThumbnailResult? in
+                if case let .some(.recentCache(_, timestamp)) = result,
+                   timestamp.addingTimeInterval(WindowThumbnailProvider.recentCacheTTL) <= now {
+                    return isFinal ? .notEnumerated : nil
+                }
+                return result
+            }
+            if let presentationFailure {
+                // Replace the whole batch, including cache hits from other
+                // processes, under the provider's launch/revocation policy.
+                publishedThumbnails = Array(repeating: presentationFailure, count: thumbnailCount)
+            }
+            if !isFinal, presentationFailure == nil,
+               !publishedThumbnails.contains(where: { $0?.image != nil }) {
+                return true
+            }
+            // These stable candidates already passed AX + WindowServer
+            // reconciliation. Missing cache entries remain loading; neither
+            // cached nor new pixels create action identities or reorder rows.
+            self.selectedWindowIndex = min(
+                self.selectedWindowIndex,
+                max(0, self.candidates[captureIndex].windows.count - 1)
+            )
+            self.currentThumbnailResults = publishedThumbnails
+            self.previewLoading = false
+            self.presentOverlay(thumbnails: publishedThumbnails, for: captureIndex)
+            let elapsedMs = (ProcessInfo.processInfo.systemUptime - renderStartedAt) * 1_000
+            let cachedCount = publishedThumbnails.reduce(into: 0) { count, result in
+                if case .some(.recentCache(_, _)) = result { count += 1 }
+            }
+            let freshCount = publishedThumbnails.reduce(into: 0) { count, result in
+                if case .some(.fresh(_)) = result { count += 1 }
+            }
+            let event = presentationFailure != nil
+                ? "permissionPresented"
+                : isFinal ? "freshPresented" : "cachePresented"
+            // Measures renderOverlay-to-model publication, not key input to
+            // painted pixels. The final phase can also publish typed failures.
+            self.logger.info(
+                "CmdTabPreviewTiming stage=render event=\(event, privacy: .public) elapsedMs=\(elapsedMs, privacy: .public) windows=\(thumbnailCount, privacy: .public) cachedCount=\(cachedCount, privacy: .public) freshCount=\(freshCount, privacy: .public)"
+            )
+            if isFinal || presentationFailure != nil { self.thumbnailCaptureTask = nil }
+            return presentationFailure == nil
+        }
+
         thumbnailCaptureTask = Task.detached(priority: .userInitiated) {
             var thumbnails = [WindowThumbnailResult?](
                 repeating: nil,
@@ -978,6 +1223,24 @@ final class WindowCommandTabMonitor {
             )
             for index in unavailableThumbnailIndexes {
                 thumbnails[index] = .notEnumerated
+            }
+            var cachedThumbnails = thumbnails
+            for batch in batches {
+                guard !Task.isCancelled,
+                      let expectedGeneration = cacheGenerations[batch.applicationIdentity.processLifetimeKey]
+                else { return }
+                let cached = WindowThumbnailProvider.validatedCachedResults(
+                    applicationIdentity: batch.applicationIdentity,
+                    requests: batch.requests.map(\.request),
+                    expectedCacheGeneration: expectedGeneration
+                )
+                for (indexedRequest, result) in zip(batch.requests, cached) {
+                    cachedThumbnails[indexedRequest.index] = result
+                }
+            }
+            if cachedThumbnails.contains(where: { $0?.image != nil }) {
+                let cachedResults = cachedThumbnails
+                guard await publishThumbnails(cachedResults, false) else { return }
             }
             // Multiple processes can legitimately represent the same Dock App
             // identity. Capture one process at a time to keep ScreenCaptureKit
@@ -995,66 +1258,40 @@ final class WindowCommandTabMonitor {
             }
             guard !Task.isCancelled else { return }
             let completedThumbnails = thumbnails
-            await MainActor.run { [weak self] in
-                guard let self,
-                      self.isPresenting,
-                      self.eventSequenceID == sequenceID,
-                      self.selectedIndex == captureIndex,
-                      self.candidates.indices.contains(captureIndex),
-                      self.candidates[captureIndex].processIdentifiers
-                        == captureProcessIdentifiers,
-                      self.thumbnailApplicationIdentities(
-                        for: self.candidates[captureIndex]
-                      ) == captureApplicationIdentities,
-                      self.thumbnailCaptureGeneration == captureGeneration else { return }
-                guard captureApplicationIdentities.map({
-                    WindowAXLifecycleRegistry.shared.revision(for: $0)
-                }) == lifecycleRevisions else {
-                    self.cancel()
-                    return
-                }
-                // These candidates already passed AX + WindowServer/SkyLight
-                // reconciliation. Thumbnail capture is presentation data and
-                // cannot remove a real window merely because its pixels are
-                // unavailable, uniform, or temporarily ambiguous.
-                let validatedWindows = self.candidates[captureIndex].windows
-                let validatedThumbnails = completedThumbnails
-                self.candidates[captureIndex] = Candidate(
-                    applications: self.candidates[captureIndex].applications,
-                    windows: validatedWindows
-                )
-                self.selectedWindowIndex = min(
-                    self.selectedWindowIndex,
-                    max(0, validatedWindows.count - 1)
-                )
-                self.currentThumbnailResults = validatedThumbnails
-                self.previewLoading = false
-                self.presentOverlay(
-                    thumbnails: self.currentThumbnailResults,
-                    for: captureIndex
-                )
-                self.thumbnailCaptureTask = nil
-            }
+            _ = await publishThumbnails(completedThumbnails, true)
         }
     }
 
     /// AXFocusedWindow/AXMainWindow/AXWindows can all be transiently empty
     /// while an App or Space is activating. Refresh only the selected App with
     /// a small bounded retry; never re-enumerate every desktop App or start
-    /// screenshot work until real windows are available.
+    /// screenshot work until real windows are available. A shared selection
+    /// also retries a missing owner while the other owner's cards stay usable.
     private func scheduleSelectedApplicationWindowRefresh() {
         guard isPresenting,
               candidates.indices.contains(selectedIndex) else { return }
         let applicationIndex = selectedIndex
         let candidate = candidates[applicationIndex]
+        let hasExistingWindows = !candidate.windows.isEmpty
+        let missingApplications = candidate.applications.filter { application in
+            !candidate.windows.contains {
+                $0.application.processIdentifier == application.processIdentifier && $0.element != nil
+            }
+        }
+        guard !hasExistingWindows || candidate.isSharedWeChat,
+              !missingApplications.isEmpty else { return }
+        let missingProcessIdentifiers = Set(missingApplications.map(\.processIdentifier))
         let processIdentifiers = candidate.processIdentifiers
         let sequenceID = eventSequenceID
+        let captureGeneration = thumbnailCaptureGeneration
         let applicationIdentities = thumbnailApplicationIdentities(
             for: candidate.applications
         )
         guard applicationIdentities.count == candidate.applications.count else {
-            previewLoading = false
-            presentOverlay(thumbnails: [], for: applicationIndex)
+            if !hasExistingWindows {
+                previewLoading = false
+                presentOverlay(thumbnails: [], for: applicationIndex)
+            }
             return
         }
 
@@ -1069,10 +1306,12 @@ final class WindowCommandTabMonitor {
                       !Task.isCancelled,
                       self.isPresenting,
                       self.eventSequenceID == sequenceID,
+                      self.thumbnailCaptureGeneration == captureGeneration,
                       self.selectedIndex == applicationIndex,
                       self.candidates.indices.contains(applicationIndex),
                       self.candidates[applicationIndex].processIdentifiers
                         == processIdentifiers else { return }
+                if self.nativeSelectionPending { continue }
 
                 let currentApplications = processIdentifiers.compactMap {
                     NSRunningApplication(processIdentifier: $0)
@@ -1082,24 +1321,64 @@ final class WindowCommandTabMonitor {
                         for: currentApplications
                       ) == applicationIdentities else { return }
 
-                let refreshedWindows = self.windowCandidates(for: currentApplications)
-                self.recordLifecycleRevisions(for: currentApplications)
+                let retryApplications = currentApplications.filter {
+                    missingProcessIdentifiers.contains($0.processIdentifier)
+                }
+                for application in retryApplications {
+                    WindowAXLifecycleRegistry.shared.observe(application: application)
+                }
+                let refreshedWindows = self.windowCandidates(for: retryApplications)
+                self.recordLifecycleRevisions(for: retryApplications)
+                guard applicationIdentities.allSatisfy({ $0.matchesCurrentProcess() }) else { return }
                 guard !refreshedWindows.isEmpty else { continue }
+                // A screenshot-only surface is not recovery of an operation
+                // target. Keep its fallback until the true owner's AX returns.
+                let recoveredOwners = Set(refreshedWindows.filter { $0.element != nil }
+                    .map { $0.application.processIdentifier })
+                if hasExistingWindows && recoveredOwners.isEmpty { continue }
+                let currentCandidate = self.candidates[applicationIndex]
+                let previousSelection: WindowActionTarget? = {
+                    guard self.hasExplicitWindowSelection,
+                          currentCandidate.windows.indices.contains(self.selectedWindowIndex) else { return nil }
+                    let window = currentCandidate.windows[self.selectedWindowIndex]
+                    guard let identity = WindowThumbnailApplicationIdentity(application: window.application) else { return nil }
+                    return WindowActionTarget(window: window, applicationIdentity: identity)
+                }()
+                let replacementWindows = hasExistingWindows
+                    ? currentCandidate.windows.filter { !recoveredOwners.contains($0.application.processIdentifier) }
+                        + refreshedWindows.filter { recoveredOwners.contains($0.application.processIdentifier) }
+                    : refreshedWindows
                 self.candidates[applicationIndex] = Candidate(
                     applications: currentApplications,
-                    windows: refreshedWindows
+                    windows: replacementWindows,
+                    isSharedWeChat: candidate.isSharedWeChat
                 )
-                self.selectedWindowIndex = 0
+                let restoredSelection = previousSelection.flatMap { self.location(of: $0) }
+                self.selectedWindowIndex = restoredSelection?.window ?? 0
+                self.hasExplicitWindowSelection = restoredSelection != nil
                 self.selectedApplicationRefreshTask = nil
-                self.renderOverlay()
+                WindowInteractionDiagnosticRecorder.shared.record(
+                    component: "cmdTab", event: "selectedWindowsRecovered",
+                    metadata: [
+                        "sharedWeChat": .flag(candidate.isSharedWeChat),
+                        "recoveredOwnerCount": .integer(Int64(recoveredOwners.count)),
+                        "windowCount": .integer(Int64(replacementWindows.count))
+                    ]
+                )
+                // Recovery must not start another full retry cycle.
+                self.renderOverlay(retryMissingWindows: false)
                 return
             }
             self?.selectedApplicationRefreshTask = nil
-            self?.discoverPreviewOnlyWindows()
+            if !hasExistingWindows { self?.discoverPreviewOnlyWindows() }
         }
     }
 
     private func discoverPreviewOnlyWindows() {
+        if isPresenting, candidates.indices.contains(selectedIndex), candidates[selectedIndex].isSharedWeChat {
+            discoverSharedPreviewFallbacks()
+            return
+        }
         guard isPresenting, candidates.indices.contains(selectedIndex),
               candidates[selectedIndex].windows.isEmpty else { return }
         let index = selectedIndex
@@ -1177,6 +1456,56 @@ final class WindowCommandTabMonitor {
         }
     }
 
+    /// Retain one bounded preview-only fallback per missing installation,
+    /// using the existing surface-selection policy. It is never an operation
+    /// target and cannot replace a canonical window's true owner.
+    private func discoverSharedPreviewFallbacks() {
+        guard isPresenting, candidates.indices.contains(selectedIndex),
+              candidates[selectedIndex].isSharedWeChat else { return }
+        sharedPreviewFallbackTask?.cancel()
+        let candidate = candidates[selectedIndex]
+        let index = selectedIndex
+        let sequence = eventSequenceID
+        let generation = thumbnailCaptureGeneration
+        let exactOwners = Set(candidate.windows.map { $0.application.processIdentifier })
+        let identities = thumbnailApplicationIdentities(for: candidate.applications.filter {
+            !exactOwners.contains($0.processIdentifier)
+        })
+        let revisions = identities.map { WindowAXLifecycleRegistry.shared.revision(for: $0) }
+        let cacheGenerations = identities.map { WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }
+        let labels = Dictionary(uniqueKeysWithValues: candidate.applications.map { ($0.processIdentifier, sharedWeChatLabel(for: $0)) })
+        sharedPreviewFallbackTask = Task { @MainActor [weak self] in
+            var items: [CommandTabWindowDisplayItem] = []
+            for (offset, identity) in identities.enumerated() {
+                guard !Task.isCancelled else { return }
+                let result = await WindowThumbnailProvider.discoverAndCaptureWindows(
+                    applicationIdentity: identity, expectedCacheGeneration: cacheGenerations[offset]
+                )
+                guard case let .windows(discovered) = result,
+                      let selected = WindowPreviewOnlySelectionPolicy.selectOne(from: discovered),
+                      let windowID = selected.request.windowID else { continue }
+                items.append(CommandTabWindowDisplayItem(
+                    id: candidate.windows.count + items.count,
+                    identity: WindowPreviewIdentity(processID: identity.processIdentifier, windowID: windowID),
+                    title: "\(labels[identity.processIdentifier] ?? "微信") · 应用预览",
+                    isMinimized: false, canClose: false, isSelected: false,
+                    thumbnailResult: selected.result, canActivate: false
+                ))
+            }
+            guard let self, !Task.isCancelled, self.isPresenting,
+                  self.eventSequenceID == sequence, self.thumbnailCaptureGeneration == generation,
+                  self.selectedIndex == index, self.candidates.indices.contains(index),
+                  self.candidates[index].processIdentifiers == candidate.processIdentifiers,
+                  identities.allSatisfy({ $0.matchesCurrentProcess() }),
+                  identities.map({ WindowAXLifecycleRegistry.shared.revision(for: $0) }) == revisions,
+                  identities.map({ WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }) == cacheGenerations else { return }
+            self.sharedPreviewFallbackTask = nil
+            self.previewOnlyWindows = items
+            if candidate.windows.isEmpty { self.previewLoading = false }
+            self.presentOverlay(thumbnails: self.currentThumbnailResults, for: index)
+        }
+    }
+
     private func presentOverlay(
         thumbnails: [WindowThumbnailResult?],
         for presentedIndex: Int
@@ -1185,26 +1514,35 @@ final class WindowCommandTabMonitor {
               selectedIndex == presentedIndex,
               candidates.indices.contains(presentedIndex),
               let nativeSwitcherAnchorFrame else { return }
+        let actionTargets = candidates.map { candidate in
+            candidate.windows.map { window -> WindowActionTarget? in
+                guard let identity = WindowThumbnailApplicationIdentity(application: window.application) else { return nil }
+                return WindowActionTarget(window: window, applicationIdentity: identity)
+            }
+        }
         let items = candidates.enumerated().map { index, candidate in
             CommandTabDisplayItem(
                 id: index,
-                appName: candidate.application.localizedName ?? "App",
+                appName: candidate.isSharedWeChat ? "微信 · 全部窗口" : candidate.application.localizedName ?? "App",
                 icon: candidate.application.bundleURL.map { NSWorkspace.shared.icon(forFile: $0.path) },
                 isLoading: previewLoading,
-                windows: previewLoading ? [] : candidate.windows.isEmpty ? previewOnlyWindows : candidate.windows.enumerated().map { windowIndex, window in
+                windows: previewLoading ? [] : candidate.windows.isEmpty ? previewOnlyWindows : (candidate.windows.enumerated().map { windowIndex, window in
                     CommandTabWindowDisplayItem(
                         id: windowIndex,
                         identity: WindowPreviewIdentity(processID: window.application.processIdentifier, windowID: window.windowID ?? 0),
-                        title: window.title,
+                        title: candidate.isSharedWeChat
+                            ? "\(sharedWeChatLabel(for: window.application)) · \(window.title)"
+                            : window.title,
                         isMinimized: window.isMinimized,
                         canClose: window.element != nil && window.canClose,
-                        isSelected: index == presentedIndex && windowIndex == selectedWindowIndex,
+                        isSelected: index == presentedIndex && windowIndex == selectedWindowIndex
+                            && (!candidate.isSharedWeChat || hasExplicitWindowSelection),
                         thumbnailResult: index == presentedIndex && thumbnails.indices.contains(windowIndex)
                             ? thumbnails[windowIndex]
                             : nil,
                         canActivate: window.element != nil
                     )
-                }
+                } + (candidate.isSharedWeChat ? previewOnlyWindows : []))
             )
         }
         let sequence = eventSequenceID
@@ -1212,14 +1550,17 @@ final class WindowCommandTabMonitor {
             items: items,
             selectedIndex: selectedIndex,
             anchorAXFrame: nativeSwitcherAnchorFrame,
+            allowsSyntheticHoverSelection: !candidates[presentedIndex].isSharedWeChat,
             onCommitWindow: { [weak self] applicationIndex, windowIndex in
                 guard let self, self.eventSequenceID == sequence else { return }
                 self.logger.debug(
                     "Mouse committed Cmd-Tab window appIndex=\(applicationIndex, privacy: .public) windowIndex=\(windowIndex, privacy: .public)"
                 )
+                guard actionTargets.indices.contains(applicationIndex),
+                      actionTargets[applicationIndex].indices.contains(windowIndex),
+                      let target = actionTargets[applicationIndex][windowIndex] else { return }
                 self.enqueueEventAction(.commitWindow(
-                    applicationIndex: applicationIndex,
-                    windowIndex: windowIndex,
+                    target: target,
                     sequenceID: sequence
                 ))
             },
@@ -1232,20 +1573,67 @@ final class WindowCommandTabMonitor {
             },
             onCloseWindow: { [weak self] applicationIndex, windowIndex in
                 guard let self, self.eventSequenceID == sequence else { return }
+                guard actionTargets.indices.contains(applicationIndex),
+                      actionTargets[applicationIndex].indices.contains(windowIndex),
+                      let target = actionTargets[applicationIndex][windowIndex] else { return }
                 self.enqueueEventAction(.closeWindow(
-                    applicationIndex: applicationIndex,
-                    windowIndex: windowIndex,
+                    target: target,
                     sequenceID: sequence
                 ))
             }
         )
     }
 
+    private func sharedActionPolicy(
+        candidate: Candidate,
+        action: WindowCommandTabSharingPolicy.RequestedAction,
+        selectedWindow: WindowCandidate?
+    ) -> WindowCommandTabSharingPolicy.CommitPolicy {
+        let applications = candidate.applications.map(weChatSharingApplication)
+        guard candidate.isSharedWeChat, let first = applications.first,
+              let group = WindowCommandTabSharingPolicy.sharedWeChatGroup(
+                selected: [first], running: applications, evidence: .resolvedIdentity
+              ) else { return .unavailable }
+        return WindowCommandTabSharingPolicy.commitPolicy(
+            for: action, group: group,
+            explicitlySelectedOwner: selectedWindow.map { weChatSharingApplication($0.application) }
+        )
+    }
+
+    private func sharedWeChatLabel(for application: NSRunningApplication) -> String {
+        WindowCommandTabSharingPolicy.installation(for: weChatSharingApplication(application))?.label ?? "微信"
+    }
+
+    private func location(of target: WindowActionTarget) -> (application: Int, window: Int)? {
+        guard !nativeSelectionPending, target.applicationIdentity.matchesCurrentProcess() else { return nil }
+        var matches: [(application: Int, window: Int)] = []
+        for (applicationIndex, candidate) in candidates.enumerated() {
+            for (windowIndex, window) in candidate.windows.enumerated() {
+                guard window.application.processIdentifier == target.applicationIdentity.processIdentifier,
+                      WindowThumbnailApplicationIdentity(application: window.application) == target.applicationIdentity else { continue }
+                let matchesWindow: Bool
+                if let windowID = target.window.windowID {
+                    matchesWindow = window.windowID == windowID
+                } else if let lhs = window.element, let rhs = target.window.element {
+                    matchesWindow = CFEqual(lhs, rhs)
+                } else { matchesWindow = false }
+                if matchesWindow { matches.append((applicationIndex, windowIndex)) }
+            }
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     private func selectWindow(applicationIndex: Int, windowIndex: Int) {
-        guard isPresenting,
+        guard isPresenting, !nativeSelectionPending,
               selectedIndex == applicationIndex,
-              candidates.indices.contains(applicationIndex),
-              candidates[applicationIndex].windows.indices.contains(windowIndex) else { return }
+              candidates.indices.contains(applicationIndex) else { return }
+        guard candidates[applicationIndex].windows.indices.contains(windowIndex) else {
+            if candidates[applicationIndex].isSharedWeChat, hasExplicitWindowSelection {
+                hasExplicitWindowSelection = false
+                presentOverlay(thumbnails: currentThumbnailResults, for: applicationIndex)
+            }
+            return
+        }
         hasExplicitWindowSelection = true
         guard selectedWindowIndex != windowIndex else { return }
         selectedWindowIndex = windowIndex
@@ -1259,17 +1647,26 @@ final class WindowCommandTabMonitor {
               candidates[applicationIndex].windows[windowIndex].element != nil else { return }
         selectedIndex = applicationIndex
         selectedWindowIndex = windowIndex
-        activate(
-            candidate: candidates[applicationIndex],
-            window: candidates[applicationIndex].windows[windowIndex]
-        )
+        let candidate = candidates[applicationIndex]
+        let window = candidate.windows[windowIndex]
+        commitNativeWindow(candidate: candidate, window: window)
     }
 
     private func closeSelectedWindow() {
-        guard isPresenting, candidates.indices.contains(selectedIndex) else { return }
+        guard isPresenting, !nativeSelectionPending, candidates.indices.contains(selectedIndex) else { return }
+        guard !candidates[selectedIndex].isSharedWeChat || hasExplicitWindowSelection else {
+            preferences.publishFeedback("请先选择要关闭的微信窗口")
+            return
+        }
         let windowIndex = candidates[selectedIndex].windows.indices.contains(selectedWindowIndex)
             ? selectedWindowIndex
             : 0
+        if candidates[selectedIndex].isSharedWeChat {
+            guard candidates[selectedIndex].windows.indices.contains(windowIndex),
+                  sharedActionPolicy(candidate: candidates[selectedIndex], action: .closeWindow,
+                    selectedWindow: candidates[selectedIndex].windows[windowIndex])
+                    == .exactWindowOwner(processID: candidates[selectedIndex].windows[windowIndex].application.processIdentifier) else { return }
+        }
         closeWindow(applicationIndex: selectedIndex, windowIndex: windowIndex)
     }
 
@@ -1438,15 +1835,19 @@ final class WindowCommandTabMonitor {
         remainingWindows.remove(at: windowIndex)
         candidates[applicationIndex] = Candidate(
             applications: candidate.applications,
-            windows: remainingWindows
+            windows: remainingWindows,
+            isSharedWeChat: candidate.isSharedWeChat
         )
         selectedIndex = applicationIndex
         selectedWindowIndex = min(windowIndex, max(0, remainingWindows.count - 1))
+        if candidate.isSharedWeChat { hasExplicitWindowSelection = false }
         // Update the visible model immediately from the thumbnails already in
         // memory, but do not start a second capture round. The bounded AX
         // reconciliation below performs the single authoritative refresh.
         thumbnailCaptureTask?.cancel()
         thumbnailCaptureTask = nil
+        sharedPreviewFallbackTask?.cancel()
+        sharedPreviewFallbackTask = nil
         thumbnailCaptureGeneration &+= 1
         if currentThumbnailResults.indices.contains(windowIndex) {
             currentThumbnailResults.remove(at: windowIndex)
@@ -1459,7 +1860,7 @@ final class WindowCommandTabMonitor {
     }
 
     private func confirmQuitSelectedApplication() {
-        guard isPresenting, candidates.indices.contains(selectedIndex) else { return }
+        guard isPresenting, !nativeSelectionPending, candidates.indices.contains(selectedIndex) else { return }
         let candidate = candidates[selectedIndex]
         let application: NSRunningApplication
         if candidate.applications.count == 1 {
@@ -1472,8 +1873,14 @@ final class WindowCommandTabMonitor {
             preferences.publishFeedback("这个 App 有多个运行实例，请先选择具体窗口再退出")
             return
         }
+        if candidate.isSharedWeChat {
+            guard hasExplicitWindowSelection, candidate.windows.indices.contains(selectedWindowIndex),
+                  sharedActionPolicy(candidate: candidate, action: .quitApplication,
+                    selectedWindow: candidate.windows[selectedWindowIndex])
+                    == .exactWindowOwner(processID: application.processIdentifier) else { return }
+        }
         let processIdentifier = application.processIdentifier
-        let applicationName = application.localizedName ?? "这个 App"
+        let applicationName = candidate.isSharedWeChat ? sharedWeChatLabel(for: application) : application.localizedName ?? "这个 App"
         guard let selectedApplicationIdentity = WindowThumbnailApplicationIdentity(
             application: application
         ) else {
@@ -1581,7 +1988,8 @@ final class WindowCommandTabMonitor {
             }
             self.candidates[applicationIndex] = Candidate(
                 applications: reconciledApplications,
-                windows: reconciledWindows
+                windows: reconciledWindows,
+                isSharedWeChat: candidate.isSharedWeChat
             )
             if let validatedCurrentApplication {
                 self.recordLifecycleRevisions(for: [validatedCurrentApplication])
@@ -1589,11 +1997,13 @@ final class WindowCommandTabMonitor {
             self.selectedIndex = applicationIndex
             let windowCount = self.candidates[self.selectedIndex].windows.count
             self.selectedWindowIndex = min(self.selectedWindowIndex, max(0, windowCount - 1))
+            if candidate.isSharedWeChat { self.hasExplicitWindowSelection = false }
             self.renderOverlay()
         }
     }
 
-    private func activate(candidate: Candidate, window: WindowCandidate?) {
+    private func activate(candidate: Candidate, window: WindowCandidate?, expectedMouseInputCounts: [UInt32]? = nil) {
+        let mouseInputCounts = expectedMouseInputCounts ?? Self.mousePressCounts()
         concreteWindowActivationTask?.cancel()
         concreteWindowActivationTask = nil
         let application = window?.application ?? candidate.application
@@ -1601,27 +2011,43 @@ final class WindowCommandTabMonitor {
         let applicationIdentity = WindowThumbnailApplicationIdentity(
             application: application
         )
+        if let window {
+            guard applicationIdentity?.matchesCurrentProcess() == true,
+                  freshWindow(matching: window, application: application) != nil,
+                  Self.mousePressCounts() == mouseInputCounts else {
+                cancel()
+                return
+            }
+        }
         if let windowID = window?.windowID {
             WindowServerPrivateBridge.activate(
                 processIdentifier: processIdentifier,
                 windowID: windowID
             )
         }
-        _ = application.activate(options: [])
+        guard Self.mousePressCounts() == mouseInputCounts else { cancel(); return }
+        let activationAccepted = application.activate(options: [])
+        var focusedExactWindow = false
         if let window,
            let currentWindow = freshWindow(
                 matching: window,
                 application: application
-           ) {
-            _ = focusExactWindow(
+           ), Self.mousePressCounts() == mouseInputCounts {
+            focusedExactWindow = focusExactWindow(
                 currentWindow,
                 application: application,
                 expectedWindowID: currentWindow.windowID
             )
         }
+        recordFocusOutcome(
+            event: focusedExactWindow && application.isActive ? "actualFocus" : "activationPending",
+            application: application, window: window,
+            activationAccepted: activationAccepted, focusedExactWindow: focusedExactWindow
+        )
         cancel()
 
         guard let window, let applicationIdentity else { return }
+        let activationSequence = eventSequenceID
         // App activation can restore its previous main window after the first
         // AXFocusedWindow write. Re-assert the exact selected AX window for a
         // short bounded period, but stop immediately if the user has already
@@ -1635,6 +2061,8 @@ final class WindowCommandTabMonitor {
                 }
                 guard let self,
                       !Task.isCancelled,
+                      self.eventSequenceID == activationSequence,
+                      Self.mousePressCounts() == mouseInputCounts,
                       let currentApplication = NSRunningApplication(
                         processIdentifier: processIdentifier
                       ),
@@ -1647,13 +2075,246 @@ final class WindowCommandTabMonitor {
                     matching: window,
                     application: currentApplication
                 ) else { return }
-                _ = self.focusExactWindow(
+                guard Self.mousePressCounts() == mouseInputCounts else { return }
+                let focused = self.focusExactWindow(
                     currentWindow,
                     application: currentApplication,
                     expectedWindowID: currentWindow.windowID
                 )
+                if delay == 140_000_000 {
+                    self.recordFocusOutcome(
+                        event: "actualFocusReassert", application: currentApplication,
+                        window: currentWindow, activationAccepted: activationAccepted,
+                        focusedExactWindow: focused
+                    )
+                }
             }
             self?.concreteWindowActivationTask = nil
+        }
+    }
+
+    private static func mousePressCounts() -> [UInt32] {
+        [.leftMouseDown, .rightMouseDown, .otherMouseDown].map {
+            CGEventSource.counterForEventType(.combinedSessionState, eventType: $0)
+        }
+    }
+
+    private func recordFocusOutcome(
+        event: String, application: NSRunningApplication, window: WindowCandidate?,
+        activationAccepted: Bool, focusedExactWindow: Bool
+    ) {
+        WindowInteractionDiagnosticRecorder.shared.record(component: "cmdTab", event: event, metadata: [
+            "ownerPID": .integer(Int64(application.processIdentifier)),
+            "windowID": .integer(Int64(window?.windowID ?? 0)),
+            "activationAccepted": .flag(activationAccepted),
+            "frontmostMatched": .flag(application.isActive),
+            "axFocusedMatched": .flag(focusedExactWindow)
+        ])
+    }
+
+    private func recordNativeCommit(
+        _ event: String,
+        ticket: WindowCommandTabCommitCoordinator.Ticket? = nil,
+        reason: String? = nil,
+        window: WindowCandidate? = nil,
+        visibility: WindowCommandTabCommitCoordinator.Visibility? = nil
+    ) {
+        var metadata: [String: WindowInteractionDiagnosticValue] = [
+            "sequence": .integer(Int64(clamping: ticket?.sequenceID ?? eventSequenceID))
+        ]
+        if let ticket { metadata["generation"] = .integer(Int64(clamping: ticket.generation)) }
+        if let reason { metadata["reason"] = .code(reason) }
+        if let window {
+            metadata["ownerPID"] = .integer(Int64(window.application.processIdentifier))
+            metadata["windowID"] = .integer(Int64(window.windowID ?? 0))
+        }
+        if let visibility { metadata["visibility"] = .code(visibility.rawValue) }
+        WindowInteractionDiagnosticRecorder.shared.record(component: "cmdTab", event: event, metadata: metadata)
+    }
+
+    /// Abort the pending action, not the live native-switcher session. Its
+    /// pointer tap and cards must survive a failed dismissal or new input.
+    private func abortNativeWindowCommit(reason: String, reconcile: Bool = true) {
+        guard let ticket = nativeWindowCommit.pending else { return }
+        nativeWindowCommit.invalidate()
+        nativeWindowCommitTask?.cancel()
+        nativeWindowCommitTask = nil
+        hasExplicitWindowSelection = false
+        overlay.clearPointerSelection()
+        recordNativeCommit("commitAbort", ticket: ticket, reason: reason)
+        if reconcile { scheduleNativeSessionReconciliation(reason: reason) }
+    }
+
+    private func cancelNativeSessionReconciliation() {
+        nativeSessionReconciliationGeneration &+= 1
+        nativeSessionReconciliationTask?.cancel()
+        nativeSessionReconciliationTask = nil
+    }
+
+    /// One deferred read per input/failure edge, never a background poll. It
+    /// distinguishes a closed native strip from a surviving strip whose mouse
+    /// monitoring must continue, including after a missed physical Command-up.
+    private func scheduleNativeSessionReconciliation(reason: String) {
+        let context = nativeCommitContext
+        cancelNativeSessionReconciliation()
+        let generation = nativeSessionReconciliationGeneration
+        let sequence = eventSequenceID
+        nativeSessionReconciliationTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return }
+            guard let self, !Task.isCancelled,
+                  self.nativeSessionReconciliationGeneration == generation,
+                  self.eventSequenceID == sequence,
+                  !self.nativeWindowCommit.isPending else { return }
+            defer {
+                if self.nativeSessionReconciliationGeneration == generation {
+                    self.nativeSessionReconciliationTask = nil
+                }
+            }
+            guard self.preferences.isEnabled, self.preferences.cmdTabPlusEnabled,
+                  !self.zilanPointerInteraction.isSuppressed, let context else {
+                self.cancel()
+                return
+            }
+            let visibility = self.nativeSwitcher.commitVisibility(context)
+            guard !Task.isCancelled,
+                  self.nativeSessionReconciliationGeneration == generation,
+                  self.eventSequenceID == sequence else { return }
+            let commandHeld = CGEventSource.keyState(.combinedSessionState, key: 55)
+                || CGEventSource.keyState(.combinedSessionState, key: 54)
+            self.recordNativeCommit("sessionReconciled", reason: reason, visibility: visibility)
+            switch WindowCommandTabSessionReconciliation.action(visibility: visibility, commandHeld: commandHeld) {
+            case .endSession:
+                self.cancel()
+            case .restorePointerSession:
+                self.commandSequenceActive = true
+                self.nativeSelectionPending = true
+                self.installNativePointerTapIfNeeded()
+                // Refresh the selection before restoring actionable cards: a
+                // disabled tap may have missed Tab as well as Command-up.
+                self.scheduleNativeSwitcherSync()
+            case .awaitFreshSelection:
+                self.commandSequenceActive = true
+                self.hasExplicitWindowSelection = false
+                self.nativeSelectionPending = true
+                self.overlay.hide()
+                self.isPresenting = false
+                self.candidates.removeAll()
+                self.installNativePointerTapIfNeeded()
+            }
+        }
+    }
+
+    /// Every explicit card click must end Dock's switcher before activating a
+    /// concrete window. Shared WeChat still derives action identity exclusively
+    /// from the selected card, never from the ambiguous native tile.
+    private func commitNativeWindow(candidate: Candidate, window: WindowCandidate) {
+        cancelNativeSessionReconciliation()
+        abortNativeWindowCommit(reason: "superseded", reconcile: false)
+        let mouseInputCounts = Self.mousePressCounts()
+        guard !candidate.isSharedWeChat
+                || sharedActionPolicy(candidate: candidate, action: .commandRelease, selectedWindow: window)
+                    == .exactWindowOwner(processID: window.application.processIdentifier),
+              let context = nativeCommitContext,
+              let identity = WindowThumbnailApplicationIdentity(application: window.application),
+              identity.matchesCurrentProcess(),
+              freshWindow(matching: window, application: window.application) != nil else {
+            hasExplicitWindowSelection = false
+            recordNativeCommit("commitRejected", reason: "invalidTargetOrContext", window: window)
+            scheduleNativeSessionReconciliation(reason: "invalidTargetOrContext")
+            preferences.publishFeedback("所选窗口状态已变化，请重新选择")
+            return
+        }
+        let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let allowedForegroundPIDs = Set(candidate.processIdentifiers + [foregroundPID].compactMap { $0 })
+        let ticket = nativeWindowCommit.begin(sequenceID: eventSequenceID)
+        recordNativeCommit("commitRequested", ticket: ticket, window: window)
+        let initialVisibility = nativeSwitcher.commitVisibility(context)
+        recordNativeCommit("commitVisibilityInitial", ticket: ticket, visibility: initialVisibility)
+        guard initialVisibility != .unknown,
+              Self.mousePressCounts() == mouseInputCounts,
+              nativeWindowCommit.isCurrent(ticket, sequenceID: eventSequenceID) else {
+            abortNativeWindowCommit(reason: "initialVisibilityOrInput")
+            preferences.publishFeedback("系统切换器状态暂不可确认，请重试")
+            return
+        }
+        if initialVisibility == .visible {
+            // A Command-release commit can arrive just before Dock retires the
+            // list. Keep monitoring that original session during the handshake.
+            commandSequenceActive = true
+            let dismissal = nativeSwitcher.dismissForWindowCommit(context, stillValid: { [weak self] in
+                guard let self else { return false }
+                return self.nativeWindowCommit.isCurrent(ticket, sequenceID: self.eventSequenceID)
+                    && Self.mousePressCounts() == mouseInputCounts
+                    && NSWorkspace.shared.frontmostApplication.map({ allowedForegroundPIDs.contains($0.processIdentifier) }) == true
+                    && identity.matchesCurrentProcess()
+                    && !self.zilanPointerInteraction.isSuppressed
+            }, mayPostEscape: {
+                NSWorkspace.shared.frontmostApplication?.processIdentifier == foregroundPID
+            })
+            guard dismissal != .rejected else {
+                abortNativeWindowCommit(reason: "dismissRejected")
+                preferences.publishFeedback("系统切换器尚未退出，请重试")
+                return
+            }
+            recordNativeCommit("commitDismissRequested", ticket: ticket,
+                reason: dismissal == .posted ? "hidEscape" : "alreadyAbsent", window: window)
+        }
+        nativeWindowCommitTask = Task { @MainActor [weak self] in
+            defer {
+                // A cancelled old task must not clear a subsequent click.
+                if let self, self.nativeWindowCommit.finish(ticket) {
+                    self.nativeWindowCommitTask = nil
+                }
+            }
+            guard let self else { return }
+            await WindowCommandTabCommitWorkflow.run(
+                isCurrent: { self.nativeWindowCommit.isCurrent(ticket, sequenceID: self.eventSequenceID) },
+                isValid: {
+                    self.preferences.isEnabled && self.preferences.cmdTabPlusEnabled
+                        && !self.zilanPointerInteraction.isSuppressed
+                        && identity.matchesCurrentProcess()
+                        && NSWorkspace.shared.frontmostApplication.map({ allowedForegroundPIDs.contains($0.processIdentifier) }) == true
+                        && Self.mousePressCounts() == mouseInputCounts
+                },
+                readVisibility: { self.nativeSwitcher.commitVisibility(context) },
+                decision: { self.nativeWindowCommit.observe(visibility: $0, for: ticket, sequenceID: self.eventSequenceID) },
+                onConfirmed: {
+                    // AX refresh can yield different lifetime/window evidence.
+                    // Check native absence and input again after that work.
+                    guard let app = NSRunningApplication(processIdentifier: identity.processIdentifier),
+                          let fresh = self.freshWindow(matching: window, application: app),
+                          !Task.isCancelled,
+                          self.nativeWindowCommit.isCurrent(ticket, sequenceID: self.eventSequenceID),
+                          !self.zilanPointerInteraction.isSuppressed,
+                          let latestForegroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                          allowedForegroundPIDs.contains(latestForegroundPID),
+                          Self.mousePressCounts() == mouseInputCounts else {
+                        self.abortNativeWindowCommit(reason: "targetChangedBeforeActivation")
+                        return
+                    }
+                    let finalVisibility = self.nativeSwitcher.commitVisibility(context)
+                    self.recordNativeCommit("commitVisibilityFinal", ticket: ticket, visibility: finalVisibility)
+                    guard finalVisibility == .absent,
+                          Self.mousePressCounts() == mouseInputCounts,
+                          self.nativeWindowCommit.isCurrent(ticket, sequenceID: self.eventSequenceID),
+                          NSWorkspace.shared.frontmostApplication.map({ allowedForegroundPIDs.contains($0.processIdentifier) }) == true else {
+                        self.abortNativeWindowCommit(reason: "switcherOrInputChanged")
+                        return
+                    }
+                    guard self.nativeWindowCommit.finish(ticket) else { return }
+                    self.nativeWindowCommitTask = nil
+                    self.recordNativeCommit("activationRequest", ticket: ticket, window: fresh)
+                    self.activate(candidate: candidate, window: fresh, expectedMouseInputCounts: mouseInputCounts)
+                },
+                onAbort: { reason in
+                    self.recordNativeCommit("commitVisibilityFinal", ticket: ticket,
+                        reason: reason.rawValue)
+                    self.abortNativeWindowCommit(reason: reason.rawValue)
+                    if reason != .stateChanged {
+                        self.preferences.publishFeedback("系统切换器尚未退出，可继续选择窗口")
+                    }
+                }
+            )
         }
     }
 
@@ -1668,6 +2329,7 @@ final class WindowCommandTabMonitor {
         guard let applicationIdentity = WindowThumbnailApplicationIdentity(
             application: application
         ) else { return }
+        let activationSequence = eventSequenceID
         concreteWindowActivationTask = Task { @MainActor [weak self] in
             for delay in [45_000_000, 90_000_000, 160_000_000] as [UInt64] {
                 do {
@@ -1677,6 +2339,7 @@ final class WindowCommandTabMonitor {
                 }
                 guard let self,
                       !Task.isCancelled,
+                      self.eventSequenceID == activationSequence,
                       let currentApplication = NSRunningApplication(
                         processIdentifier: processIdentifier
                       ),
@@ -1771,6 +2434,11 @@ final class WindowCommandTabMonitor {
     }
 
     private func cancel() {
+        cancelNativeSessionReconciliation()
+        concreteWindowActivationTask?.cancel()
+        concreteWindowActivationTask = nil
+        abortNativeWindowCommit(reason: "sessionCancelled", reconcile: false)
+        nativeSelectionPending = false
         cancelQueuedEventActions()
         nativeSwitcherSyncTask?.cancel()
         nativeSwitcherSyncTask = nil
@@ -1786,10 +2454,13 @@ final class WindowCommandTabMonitor {
         selectedApplicationRefreshTask = nil
         thumbnailCaptureTask?.cancel()
         thumbnailCaptureTask = nil
+        sharedPreviewFallbackTask?.cancel()
+        sharedPreviewFallbackTask = nil
         thumbnailCaptureGeneration &+= 1
         commandSequenceActive = false
         hasExplicitWindowSelection = false
         nativeSwitcherAnchorFrame = nil
+        nativeCommitContext = nil
         eventSequenceID &+= 1
         isPresenting = false
         candidates.removeAll()
@@ -2460,6 +3131,8 @@ private final class NativeProcessSwitcherBridge {
         let applications: [NSRunningApplication]
         let listFrame: CGRect
         let selectedItemFrame: CGRect?
+        var isSharedWeChat = false
+        var commitContext: CommitContext? = nil
 
         var application: NSRunningApplication {
             applications[0]
@@ -2470,6 +3143,133 @@ private final class NativeProcessSwitcherBridge {
         case visible(Snapshot)
         case notVisible
         case ambiguous
+    }
+
+    static let sharedCommitEventMarker: Int64 = 0x574531435442
+
+    final class CommitContext {
+        let dockApplication: NSRunningApplication
+        let dockPID: pid_t
+        let dockLaunchDate: Date?
+        let list: AXUIElement
+        let parent: AXUIElement
+        let childrenAttribute: String
+        var usedFallbackDiscovery = false
+
+        init(dockApplication: NSRunningApplication, dockPID: pid_t, dockLaunchDate: Date?,
+             list: AXUIElement, parent: AXUIElement, childrenAttribute: String) {
+            self.dockApplication = dockApplication
+            self.dockPID = dockPID
+            self.dockLaunchDate = dockLaunchDate
+            self.list = list
+            self.parent = parent
+            self.childrenAttribute = childrenAttribute
+        }
+    }
+
+    typealias CommitVisibility = WindowCommandTabCommitCoordinator.Visibility
+
+    private func makeCommitContext(list: AXUIElement) -> CommitContext? {
+        guard let dockPID = cachedDockPID,
+              let dock = NSRunningApplication(processIdentifier: dockPID),
+              dock.bundleIdentifier == "com.apple.dock", !dock.isTerminated,
+              let parent = elementAttribute(kAXParentAttribute, of: list) else { return nil }
+        for attribute in [kAXChildrenAttribute, kAXVisibleChildrenAttribute] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(parent, attribute as CFString, &value) == .success,
+                  let children = value as? [AXUIElement],
+                  children.contains(where: { CFEqual($0, list) }) else { continue }
+            return CommitContext(dockApplication: dock, dockPID: dockPID, dockLaunchDate: dock.launchDate, list: list, parent: parent, childrenAttribute: attribute)
+        }
+        return nil
+    }
+
+    func commitVisibility(_ context: CommitContext) -> CommitVisibility {
+        guard AXIsProcessTrusted(), !context.dockApplication.isTerminated,
+              let dock = NSRunningApplication(processIdentifier: context.dockPID),
+              !dock.isTerminated, dock.bundleIdentifier == "com.apple.dock",
+              dock.launchDate == context.dockLaunchDate else { return .unknown }
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(context.parent, context.childrenAttribute as CFString, &value)
+        guard error == .success, let children = value as? [AXUIElement] else {
+            // A retired AX parent is not proof of absence. This exceptional
+            // path makes one bounded fresh read, never a full-tree retry loop.
+            return freshCommitVisibility(context)
+        }
+        if children.contains(where: { CFEqual($0, context.list) }) {
+            guard let listFrame = frame(of: context.list) else { return .unknown }
+            return listFrame.width > 20 && listFrame.height > 20 ? .visible : .unknown
+        }
+        // The normal Dock layout exposes the list directly under its App.
+        // Verify this exact live root before using its complete children read
+        // as absence evidence. Other hierarchies require bounded rediscovery.
+        guard CFEqual(context.parent, AXUIElementCreateApplication(context.dockPID)),
+              children.count <= 32 else { return freshCommitVisibility(context) }
+        for child in children {
+            var subroleValue: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subroleValue)
+            guard result == .success || result == .noValue || result == .attributeUnsupported else { return .unknown }
+            if subroleValue as? String == kAXProcessSwitcherListSubrole as String {
+                return .unknown // A replacement list belongs to a new session.
+            }
+        }
+        return .absent
+    }
+
+    private func freshCommitVisibility(_ context: CommitContext) -> CommitVisibility {
+        guard !context.usedFallbackDiscovery else { return .unknown }
+        context.usedFallbackDiscovery = true
+        let root = AXUIElementCreateApplication(context.dockPID)
+        AXUIElementSetMessagingTimeout(root, 0.025)
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.120
+        var queue: [(AXUIElement, Int)] = [(root, 0)]
+        var visited: [AXUIElement] = []
+        var cursor = 0
+        while cursor < queue.count {
+            guard visited.count < 32, ProcessInfo.processInfo.systemUptime < deadline else { return .unknown }
+            let (element, depth) = queue[cursor]
+            cursor += 1
+            if visited.contains(where: { CFEqual($0, element) }) { continue }
+            visited.append(element)
+            AXUIElementSetMessagingTimeout(element, 0.025)
+            var subroleValue: CFTypeRef?
+            let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleValue)
+            guard subroleError == .success || subroleError == .noValue || subroleError == .attributeUnsupported else { return .unknown }
+            if subroleValue as? String == kAXProcessSwitcherListSubrole as String {
+                guard CFEqual(element, context.list), let listFrame = frame(of: element),
+                      listFrame.width > 20, listFrame.height > 20 else { return .unknown }
+                return .visible
+            }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return .unknown }
+            var childrenValue: CFTypeRef?
+            let childrenError = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue)
+            if childrenError == .noValue || childrenError == .attributeUnsupported { continue }
+            guard childrenError == .success, let children = childrenValue as? [AXUIElement] else { return .unknown }
+            guard children.isEmpty || (depth < 6 && queue.count + children.count <= 64) else { return .unknown }
+            queue.append(contentsOf: children.map { ($0, depth + 1) })
+        }
+        return ProcessInfo.processInfo.systemUptime < deadline ? .absent : .unknown
+    }
+
+    func dismissForWindowCommit(
+        _ context: CommitContext, stillValid: () -> Bool, mayPostEscape: () -> Bool
+    ) -> WindowCommandTabCommitCoordinator.Dismissal {
+        // Both visibility and input evidence must be current immediately before
+        // this one pair. Never retry Escape later against a different session.
+        let visibility = commitVisibility(context)
+        guard stillValid() else { return .rejected }
+        if visibility == .absent { return .alreadyAbsent }
+        guard visibility == .visible, mayPostEscape(),
+              let down = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false) else { return .rejected }
+        for event in [down, up] {
+            event.flags = []
+            event.setIntegerValueField(.eventSourceUserData, value: Self.sharedCommitEventMarker)
+            // Dock handles the system switcher in the session input path.
+            // Process-directed events bypass that route; WINS uses HID here.
+            event.post(tap: .cghidEventTap)
+        }
+        return .posted
     }
 
     private let maximumTraversalDepth = 9
@@ -2519,7 +3319,8 @@ private final class NativeProcessSwitcherBridge {
         return snapshot(
             resolving: resolvedSelectedElement,
             list: list,
-            listFrame: listFrame
+            listFrame: listFrame,
+            recordsIdentityFailure: true
         )
     }
 
@@ -2566,7 +3367,9 @@ private final class NativeProcessSwitcherBridge {
             return .visible(Snapshot(
                 applications: selection.applications,
                 listFrame: context.listFrame,
-                selectedItemFrame: frame(of: selection.anchorElement)
+                selectedItemFrame: frame(of: selection.anchorElement),
+                isSharedWeChat: selection.isSharedWeChat,
+                commitContext: makeCommitContext(list: context.list)
             ))
         case .ambiguous:
             return .ambiguous
@@ -2617,15 +3420,21 @@ private final class NativeProcessSwitcherBridge {
     private func snapshot(
         resolving element: AXUIElement,
         list: AXUIElement,
-        listFrame: CGRect
+        listFrame: CGRect,
+        recordsIdentityFailure: Bool = false
     ) -> SnapshotResult {
-        switch resolveApplication(from: element, in: list) {
+        switch resolveApplication(
+            from: element, in: list,
+            recordsIdentityFailure: recordsIdentityFailure
+        ) {
         case let .success(selection):
             return .visible(
                 Snapshot(
                     applications: selection.applications,
                     listFrame: listFrame,
-                    selectedItemFrame: frame(of: selection.anchorElement)
+                    selectedItemFrame: frame(of: selection.anchorElement),
+                isSharedWeChat: selection.isSharedWeChat,
+                    commitContext: makeCommitContext(list: list)
                 )
             )
         case .notFound:
@@ -2886,6 +3695,7 @@ private final class NativeProcessSwitcherBridge {
     private struct SelectedApplication {
         let applications: [NSRunningApplication]
         let anchorElement: AXUIElement
+        var isSharedWeChat = false
 
         var application: NSRunningApplication {
             applications[0]
@@ -2956,18 +3766,14 @@ private final class NativeProcessSwitcherBridge {
         for candidate in candidates.prefix(12) {
             switch resolveApplication(from: candidate.element, in: list) {
             case let .success(selection):
-                guard let identity = applicationGroupIdentity(
-                    for: selection.applications
-                ) else { return .ambiguous }
+                guard let identity = selectionGroupIdentity(selection) else { return .ambiguous }
                 if let existing = selectionsByIdentity[identity] {
-                    guard let mergedApplications = mergeApplications(
-                        existing.applications,
-                        selection.applications
-                    ) else { return .ambiguous }
-                    selectionsByIdentity[identity] = SelectedApplication(
-                        applications: mergedApplications,
-                        anchorElement: existing.anchorElement
-                    )
+                    if existing.isSharedWeChat && selection.isSharedWeChat {
+                        selectionsByIdentity[identity] = existing
+                    } else {
+                        guard let mergedApplications = mergeApplications(existing.applications, selection.applications) else { return .ambiguous }
+                        selectionsByIdentity[identity] = SelectedApplication(applications: mergedApplications, anchorElement: existing.anchorElement)
+                    }
                 } else {
                     selectionsByIdentity[identity] = selection
                 }
@@ -2986,7 +3792,8 @@ private final class NativeProcessSwitcherBridge {
 
     private func resolveApplication(
         from selectedElement: AXUIElement,
-        in list: AXUIElement
+        in list: AXUIElement,
+        recordsIdentityFailure: Bool = false
     ) -> ApplicationResolution {
         let applications = NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular
@@ -3011,11 +3818,15 @@ private final class NativeProcessSwitcherBridge {
         var selectedIdentity: String?
         var anchorElement = selectedElement
         var sawAmbiguousScope = false
+        var allAmbiguousScopesComplete = true
+        var diagnosticEvidence: (applications: [NSRunningApplication], firstDepth: Int)?
         scopeLoop: for scope in lineage {
+            var scopeEvidence: (applications: [NSRunningApplication], firstDepth: Int)?
             switch resolveApplication(
                 in: scope,
                 maximumDepth: 3,
-                applications: applications
+                applications: applications,
+                diagnosticEvidence: &scopeEvidence
             ) {
             case let .success(resolvedApplications):
                 guard let identity = applicationGroupIdentity(
@@ -3041,6 +3852,8 @@ private final class NativeProcessSwitcherBridge {
                 }
             case .ambiguous:
                 sawAmbiguousScope = true
+                if scopeEvidence == nil { allAmbiguousScopesComplete = false }
+                if diagnosticEvidence == nil { diagnosticEvidence = scopeEvidence }
                 // Once a narrower descendant has identified exactly one App,
                 // the first ambiguous ancestor is the shared row/container.
                 // Stop before identities from adjacent tiles can contaminate
@@ -3052,18 +3865,118 @@ private final class NativeProcessSwitcherBridge {
         }
 
         if let selectedApplications {
-            return .success(SelectedApplication(
-                applications: selectedApplications,
-                anchorElement: anchorElement
-            ))
+            let selection = SelectedApplication(applications: selectedApplications, anchorElement: anchorElement)
+            return .success(expandKnownWeChatSelection(selection, selectedElement: selectedElement, running: applications))
+        }
+        if sawAmbiguousScope, allAmbiguousScopesComplete,
+           let diagnosticEvidence,
+           diagnosticEvidence.firstDepth == 0,
+           let shared = weakSharedWeChatSelection(from: selectedElement, running: applications) {
+            return .success(shared)
+        }
+        if recordsIdentityFailure, sawAmbiguousScope, let diagnosticEvidence {
+            // Only the native selected-tile snapshot opts into sampling.
+            // Pointer candidates can fail here then resolve through a fallback;
+            // those intermediate failures must not consume diagnostic capacity.
+            WindowNativeIdentityDiagnostics.shared.capture(
+                element: selectedElement,
+                applications: diagnosticEvidence.applications,
+                firstDepth: diagnosticEvidence.firstDepth
+            )
         }
         return sawAmbiguousScope ? .ambiguous : .notFound
+    }
+
+    private func expandKnownWeChatSelection(
+        _ selection: SelectedApplication,
+        selectedElement: AXUIElement,
+        running: [NSRunningApplication]
+    ) -> SelectedApplication {
+        guard selection.applications.allSatisfy({
+            WindowCommandTabSharingPolicy.installation(for: weChatSharingApplication($0)) != nil
+        }) else { return selection }
+        let values = directIdentityValues(from: selectedElement, includeCustomIdentityAttributes: true)
+        let selected = selection.applications.map(weChatSharingApplication)
+        let strongStrings = values.strings.filter { $0.contains("/") || $0.contains(".") }
+        guard !values.processIdentifiers.isEmpty || !values.urls.isEmpty || !strongStrings.isEmpty else {
+            return weakSharedWeChatSelection(from: selectedElement, running: running) ?? selection
+        }
+        // Unmatched/conflicting strong values must not be rescued by a name.
+        guard values.processIdentifiers.isEmpty || Set(values.processIdentifiers) == Set(selected.map(\.processID)),
+              values.urls.allSatisfy({ url in url.isFileURL && selected.contains { $0.bundlePath == url.standardizedFileURL.resolvingSymlinksInPath().path } }),
+              values.strings.filter({ $0.contains("/") || $0.contains(".") }).allSatisfy({ value in
+                  selection.applications.contains { app in
+                      value == app.bundleIdentifier || value == app.bundleURL?.path || value == app.bundleURL?.absoluteString
+                  }
+              }),
+              let group = WindowCommandTabSharingPolicy.sharedWeChatGroup(
+                selected: selected, running: running.map(weChatSharingApplication), evidence: .resolvedIdentity
+              ) else { return selection }
+        let byPID = Dictionary(uniqueKeysWithValues: running.map { ($0.processIdentifier, $0) })
+        return SelectedApplication(
+            applications: group.processIDs.compactMap { byPID[$0] },
+            anchorElement: selection.anchorElement,
+            isSharedWeChat: true
+        )
+    }
+
+    private func weakSharedWeChatSelection(
+        from element: AXUIElement,
+        running: [NSRunningApplication]
+    ) -> SelectedApplication? {
+        guard stringAttribute(kAXRoleAttribute, of: element) == kAXButtonRole as String,
+              let title = stringAttribute(kAXTitleAttribute, of: element),
+              title == "微信" || title == "WeChat" else { return nil }
+        var rawNames: CFArray?
+        guard AXUIElementCopyAttributeNames(element, &rawNames) == .success,
+              let names = rawNames as? [String] else { return nil }
+        // Never call a failed/truncated hierarchy probe an empty leaf.
+        for name in [kAXChildrenAttribute, kAXVisibleChildrenAttribute] where names.contains(name) {
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+            if error == .noValue { continue }
+            guard error == .success,
+                  let values = value as? [AXUIElement], values.isEmpty else { return nil }
+        }
+        let keywords = ["bundle", "identifier", "url", "path", "application", "process", "pid"]
+        let identityNames = names.filter { name in keywords.contains { name.lowercased().contains($0) } }
+        guard identityNames.count <= 24 else { return nil }
+        let scalarNames = Set(identityNames + [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute, kAXValueAttribute])
+        for name in scalarNames where names.contains(name) {
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+            if error == .noValue { continue }
+            guard error == .success else { return nil }
+            // A read failure or an unrecognized scalar/reference must not be
+            // mistaken for lack of stronger identity.
+            guard let string = value as? String else { return nil }
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty || trimmed == title || trimmed == "微信" || trimmed == "WeChat" else { return nil }
+        }
+        let values = directIdentityValues(from: element, includeCustomIdentityAttributes: true)
+        let hasStrongIdentity = !values.urls.isEmpty || !values.processIdentifiers.isEmpty
+            || values.strings.contains { $0 != title && $0 != "微信" && $0 != "WeChat" }
+        let selected = matchingApplications(identityValues: values, applications: running)
+        guard let group = WindowCommandTabSharingPolicy.sharedWeChatGroup(
+            selected: selected.map(weChatSharingApplication), running: running.map(weChatSharingApplication),
+            evidence: .weakSelectedButton(title: title, isLeaf: true, searchComplete: true, hasStrongIdentity: hasStrongIdentity)
+        ) else { return nil }
+        let byPID = Dictionary(uniqueKeysWithValues: running.map { ($0.processIdentifier, $0) })
+        return SelectedApplication(applications: group.processIDs.compactMap { byPID[$0] }, anchorElement: element, isSharedWeChat: true)
+    }
+
+    private func selectionGroupIdentity(_ selection: SelectedApplication) -> String? {
+        if selection.isSharedWeChat {
+            return "sharedWeChat:" + selection.applications.map { String($0.processIdentifier) }.sorted().joined(separator: ",")
+        }
+        return applicationGroupIdentity(for: selection.applications)
     }
 
     private func resolveApplication(
         in root: AXUIElement,
         maximumDepth: Int,
-        applications: [NSRunningApplication]
+        applications: [NSRunningApplication],
+        diagnosticEvidence: inout (applications: [NSRunningApplication], firstDepth: Int)?
     ) -> IdentityResolution {
         let maximumIdentityNodes = 48
         var currentLevel = [root]
@@ -3072,6 +3985,7 @@ private final class NativeProcessSwitcherBridge {
         var ambiguousMatchCount = 0
         var ambiguousMatchDepth = 0
         var ambiguousEvidence = ""
+        var ambiguousApplications: [NSRunningApplication] = []
         for depth in 0...maximumDepth where !currentLevel.isEmpty {
             var matchesByPID: [pid_t: NSRunningApplication] = [:]
             var nextLevel: [AXUIElement] = []
@@ -3153,6 +4067,7 @@ private final class NativeProcessSwitcherBridge {
                 if ambiguousMatchCount == 0 {
                     ambiguousMatchCount = matchesByPID.count
                     ambiguousMatchDepth = depth
+                    ambiguousApplications = matches
                     ambiguousEvidence = currentLevel.prefix(4).map {
                         identityMatchSummary(from: $0, applications: applications)
                     }.joined(separator: " | ")
@@ -3175,6 +4090,14 @@ private final class NativeProcessSwitcherBridge {
             currentLevelWasTruncated = nextLevelWasTruncated
         }
         if ambiguousMatchCount > 0 {
+            diagnosticEvidence = (ambiguousApplications, ambiguousMatchDepth)
+            WindowInteractionDiagnosticRecorder.shared.record(
+                component: "cmdTab", event: "identityAmbiguous",
+                metadata: [
+                    "firstDepth": .integer(Int64(ambiguousMatchDepth)),
+                    "matchCount": .integer(Int64(ambiguousMatchCount))
+                ]
+            )
             let now = Date.timeIntervalSinceReferenceDate
             if now - lastIdentityAmbiguityLogTime >= 2 {
                 lastIdentityAmbiguityLogTime = now
@@ -3624,6 +4547,7 @@ private final class CommandTabOverlayController {
     private var interactionGeneration: UInt64 = 0
     private var recentCacheExpirationGeneration = 0
     private var recentCacheExpirationWorkItem: DispatchWorkItem?
+    private var lastPointerDiagnosticTime: TimeInterval = 0
 
     init() {
         let model = CommandTabOverlayModel()
@@ -3658,6 +4582,7 @@ private final class CommandTabOverlayController {
         items: [CommandTabDisplayItem],
         selectedIndex: Int,
         anchorAXFrame: CGRect,
+        allowsSyntheticHoverSelection: Bool = true,
         onCommitWindow: @escaping (Int, Int) -> Void,
         onHoverWindow: @escaping (Int, Int) -> Void,
         onCloseWindow: @escaping (Int, Int) -> Void
@@ -3713,6 +4638,9 @@ private final class CommandTabOverlayController {
             previewTileWidth: previewLayout.tileWidth,
             reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         )
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "cmdTab", event: "previewModel", metadata: model.diagnosticMetadata()
+        )
         rescheduleRecentCacheExpiration()
 
         // Dock owns and draws the native application strip. SuperIsland adds
@@ -3728,7 +4656,8 @@ private final class CommandTabOverlayController {
             _ = self.handleExternalPointer(
                 type: .mouseMoved,
                 at: NSEvent.mouseLocation,
-                deferAction: true
+                deferAction: true,
+                allowsHoverSelection: allowsSyntheticHoverSelection
             )
         }
     }
@@ -3748,7 +4677,8 @@ private final class CommandTabOverlayController {
     func handleExternalPointer(
         type: NSEvent.EventType,
         at screenLocation: CGPoint,
-        deferAction: Bool = false
+        deferAction: Bool = false,
+        allowsHoverSelection: Bool = true
     ) -> Bool {
         guard previewPanel.isVisible else { return false }
         guard previewPanel.frame.contains(screenLocation) else {
@@ -3759,7 +4689,7 @@ private final class CommandTabOverlayController {
         handlePointer(type: type, point: CGPoint(
             x: panelPoint.x,
             y: (previewPanel.contentView?.bounds.height ?? 0) - panelPoint.y
-        ), deferAction: deferAction)
+        ), deferAction: deferAction, allowsHoverSelection: allowsHoverSelection)
         return true
     }
 
@@ -3772,11 +4702,24 @@ private final class CommandTabOverlayController {
         model.clearPointerSelection()
     }
 
-    private func handlePointer(type: NSEvent.EventType, point: CGPoint, deferAction: Bool) {
+    private func handlePointer(type: NSEvent.EventType, point: CGPoint, deferAction: Bool, allowsHoverSelection: Bool = true) {
         let action = model.handlePointer(type, at: point)
+        if WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: Bundle.main.bundleIdentifier) {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastPointerDiagnosticTime >= 0.5 {
+                lastPointerDiagnosticTime = now
+                var metadata = model.diagnosticMetadata(at: type == .mouseExited ? nil : point)
+                metadata["insidePanel"] = .flag(type != .mouseExited)
+                metadata["externalTap"] = .flag(deferAction)
+                metadata["eventType"] = .integer(Int64(type.rawValue))
+                WindowInteractionDiagnosticRecorder.shared.record(
+                    component: "cmdTab", event: "previewPointer", metadata: metadata
+                )
+            }
+        }
         let hovered = model.pointerHoveredTarget
         let changed = hoveredWindowSelection != hovered
-        hoveredWindowSelection = hovered
+        hoveredWindowSelection = allowsHoverSelection ? hovered : nil
         guard action != nil || (changed && hovered != nil) else { return }
         let generation = interactionGeneration
         // Commit and close callbacks only enqueue immutable target identities.
@@ -3798,7 +4741,7 @@ private final class CommandTabOverlayController {
         let dispatchHover: @MainActor @Sendable () -> Void = { [weak self] in
             guard let self, self.previewPanel.isVisible,
                   self.interactionGeneration == generation else { return }
-            if changed, let hovered, self.model.pointerHoveredTarget == hovered,
+            if allowsHoverSelection, changed, let hovered, self.model.pointerHoveredTarget == hovered,
                self.model.isCurrent(hovered) {
                 self.model.onHoverWindow(hovered.applicationIndex, hovered.windowIndex)
             }
@@ -4037,8 +4980,10 @@ final class CommandTabOverlayModel: ObservableObject {
     @Published private(set) var previewTileWidth: CGFloat = 220
     @Published private(set) var reduceMotion = false
     @Published private(set) var pointerHoveredTarget: CommandTabPreviewTarget?
+    @Published private(set) var previewFrameGeneration: UInt64 = 0
 
     private var previewFrames: [CommandTabPreviewTarget: CGRect] = [:]
+    private var previewFrameOwners: [CommandTabPreviewTarget: UInt64] = [:]
     private var pointerState = WindowPreviewPointerState<CommandTabPreviewTarget>()
 
     var onCommitWindow: (Int, Int) -> Void = { _, _ in }
@@ -4057,7 +5002,9 @@ final class CommandTabOverlayModel: ObservableObject {
     ) {
         let newIdentities = items.flatMap { $0.windows.map(\.identity) }
         if self.items.flatMap({ $0.windows.map(\.identity) }) != newIdentities {
+            previewFrameGeneration &+= 1
             previewFrames = [:]
+            previewFrameOwners = [:]
             pointerHoveredTarget = nil
             pointerState = WindowPreviewPointerState()
         }
@@ -4077,6 +5024,7 @@ final class CommandTabOverlayModel: ObservableObject {
     }
 
     func clear() {
+        previewFrameGeneration &+= 1
         items = []
         selectedID = 0
         previewTileWidth = 220
@@ -4086,6 +5034,7 @@ final class CommandTabOverlayModel: ObservableObject {
         onCloseWindow = { _, _ in }
         pointerHoveredTarget = nil
         previewFrames = [:]
+        previewFrameOwners = [:]
         pointerState = WindowPreviewPointerState()
     }
 
@@ -4096,15 +5045,58 @@ final class CommandTabOverlayModel: ObservableObject {
 
     func setPreviewFrame(
         _ frame: CGRect?,
-        for target: CommandTabPreviewTarget
+        for target: CommandTabPreviewTarget,
+        generation: UInt64? = nil,
+        owner: UInt64? = nil
     ) {
+        if let generation, generation != previewFrameGeneration { return }
         guard frame == nil || isCurrent(target) else { return }
+        if let owner {
+            if frame != nil {
+                guard owner >= (previewFrameOwners[target] ?? 0) else { return }
+                previewFrameOwners[target] = owner
+            } else {
+                guard previewFrameOwners[target] == owner else { return }
+            }
+        } else if previewFrameOwners[target] != nil {
+            return
+        }
         if let frame {
             previewFrames[target] = frame
         } else {
+            // Keep the owner as a tombstone until the frame generation changes.
+            // A retiring SwiftUI view must neither erase its replacement's
+            // rectangle nor restore its old rectangle after that view detaches.
             previewFrames.removeValue(forKey: target)
         }
         updatePointerFrames()
+    }
+
+    func diagnosticMetadata(at point: CGPoint? = nil) -> [String: WindowInteractionDiagnosticValue] {
+        let windows = selectedItem?.windows ?? []
+        var values: [String: WindowInteractionDiagnosticValue] = [
+            "windowCount": .integer(Int64(windows.count)),
+            "frameCount": .integer(Int64(previewFrames.count)),
+            "closableCount": .integer(Int64(windows.filter(\.canClose).count)),
+            "activatableCount": .integer(Int64(windows.filter(\.canActivate).count)),
+            "imageCount": .integer(Int64(windows.filter { $0.thumbnailResult?.image != nil }.count)),
+            "frameGeneration": .integer(Int64(clamping: previewFrameGeneration))
+        ]
+        if let point {
+            let hits = previewFrames.filter { isCurrent($0.key) && $0.value.contains(point) }
+            values["hitCount"] = .integer(Int64(hits.count))
+            if hits.count == 1, let target = hits.first?.key {
+                values["hitPID"] = .integer(Int64(target.identity.processID))
+                values["hitWindowID"] = .integer(Int64(target.identity.windowID))
+                let hitWindow = windows.first(where: {
+                    $0.id == target.windowIndex && $0.identity == target.identity
+                })
+                values["hitCanClose"] = .flag(hitWindow?.canClose == true)
+                values["hitCanActivate"] = .flag(hitWindow?.canActivate == true)
+                values["hitHasImage"] = .flag(hitWindow?.thumbnailResult?.image != nil)
+            }
+        }
+        return values
     }
 
     func setPointerHovered(_ target: CommandTabPreviewTarget?) {
@@ -4265,12 +5257,14 @@ private struct CommandTabPreviewView: View {
             windowIndex: window.id,
             identity: window.identity
         )
+        let frameGeneration = model.previewFrameGeneration
         return CommandTabWindowPreviewTile(
             target: target,
             window: window,
             icon: item.icon,
             width: model.previewTileWidth,
             isPointerHovered: model.pointerHoveredTarget == target,
+            frameGeneration: frameGeneration,
             onCommit: {
                 guard model.isCurrent(target), window.canActivate else { return }
                 model.onCommitWindow(item.id, window.id)
@@ -4279,8 +5273,8 @@ private struct CommandTabPreviewView: View {
                 guard model.isCurrent(target), window.canClose else { return }
                 model.onCloseWindow(item.id, window.id)
             },
-            onFrameChange: { target, frame in
-                model.setPreviewFrame(frame, for: target)
+            onFrameChange: { target, frame, owner in
+                model.setPreviewFrame(frame, for: target, generation: frameGeneration, owner: owner)
             }
         )
     }
@@ -4314,9 +5308,10 @@ private struct CommandTabWindowPreviewTile: View {
     let icon: NSImage?
     let width: CGFloat
     let isPointerHovered: Bool
+    let frameGeneration: UInt64
     let onCommit: () -> Void
     let onClose: () -> Void
-    let onFrameChange: (CommandTabPreviewTarget, CGRect?) -> Void
+    let onFrameChange: (CommandTabPreviewTarget, CGRect?, UInt64) -> Void
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -4372,7 +5367,8 @@ private struct CommandTabWindowPreviewTile: View {
         .background(
             WindowPreviewFrameReporter(
                 target: target,
-                onChange: onFrameChange
+                generation: frameGeneration,
+                onOwnedChange: onFrameChange
             )
         )
     }

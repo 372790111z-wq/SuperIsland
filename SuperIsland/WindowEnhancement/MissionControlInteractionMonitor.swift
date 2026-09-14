@@ -14,6 +14,58 @@ enum MissionControlInspectionPolicy {
     }
 }
 
+enum MissionControlRootPresence: Equatable, Sendable {
+    case present
+    case absent
+    case unavailable
+}
+
+/// A motion-driven recovery probe is separate from a full window inspection.
+/// Invalidating a session keeps its outstanding slot occupied until completion,
+/// so a delayed AX reply cannot queue overlapping work or resurrect that session.
+struct MissionControlRootRecovery {
+    struct Request: Equatable, Sendable {
+        let generation: UInt64
+        let sequence: UInt64
+    }
+
+    private var generation: UInt64 = 0
+    private var sequence: UInt64 = 0
+    private(set) var inFlight: Request?
+    private(set) var nextAllowedNanoseconds: UInt64 = 0
+
+    mutating func invalidate() { generation &+= 1 }
+
+    func delayNanoseconds(now: UInt64) -> UInt64 {
+        nextAllowedNanoseconds > now ? nextAllowedNanoseconds - now : 0
+    }
+
+    mutating func begin(now: UInt64) -> Request? {
+        guard inFlight == nil, delayNanoseconds(now: now) == 0 else { return nil }
+        sequence &+= 1
+        let request = Request(generation: generation, sequence: sequence)
+        inFlight = request
+        return request
+    }
+
+    /// Only a timely, complete positive probe may arm the strict target resolver.
+    mutating func finish(
+        _ request: Request,
+        result: MissionControlRootPresence,
+        now: UInt64,
+        elapsedNanoseconds: UInt64,
+        canPublish: Bool
+    ) -> Bool {
+        guard inFlight == request else { return false }
+        inFlight = nil
+        let slow = elapsedNanoseconds > 120_000_000
+        let cooldown: UInt64 = slow ? 2_000_000_000
+            : (result == .unavailable ? 1_000_000_000 : 250_000_000)
+        nextAllowedNanoseconds = now &+ cooldown
+        return request.generation == generation && canPublish && !slow && result == .present
+    }
+}
+
 private typealias MissionControlAXWindowNumberResolver = @convention(c) (
     AXUIElement,
     UnsafeMutablePointer<CGWindowID>
@@ -147,7 +199,8 @@ private final class MissionControlMouseIngress: @unchecked Sendable {
     }
 }
 
-private enum MissionControlCloseClickDecision {
+enum MissionControlCloseClickDecision {
+    case suppressedPassThrough
     case passThrough
     case consume
     case consumeAndTrigger
@@ -156,10 +209,22 @@ private enum MissionControlCloseClickDecision {
 /// A lock-protected snapshot shared with the Quartz event-tap callback. It
 /// stores only the close control's global Quartz bounds and the current click
 /// sequence; the callback never reaches into AppKit or Accessibility.
-private final class MissionControlCloseInteractionState: @unchecked Sendable {
+final class MissionControlCloseInteractionState: @unchecked Sendable {
     private let lock = NSLock()
     private var visibleRegion: CGRect?
-    private var isConsumingClick = false
+    private let interaction = ZilanEventTapInteractionState()
+
+    var isSuppressed: Bool { interaction.isSuppressed }
+
+    func beginZilanSuppression(requestID: String) -> Bool {
+        // The same lock prevents an in-flight hit-test from starting a capture
+        // between checking the lease and returning its ACK.
+        lock.withLock { interaction.beginSuppression(requestID: requestID) }
+    }
+
+    func endZilanSuppression(requestID: String) {
+        interaction.endSuppression(requestID: requestID)
+    }
 
     func updateVisibleRegion(_ region: CGRect?) {
         lock.lock()
@@ -171,30 +236,31 @@ private final class MissionControlCloseInteractionState: @unchecked Sendable {
         for type: CGEventType,
         location: CGPoint
     ) -> MissionControlCloseClickDecision {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !interaction.isSuppressed else { return .suppressedPassThrough }
         guard type == .leftMouseDown ||
                 type == .leftMouseUp ||
                 type == .leftMouseDragged else {
             return .passThrough
         }
-        lock.lock()
-        defer { lock.unlock() }
         switch type {
         case .leftMouseDown:
-            if isConsumingClick {
+            if interaction.isCapturing {
                 return .consume
             }
             guard let visibleRegion,
                   visibleRegion.contains(location) else {
                 return .passThrough
             }
-            isConsumingClick = true
+            guard interaction.beginCapture() else { return .suppressedPassThrough }
             return .consumeAndTrigger
         case .leftMouseUp:
-            guard isConsumingClick else { return .passThrough }
-            isConsumingClick = false
+            guard interaction.isCapturing else { return .passThrough }
+            interaction.endCapture()
             return .consume
         case .leftMouseDragged:
-            return isConsumingClick ? .consume : .passThrough
+            return interaction.isCapturing ? .consume : .passThrough
         default:
             return .passThrough
         }
@@ -203,7 +269,7 @@ private final class MissionControlCloseInteractionState: @unchecked Sendable {
     func reset() {
         lock.lock()
         visibleRegion = nil
-        isConsumingClick = false
+        interaction.endCapture()
         lock.unlock()
     }
 }
@@ -288,6 +354,8 @@ private final class MissionControlMouseEventTap: @unchecked Sendable {
             for: type,
             location: event.location
         ) {
+        case .suppressedPassThrough:
+            return false
         case .consumeAndTrigger:
             closeDelivery()
             return true
@@ -455,6 +523,55 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 resolution,
                 DispatchTime.now().uptimeNanoseconds &- started
             )
+        }
+    }
+
+    /// Read only Dock's direct children. Never enumerate application windows or
+    /// descend into Mission Control merely because the desktop pointer moved.
+    func probeRootPresence(
+        dockPID: pid_t,
+        completion: @escaping @Sendable (MissionControlRootPresence, UInt64) -> Void
+    ) {
+        queue.async { [self] in
+            let started = DispatchTime.now().uptimeNanoseconds
+            let result: MissionControlRootPresence = autoreleasepool {
+                guard dockPID > 0 else { return .unavailable }
+                let application = AXUIElementCreateApplication(dockPID)
+                AXUIElementSetMessagingTimeout(application, 0.015)
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(
+                    application, kAXChildrenAttribute as CFString, &value
+                ) == .success,
+                let children = value as? [AXUIElement], children.count <= 32 else {
+                    return .unavailable
+                }
+                let deadline = started &+ 45_000_000
+                var roots = 0
+                for child in children {
+                    guard DispatchTime.now().uptimeNanoseconds < deadline else {
+                        return .unavailable
+                    }
+                    AXUIElementSetMessagingTimeout(child, 0.015)
+                    var identifier: CFTypeRef?
+                    let error = AXUIElementCopyAttributeValue(
+                        child, "AXIdentifier" as CFString, &identifier
+                    )
+                    if error == .attributeUnsupported || error == .noValue { continue }
+                    guard error == .success, let identifier = identifier as? String else {
+                        return .unavailable
+                    }
+                    if normalizedAXToken(identifier) == "mc" { roots += 1 }
+                }
+                guard DispatchTime.now().uptimeNanoseconds < deadline else {
+                    return .unavailable
+                }
+                switch roots {
+                case 0: return .absent
+                case 1: return .present
+                default: return .unavailable
+                }
+            }
+            completion(result, DispatchTime.now().uptimeNanoseconds &- started)
         }
     }
 
@@ -2171,8 +2288,11 @@ final class MissionControlInteractionMonitor {
     private var mouseEventTap: MissionControlMouseEventTap?
     private var inspectionWorkItem: DispatchWorkItem?
     private var inspectionGeneration: UInt64 = 0
-    private var inspectionInFlight = false
+    private var inspectionInFlightGeneration: UInt64?
+    private var inspectionInFlight: Bool { inspectionInFlightGeneration != nil }
     private var inspectionPending = false
+    private var rootRecovery = MissionControlRootRecovery()
+    private var rootRecoveryWorkItem: DispatchWorkItem?
     private var lastInspectionStartedNanoseconds: UInt64 = 0
     private var lastInspectionFinishedNanoseconds: UInt64 = 0
     private var consecutiveSlowInspections = 0
@@ -2193,6 +2313,17 @@ final class MissionControlInteractionMonitor {
     private var lastMissionControlEvidenceNanoseconds: UInt64 = 0
     private var missionControlSessionValidationWorkItem: DispatchWorkItem?
     private var postActionInspectionWorkItems: [DispatchWorkItem] = []
+
+    func beginZilanSuppression(requestID: String) -> Bool {
+        guard closeInteractionState.beginZilanSuppression(requestID: requestID) else { return false }
+        clearMissionControlObservation(reason: "suppression")
+        clearTarget(clearPendingKeyboardTarget: true)
+        return true
+    }
+
+    func endZilanSuppression(requestID: String) {
+        closeInteractionState.endZilanSuppression(requestID: requestID)
+    }
 
     func start() {
         updateEnabledState()
@@ -2457,8 +2588,9 @@ final class MissionControlInteractionMonitor {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.clearMissionControlObservation()
-                self?.clearTarget(clearPendingKeyboardTarget: true)
+                guard let self, self.monitorGeneration == generation else { return }
+                self.clearMissionControlObservation(reason: "space_changed")
+                self.clearTarget(clearPendingKeyboardTarget: true)
             }
         }
         let distributedCenter = DistributedNotificationCenter.default()
@@ -2472,7 +2604,8 @@ final class MissionControlInteractionMonitor {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
+                    guard let self, self.monitorGeneration == generation,
+                          self.canInspectScene else { return }
                     self.markMissionControlObserved()
                     self.scheduleInspection(force: true)
                 }
@@ -2501,7 +2634,6 @@ final class MissionControlInteractionMonitor {
         inspectionWorkItem?.cancel()
         inspectionWorkItem = nil
         inspectionGeneration &+= 1
-        inspectionInFlight = false
         inspectionPending = false
         lastInspectionStartedNanoseconds = 0
         lastInspectionFinishedNanoseconds = 0
@@ -2573,20 +2705,106 @@ final class MissionControlInteractionMonitor {
         return nil
     }
 
+    private var canInspectScene: Bool {
+        (globalMonitor != nil || localMonitor != nil) &&
+            preferences.isEnabled && preferences.missionControlEnabled &&
+            !closeInteractionState.isSuppressed && AXIsProcessTrusted()
+    }
+
+    private func scheduleRootRecovery() {
+        guard canInspectScene, !missionControlHierarchyObserved,
+              rootRecoveryWorkItem == nil, rootRecovery.inFlight == nil else { return }
+        if let inspectionCircuitOpenUntil, ContinuousClock.now < inspectionCircuitOpenUntil {
+            return
+        }
+        guard !inspectionInFlight, inspectionWorkItem == nil else {
+            inspectionPending = true
+            return
+        }
+        let generation = inspectionGeneration
+        let delay = rootRecovery.delayNanoseconds(now: DispatchTime.now().uptimeNanoseconds)
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.inspectionGeneration == generation else { return }
+            self.rootRecoveryWorkItem = nil
+            guard self.canInspectScene else { return }
+            if self.missionControlHierarchyObserved {
+                self.scheduleInspection()
+                return
+            }
+            guard !self.inspectionInFlight, self.inspectionWorkItem == nil else {
+                self.inspectionPending = true
+                return
+            }
+            guard let dockPID = self.resolvedDockPID(),
+                  let request = self.rootRecovery.begin(
+                    now: DispatchTime.now().uptimeNanoseconds
+                  ) else { return }
+            self.axResolver.probeRootPresence(dockPID: dockPID) { [weak self] result, elapsed in
+                Task { @MainActor [weak self] in
+                    self?.finishRootRecovery(request, result: result, elapsedNanoseconds: elapsed)
+                }
+            }
+        }
+        rootRecoveryWorkItem = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .nanoseconds(Int(delay)), execute: item
+        )
+    }
+
+    private func finishRootRecovery(
+        _ request: MissionControlRootRecovery.Request,
+        result: MissionControlRootPresence,
+        elapsedNanoseconds: UInt64
+    ) {
+        let recovered = rootRecovery.finish(
+            request,
+            result: result,
+            now: DispatchTime.now().uptimeNanoseconds,
+            elapsedNanoseconds: elapsedNanoseconds,
+            canPublish: canInspectScene
+        )
+        let code: String
+        switch result {
+        case .present: code = "present"
+        case .absent: code = "absent"
+        case .unavailable: code = "unavailable"
+        }
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "mission_control", event: "root_recovery",
+            metadata: [
+                "result": .code(code), "recovered": .flag(recovered),
+                "elapsed_ms": .integer(Int64(elapsedNanoseconds / 1_000_000))
+            ]
+        )
+        guard canInspectScene else { return }
+        if recovered {
+            logger.notice("Mission Control session recovered from pointer root probe")
+            markMissionControlObserved()
+            inspectionPending = false
+            scheduleInspection(force: true)
+        } else if inspectionPending, missionControlHierarchyObserved {
+            // An expose notification may have arrived while this probe was busy.
+            inspectionPending = false
+            scheduleInspection(force: true)
+        }
+        // A negative probe never rearms itself. Only another pointer event may
+        // schedule the next one, so an idle desktop has no new periodic AX work.
+    }
+
     private func scheduleInspection(force: Bool = false) {
-        guard preferences.isEnabled,
-              preferences.missionControlEnabled,
-              AXIsProcessTrusted() else {
+        guard canInspectScene else {
             clearTarget()
             return
         }
-        // Ordinary desktop movement carries no evidence that Mission Control
-        // exists. Expose notifications force the first probe; only a verified
-        // hierarchy may then arm motion-driven AX hit-testing.
+        // Movement alone never starts a full AX/window scan. A bounded root-only
+        // probe recovers missed expose notifications and expired sessions.
         guard MissionControlInspectionPolicy.shouldSchedule(
             force: force,
             missionControlHierarchyObserved: missionControlHierarchyObserved
-        ) else { return }
+        ) else {
+            scheduleRootRecovery()
+            return
+        }
         let appKitLocation = NSEvent.mouseLocation
         if !force, closePanel.contains(appKitLocation) { return }
 
@@ -2597,10 +2815,12 @@ final class MissionControlInteractionMonitor {
             consecutiveSlowInspections = 0
         }
 
-        if inspectionInFlight {
+        if inspectionInFlight || rootRecovery.inFlight != nil {
             inspectionPending = true
             return
         }
+        rootRecoveryWorkItem?.cancel()
+        rootRecoveryWorkItem = nil
         guard inspectionWorkItem == nil else {
             inspectionPending = true
             return
@@ -2630,13 +2850,17 @@ final class MissionControlInteractionMonitor {
     }
 
     private func beginInspection(generation: UInt64) {
-        guard !inspectionInFlight,
-              let quartzLocation = CGEvent(source: nil)?.location,
+        guard canInspectScene, inspectionGeneration == generation else { return }
+        guard !inspectionInFlight, rootRecovery.inFlight == nil else {
+            inspectionPending = true
+            return
+        }
+        guard let quartzLocation = CGEvent(source: nil)?.location,
               let dockPID = resolvedDockPID() else {
             clearTarget()
             return
         }
-        inspectionInFlight = true
+        inspectionInFlightGeneration = generation
         inspectionPending = false
         lastInspectionStartedNanoseconds = DispatchTime.now().uptimeNanoseconds
         axResolver.resolve(point: quartzLocation, dockPID: dockPID) { [weak self] resolution, elapsed in
@@ -2655,8 +2879,15 @@ final class MissionControlInteractionMonitor {
         elapsedNanoseconds: UInt64,
         generation: UInt64
     ) {
-        guard inspectionGeneration == generation else { return }
-        inspectionInFlight = false
+        guard inspectionInFlightGeneration == generation else { return }
+        inspectionInFlightGeneration = nil
+        guard inspectionGeneration == generation, canInspectScene else {
+            if inspectionPending {
+                inspectionPending = false
+                scheduleInspection()
+            }
+            return
+        }
         lastInspectionFinishedNanoseconds = DispatchTime.now().uptimeNanoseconds
 
         if elapsedNanoseconds > 120_000_000 {
@@ -2677,6 +2908,28 @@ final class MissionControlInteractionMonitor {
 
         if lastResolutionDiagnosticCode != resolution.diagnosticCode {
             lastResolutionDiagnosticCode = resolution.diagnosticCode
+            let state: String
+            switch resolution {
+            case .outsideMissionControl: state = "outside"
+            case .indeterminate: state = "indeterminate"
+            case .missionControlWithoutExactTarget: state = "unresolved"
+            case .valid: state = "exact"
+            }
+            // Keep the fixed reason prefix; omit AX role/hint summaries.
+            let reason = resolution.diagnosticCode.components(separatedBy: "-v").first ?? "unknown"
+            var metadata: [String: WindowInteractionDiagnosticValue] = [
+                "state": .code(state),
+                "reason": .code(WindowInteractionDiagnosticLimiter.isStateCode(reason) ? reason : "multiple_states"),
+                "elapsed_ms": .integer(Int64(elapsedNanoseconds / 1_000_000))
+            ]
+            if case let .valid(hit) = resolution {
+                metadata["pid"] = .integer(Int64(hit.ownerPID))
+                metadata["windowID"] = .integer(Int64(hit.windowNumber))
+                metadata["canClose"] = .flag(hit.canClose)
+            }
+            WindowInteractionDiagnosticRecorder.shared.record(
+                component: "mission_control", event: "target_resolution", metadata: metadata
+            )
             logger.notice(
                 "Mission Control pointer resolution=\(resolution.diagnosticCode, privacy: .public) elapsedMs=\(Double(elapsedNanoseconds) / 1_000_000, privacy: .public)"
             )
@@ -2863,7 +3116,23 @@ final class MissionControlInteractionMonitor {
         }
     }
 
-    private func clearMissionControlObservation() {
+    private func clearMissionControlObservation(reason: String = "monitor_reset") {
+        if missionControlHierarchyObserved || rootRecovery.inFlight != nil {
+            WindowInteractionDiagnosticRecorder.shared.record(
+                component: "mission_control", event: "session_cleared",
+                metadata: ["reason": .code(reason)]
+            )
+        }
+        // Replies from the previous Space/session/lease must not re-arm a target.
+        // Preserve occupied in-flight slots until those replies drain.
+        rootRecovery.invalidate()
+        rootRecoveryWorkItem?.cancel()
+        rootRecoveryWorkItem = nil
+        inspectionGeneration &+= 1
+        inspectionWorkItem?.cancel()
+        inspectionWorkItem = nil
+        inspectionPending = false
+        closeValidationGeneration &+= 1
         missionControlHierarchyObserved = false
         lastMissionControlEvidenceNanoseconds = 0
         missionControlSessionValidationWorkItem?.cancel()
@@ -2882,7 +3151,7 @@ final class MissionControlInteractionMonitor {
                 self.scheduleMissionControlSessionValidation()
                 return
             }
-            self.clearMissionControlObservation()
+            self.clearMissionControlObservation(reason: "evidence_expired")
             self.clearTarget(clearPendingKeyboardTarget: true)
         }
         missionControlSessionValidationWorkItem = item

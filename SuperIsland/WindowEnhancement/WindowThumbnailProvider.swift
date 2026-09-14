@@ -140,6 +140,41 @@ struct WindowThumbnailCaptureGeneration: Equatable, Sendable {
     let processEpoch: UInt64
 }
 
+/// The provenance needed to admit an exact-window cache entry without starting
+/// another ScreenCaptureKit enumeration. Pixels and permission checks stay in
+/// the provider; this value-only policy is shared by production and tests.
+struct WindowThumbnailCacheMetadata: Equatable, Sendable {
+    let processIdentifier: pid_t
+    let windowID: CGWindowID
+    let captureGeneration: WindowThumbnailCaptureGeneration
+    let capturedAt: Date
+}
+
+enum WindowThumbnailCachePolicy {
+    static func canRead(
+        entry: WindowThumbnailCacheMetadata,
+        requestedWindowID: CGWindowID?,
+        processIdentifier: pid_t,
+        expectedGeneration: WindowThumbnailCaptureGeneration,
+        currentGeneration: WindowThumbnailCaptureGeneration,
+        allowsDiscovery: Bool,
+        now: Date,
+        ttl: TimeInterval
+    ) -> Bool {
+        guard let requestedWindowID, requestedWindowID > 0,
+              requestedWindowID == entry.windowID,
+              processIdentifier > 0,
+              processIdentifier == entry.processIdentifier,
+              !expectedGeneration.processLifetimeKey.isEmpty,
+              expectedGeneration == currentGeneration,
+              entry.captureGeneration == expectedGeneration,
+              allowsDiscovery else { return false }
+        let age = now.timeIntervalSince(entry.capturedAt)
+        // A clock adjustment must not make a future-dated capture eligible.
+        return age >= 0 && age < ttl
+    }
+}
+
 /// Value-only generation bookkeeping. Production access is protected by the
 /// thumbnail cache lock, including validation immediately before cache writes.
 /// Only invalidated namespaces occupy the bounded table; untouched launches
@@ -923,9 +958,11 @@ enum WindowThumbnailProvider {
 
     private struct CachedThumbnail {
         let image: NSImage
-        let capturedAt: Date
-        let processIdentifier: pid_t
+        let metadata: WindowThumbnailCacheMetadata
         let estimatedByteCost: Int
+
+        var capturedAt: Date { metadata.capturedAt }
+        var processIdentifier: pid_t { metadata.processIdentifier }
     }
 
     private enum AuthorizationState: Equatable {
@@ -961,6 +998,102 @@ enum WindowThumbnailProvider {
     @MainActor private static var lifecycleObservers: [NSObjectProtocol] = []
     @MainActor private static var permissionPollTimer: Timer?
     @MainActor private static var lastKnownScreenRecordingPermission: Bool?
+
+    /// Consumers call this immediately before showing pixels, after any actor
+    /// hop. Keep the launch/revocation policy centralized with capture access.
+    static func presentationFailureResult() -> WindowThumbnailResult? {
+        switch authorizationState() {
+        case .authorized: nil
+        case .permissionRequired: .permissionRequired
+        case .restartRequired: .restartRequired
+        }
+    }
+
+    /// Reuses only same-process, exact-window pixels under the token recorded
+    /// with the consumer's current window inventory. A miss never starts AX or
+    /// ScreenCaptureKit work; the ordinary capture path supplies fresh results.
+    /// Callers must still validate their selection and AX revision before use.
+    static func validatedCachedResults(
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        requests: [WindowThumbnailRequest],
+        expectedCacheGeneration: WindowThumbnailCaptureGeneration
+    ) -> [WindowThumbnailResult?] {
+        guard !requests.isEmpty else { return [] }
+        let misses = [WindowThumbnailResult?](repeating: nil, count: requests.count)
+        // Authorization may purge the cache and acquire cacheLock itself.
+        guard !currentTaskIsCancelled,
+              authorizationState() == .authorized,
+              applicationIdentity.matchesCurrentProcess() else { return misses }
+
+        cacheLock.lock()
+        let now = Date()
+        pruneExpiredEntriesLocked(now: now)
+        let entries = requests.map { request -> CachedThumbnail? in
+            guard let windowID = request.windowID, windowID > 0,
+                  let entry = thumbnailCache[cacheKey(
+                    applicationIdentity: applicationIdentity,
+                    windowID: windowID
+                  )],
+                  canReadCachedEntryLocked(
+                    entry,
+                    request: request,
+                    applicationIdentity: applicationIdentity,
+                    expectedGeneration: expectedCacheGeneration,
+                    now: now
+                  ) else { return nil }
+            return entry
+        }
+        cacheLock.unlock()
+
+        guard !currentTaskIsCancelled,
+              authorizationState() == .authorized,
+              applicationIdentity.matchesCurrentProcess() else { return misses }
+
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let checkedAt = Date()
+        return zip(requests, entries).map { request, entry in
+            guard let entry, let windowID = request.windowID,
+                  let current = thumbnailCache[cacheKey(
+                    applicationIdentity: applicationIdentity,
+                    windowID: windowID
+                  )],
+                  current.image === entry.image,
+                  current.metadata == entry.metadata,
+                  canReadCachedEntryLocked(
+                    entry,
+                    request: request,
+                    applicationIdentity: applicationIdentity,
+                    expectedGeneration: expectedCacheGeneration,
+                    now: checkedAt
+                  ) else { return nil }
+            return .recentCache(entry.image, timestamp: entry.capturedAt)
+        }
+    }
+
+    /// Requires cacheLock. Never call permission or process APIs while locked.
+    private static func canReadCachedEntryLocked(
+        _ entry: CachedThumbnail,
+        request: WindowThumbnailRequest,
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        expectedGeneration: WindowThumbnailCaptureGeneration,
+        now: Date
+    ) -> Bool {
+        WindowThumbnailCachePolicy.canRead(
+            entry: entry.metadata,
+            requestedWindowID: request.windowID,
+            processIdentifier: applicationIdentity.processIdentifier,
+            expectedGeneration: expectedGeneration,
+            currentGeneration: captureGenerations.snapshot(for: applicationIdentity.processLifetimeKey),
+            allowsDiscovery: discoveryRetirements.allowsDiscovery(
+                windowID: entry.metadata.windowID,
+                processIdentifier: applicationIdentity.processIdentifier,
+                processLifetimeKey: applicationIdentity.processLifetimeKey
+            ),
+            now: now,
+            ttl: recentCacheTTL
+        )
+    }
 
     /// Captures off-Space and minimized windows through ScreenCaptureKit. Each
     /// request is matched to one WindowServer window, preferring an exact
@@ -1244,7 +1377,7 @@ enum WindowThumbnailProvider {
             if let image = capturedImage {
                 results[index] = storeFreshCapture(
                     image,
-                    exactKey: key,
+                    windowID: window.windowID,
                     request: request,
                     applicationIdentity: applicationIdentity,
                     expectedCacheGeneration: expectedCacheGeneration
@@ -1275,7 +1408,7 @@ enum WindowThumbnailProvider {
                     // renderer path had a chance to supply real content.
                     results[index] = storeFreshCapture(
                         uniformImage,
-                        exactKey: key,
+                        windowID: window.windowID,
                         request: request,
                         applicationIdentity: applicationIdentity,
                         expectedCacheGeneration: expectedCacheGeneration
@@ -1312,21 +1445,25 @@ enum WindowThumbnailProvider {
 
     private static func storeFreshCapture(
         _ image: NSImage,
-        exactKey: String,
+        windowID: CGWindowID,
         request: WindowThumbnailRequest,
         applicationIdentity: WindowThumbnailApplicationIdentity,
         expectedCacheGeneration: WindowThumbnailCaptureGeneration
     ) -> WindowThumbnailResult {
         let entry = CachedThumbnail(
             image: image,
-            capturedAt: Date(),
-            processIdentifier: applicationIdentity.processIdentifier,
+            metadata: WindowThumbnailCacheMetadata(
+                processIdentifier: applicationIdentity.processIdentifier,
+                windowID: windowID,
+                captureGeneration: expectedCacheGeneration,
+                capturedAt: Date()
+            ),
             estimatedByteCost: estimatedByteCost(of: image)
         )
         let stored = store(
             entry,
             keys: cacheKeysForStore(
-                exactKey: exactKey,
+                exactKey: cacheKey(applicationIdentity: applicationIdentity, windowID: windowID),
                 applicationIdentity: applicationIdentity,
                 request: request
             ),
