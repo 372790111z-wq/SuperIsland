@@ -16,10 +16,16 @@ enum WindowAXCandidatePolicy {
         isMinimized: Bool,
         isPreferredWindow: Bool,
         isHidden: Bool?,
-        isVisible: Bool?
+        isVisible: Bool?,
+        hasDocument: Bool = false
     ) -> Bool {
+        // AppKit can report a minimized document as AXDialog. Preserve that
+        // real AX object only with explicit document/nonmodal evidence; the
+        // reconciler still requires its exact WindowServer ID and owner.
+        let isMinimizedDocument = subrole == kAXDialogSubrole as String
+            && isMinimized && isModal == false && hasDocument
         guard role == kAXWindowRole as String,
-              subrole == kAXStandardWindowSubrole as String,
+              subrole == kAXStandardWindowSubrole as String || isMinimizedDocument,
               isModal != true else { return false }
         // AX can expose hidden helper windows as focused/main proxies. Hidden
         // state is authoritative even when that proxy is also marked minimized.
@@ -2590,6 +2596,11 @@ final class WindowCommandTabMonitor {
                 of: window
             )
             let isModal = boolAttribute("AXModal", of: window)
+            let hasMinimizedDocument = isMinimized
+                && subrole == kAXDialogSubrole as String
+                && isModal == false
+                && isHidden != true
+                && WindowPreviewCaptureEvidence.hasDocument(of: window)
             // Electron Apps can publish background standard-window shells.
             // Preserve a real focused/main or minimized untitled window, but
             // reject an otherwise hidden/invisible or untitled background
@@ -2602,7 +2613,8 @@ final class WindowCommandTabMonitor {
                 isMinimized: isMinimized,
                 isPreferredWindow: isPreferredWindow,
                 isHidden: isHidden == true,
-                isVisible: isVisible == false ? false : nil
+                isVisible: isVisible == false ? false : nil,
+                hasDocument: hasMinimizedDocument
             )
             let diagnosticWindowID = diagnosticsEnabled ? windowIDAttribute(window) : nil
             let diagnosticBounds = diagnosticsEnabled ? windowBounds(window) : nil
@@ -2643,7 +2655,8 @@ final class WindowCommandTabMonitor {
                 isMinimized: isMinimized,
                 isPreferredWindow: isPreferredWindow,
                 canClose: elementAttribute(kAXCloseButtonAttribute, of: window) != nil,
-                allowsUniformContent: WindowPreviewCaptureEvidence.allowsUniformContent(of: window)
+                allowsUniformContent: hasMinimizedDocument
+                    || WindowPreviewCaptureEvidence.allowsUniformContent(of: window)
             )
         }
 
