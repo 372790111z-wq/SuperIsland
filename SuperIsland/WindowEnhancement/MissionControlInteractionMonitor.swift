@@ -424,6 +424,10 @@ private final class MissionControlAXResolver: @unchecked Sendable {
     )?
 
 #if DEBUG
+    // Tests replace only the existing scene read; routing and canonicalization
+    // still run through resolveSynchronously without querying desktop AX.
+    private var sceneSnapshotForTesting: MissionControlAXResolution?
+
     /// Read-only shadow diagnostics for the isolated WE1 test bundle. This
     /// follows the identity-validation portion of WINS' observed scene path
     /// without changing target selection or enabling any destructive action.
@@ -621,31 +625,10 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         point: CGPoint,
         dockPID: pid_t
     ) -> MissionControlAXResolution {
-        let resolution: MissionControlAXResolution
-        let sceneResolution = resolveFromSceneSnapshot(
-            point: point,
-            dockPID: dockPID
-        )
-        switch sceneResolution {
-        case let .outsideMissionControl(code) where code.hasPrefix("scene-marker-not-found"):
-            // Older macOS releases sometimes expose only the element at the
-            // pointer. Keep the bounded point resolver as a compatibility
-            // fallback, but never use it when a scene scan saw Mission Control
-            // and failed to prove one exact target.
-            let pointResolution = resolveFromPoint(
-                point: point,
-                dockPID: dockPID
-            )
-            switch pointResolution {
-            case let .outsideMissionControl(pointCode):
-                resolution = .outsideMissionControl("\(code)+\(pointCode)")
-            default:
-                resolution = pointResolution
-            }
-        default:
-            resolution = sceneResolution
-        }
-        return canonicalized(resolution)
+        // An absent or ambiguous current Dock scene is terminal evidence.
+        // App-owned AX groups inherit the real window ID, and their ordinary
+        // subrectangles are not proof of a Mission Control thumbnail.
+        canonicalized(resolveFromSceneSnapshot(point: point, dockPID: dockPID))
     }
 
     /// Mission Control's AX hierarchy supplies transformed thumbnail geometry,
@@ -779,6 +762,9 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         point: CGPoint,
         dockPID: pid_t
     ) -> MissionControlAXResolution {
+#if DEBUG
+        if let sceneSnapshotForTesting { return sceneSnapshotForTesting }
+#endif
         let started = DispatchTime.now().uptimeNanoseconds
         let hardDeadline = started &+ 110_000_000
         let maximumTraversalDepth = 8
@@ -1150,210 +1136,8 @@ private final class MissionControlAXResolver: @unchecked Sendable {
             .lowercased()
     }
 
-    private func resolveFromPoint(
-        point: CGPoint,
-        dockPID: pid_t
-    ) -> MissionControlAXResolution {
-        var outsideCodes: [String] = []
-        // WINS asks the system-wide accessibility root before falling back to
-        // process-scoped providers. During Mission Control, Tahoe commonly
-        // exposes the transformed thumbnail proxy only through this root;
-        // querying Dock or WindowManager directly can return no value even
-        // while the pointer is visibly over a thumbnail.
-        let systemWideResult = resolveFromPoint(
-            point: point,
-            providerName: "system-wide",
-            providerElement: AXUIElementCreateSystemWide(),
-            dockPID: dockPID
-        )
-        switch systemWideResult {
-        case .valid, .missionControlWithoutExactTarget, .indeterminate:
-            return systemWideResult
-        case let .outsideMissionControl(code):
-            outsideCodes.append("system-wide:\(code)")
-        }
-
-        for provider in sceneProviders(dockPID: dockPID) {
-            let result = resolveFromPoint(
-                point: point,
-                providerName: provider.name,
-                providerElement: AXUIElementCreateApplication(provider.pid),
-                dockPID: dockPID
-            )
-            switch result {
-            case .valid, .missionControlWithoutExactTarget, .indeterminate:
-                return result
-            case let .outsideMissionControl(code):
-                outsideCodes.append("\(provider.name):\(code)")
-            }
-        }
-        return .outsideMissionControl(outsideCodes.joined(separator: ","))
-    }
-
-    private func resolveFromPoint(
-        point: CGPoint,
-        providerName: String,
-        providerElement: AXUIElement,
-        dockPID: pid_t
-    ) -> MissionControlAXResolution {
-        AXUIElementSetMessagingTimeout(providerElement, messagingTimeout)
-        var hitElement: AXUIElement?
-        let hitResult = AXUIElementCopyElementAtPosition(
-            providerElement,
-            Float(point.x),
-            Float(point.y),
-            &hitElement
-        )
-        guard hitResult == .success, let hitElement else {
-            return hitResult == .noValue
-                ? .outsideMissionControl("hit-no-value")
-                : .indeterminate("\(providerName)-hit-error-\(hitResult.rawValue)")
-        }
-
-        var current: AXUIElement? = hitElement
-        var visited = Set<CFHashCode>()
-        var sawMissionControlContainer = false
-        var sawPIDLessProxy = false
-        for depth in 0..<12 {
-            guard let candidate = current else { break }
-            let candidatePID = exactPID(of: candidate)
-            if candidatePID == nil {
-                // Tahoe can expose the first transformed Mission Control
-                // proxy without an owning PID. Its role, marker, parent and
-                // exact WindowServer number remain readable, so continue the
-                // bounded parent walk. A PID is still mandatory before any
-                // App-owned proxy can become an actionable target.
-                sawPIDLessProxy = true
-            }
-            let hash = CFHash(candidate)
-            guard visited.insert(hash).inserted else { break }
-            let role = stringAttribute(kAXRoleAttribute, of: candidate) ?? ""
-            let identifier = stringAttribute("AXIdentifier", of: candidate)?.lowercased() ?? ""
-            let subrole = stringAttribute(kAXSubroleAttribute, of: candidate)?.lowercased() ?? ""
-            let description = stringAttribute(kAXDescriptionAttribute, of: candidate)?.lowercased() ?? ""
-            if isMissionControlMarker(
-                identifier: identifier,
-                subrole: subrole,
-                description: description
-            ) {
-                sawMissionControlContainer = true
-            }
-            if isConcreteExposeWindowMarker(
-                identifier: identifier,
-                subrole: subrole,
-                description: description
-            ), let frame = visibleFrame(of: candidate) {
-                switch exactWindow(in: candidate) {
-                case .none:
-                    return .missionControlWithoutExactTarget("marker-without-unique-window")
-                case let .some(hit):
-                    return .valid(MissionControlAXHit(
-                        thumbnailFrame: frame,
-                        window: hit.window,
-                        windowNumber: hit.windowNumber,
-                        ownerPID: hit.ownerPID,
-                        canClose: elementAttribute(
-                            kAXCloseButtonAttribute,
-                            of: hit.window
-                        ) != nil
-                    ))
-                }
-            }
-
-            // On macOS 26, a point query scoped to the Dock can return a
-            // transformed proxy owned by the original App instead of a Dock
-            // AXGroup carrying an expose-window identifier. Accept that proxy
-            // only when it has one exact WindowServer identity and its AX frame
-            // is visibly transformed from the live window frame. A normal
-            // desktop AXWindow therefore cannot acquire Mission Control UI.
-            if isProxyCandidateRole(role),
-               let candidatePID,
-               let windowNumber = directWindowNumber(of: candidate),
-               let hit = resolveExactWindow(windowNumber),
-               hit.ownerPID == candidatePID,
-               hit.ownerPID != dockPID,
-               let thumbnailFrame = transformedThumbnailFrame(
-                   candidates: [visibleFrame(of: candidate), hit.windowServerFrame],
-                   liveWindow: hit.window,
-                   hitPoint: point
-               ) {
-                return .valid(MissionControlAXHit(
-                    thumbnailFrame: thumbnailFrame,
-                    window: hit.window,
-                    windowNumber: hit.windowNumber,
-                    ownerPID: hit.ownerPID,
-                    canClose: elementAttribute(
-                        kAXCloseButtonAttribute,
-                        of: hit.window
-                    ) != nil
-                ))
-            }
-
-            // The Dock point query is allowed to hand back an App-owned proxy,
-            // but its parent chain must remain within that App. Crossing to an
-            // unrelated PID without a concrete target is indeterminate.
-            if let candidatePID,
-               candidatePID != dockPID,
-               depth > 0,
-               let parent = elementAttribute(kAXParentAttribute, of: candidate),
-               let parentPID = exactPID(of: parent),
-               parentPID != candidatePID {
-                return sawMissionControlContainer
-                    ? .missionControlWithoutExactTarget("proxy-parent-pid-changed")
-                    : .indeterminate("proxy-parent-pid-changed")
-            }
-            current = elementAttribute(kAXParentAttribute, of: candidate)
-        }
-        return sawMissionControlContainer
-            ? .missionControlWithoutExactTarget("marker-without-target")
-            : sawPIDLessProxy
-                ? .indeterminate("pidless-proxy-without-marker")
-                : .outsideMissionControl("no-mission-control-marker")
-    }
-
-    private func sceneProviders(dockPID: pid_t) -> [(name: String, pid: pid_t)] {
-        var providers: [(name: String, pid: pid_t)] = []
-        if let windowManagerPID = NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.apple.WindowManager"
-        ).first?.processIdentifier,
-           windowManagerPID > 0 {
-            providers.append(("window-manager", windowManagerPID))
-        }
-        if dockPID > 0,
-           !providers.contains(where: { $0.pid == dockPID }) {
-            providers.append(("dock", dockPID))
-        }
-        return providers
-    }
-
     private func directWindowNumber(of element: AXUIElement) -> CGWindowID? {
         missionControlDirectWindowNumber(of: element)
-    }
-
-    private func isProxyCandidateRole(_ role: String) -> Bool {
-        role == (kAXWindowRole as String) ||
-            role == (kAXGroupRole as String) ||
-            role == "AXUnknown"
-    }
-
-    private func transformedThumbnailFrame(
-        candidates: [CGRect?],
-        liveWindow: AXUIElement,
-        hitPoint: CGPoint
-    ) -> CGRect? {
-        guard let liveFrame = frame(of: liveWindow) else { return nil }
-        return candidates.compactMap({ $0 }).first { candidate in
-            guard candidate.insetBy(dx: -2, dy: -2).contains(hitPoint) else {
-                return false
-            }
-            let deltas = [
-                abs(candidate.minX - liveFrame.minX),
-                abs(candidate.minY - liveFrame.minY),
-                abs(candidate.width - liveFrame.width),
-                abs(candidate.height - liveFrame.height)
-            ]
-            return deltas.max() ?? 0 >= 8
-        }
     }
 
     private func exactWindow(
@@ -1453,30 +1237,6 @@ private final class MissionControlAXResolver: @unchecked Sendable {
               !frame.isNull,
               !frame.isInfinite else { return nil }
         return frame
-    }
-
-    private func isMissionControlMarker(
-        identifier: String,
-        subrole: String,
-        description: String
-    ) -> Bool {
-        [identifier, subrole, description].contains { value in
-            value.contains("missioncontrol") ||
-                value.contains("mission control") ||
-                value.contains("expose")
-        }
-    }
-
-    private func isConcreteExposeWindowMarker(
-        identifier: String,
-        subrole: String,
-        description: String
-    ) -> Bool {
-        identifier.contains("exposewindowgroup") ||
-            identifier.contains("exposewindow") ||
-            subrole.contains("exposewindowgroup") ||
-            subrole.contains("exposewindow") ||
-            description.contains("expose window")
     }
 
     private func visibleFrame(of element: AXUIElement) -> CGRect? {
@@ -2313,11 +2073,13 @@ final class MissionControlInteractionMonitor {
     private var lastMissionControlEvidenceNanoseconds: UInt64 = 0
     private var missionControlSessionValidationWorkItem: DispatchWorkItem?
     private var postActionInspectionWorkItems: [DispatchWorkItem] = []
+#if DEBUG
+    private var canInspectSceneForTesting: Bool?
+#endif
 
     func beginZilanSuppression(requestID: String) -> Bool {
         guard closeInteractionState.beginZilanSuppression(requestID: requestID) else { return false }
         clearMissionControlObservation(reason: "suppression")
-        clearTarget(clearPendingKeyboardTarget: true)
         return true
     }
 
@@ -2417,8 +2179,9 @@ final class MissionControlInteractionMonitor {
         generation: UInt64,
         elapsedNanoseconds: UInt64
     ) {
-        guard closeValidationGeneration == generation,
-              preferences.isEnabled,
+        // A reply from an exited session must not clear a new session's UI.
+        guard closeValidationGeneration == generation else { return }
+        guard preferences.isEnabled,
               preferences.missionControlEnabled,
               preferences.isActionEnabled(.closeWindow),
               case let .valid(hit) = resolution,
@@ -2590,7 +2353,6 @@ final class MissionControlInteractionMonitor {
             Task { @MainActor in
                 guard let self, self.monitorGeneration == generation else { return }
                 self.clearMissionControlObservation(reason: "space_changed")
-                self.clearTarget(clearPendingKeyboardTarget: true)
             }
         }
         let distributedCenter = DistributedNotificationCenter.default()
@@ -2606,8 +2368,7 @@ final class MissionControlInteractionMonitor {
                 Task { @MainActor [weak self] in
                     guard let self, self.monitorGeneration == generation,
                           self.canInspectScene else { return }
-                    self.markMissionControlObserved()
-                    self.scheduleInspection(force: true)
+                    self.beginMissionControlObservation()
                 }
             }
         }
@@ -2706,7 +2467,10 @@ final class MissionControlInteractionMonitor {
     }
 
     private var canInspectScene: Bool {
-        (globalMonitor != nil || localMonitor != nil) &&
+#if DEBUG
+        if let canInspectSceneForTesting { return canInspectSceneForTesting }
+#endif
+        return (globalMonitor != nil || localMonitor != nil) &&
             preferences.isEnabled && preferences.missionControlEnabled &&
             !closeInteractionState.isSuppressed && AXIsProcessTrusted()
     }
@@ -2937,7 +2701,7 @@ final class MissionControlInteractionMonitor {
 
         switch resolution {
         case .outsideMissionControl:
-            clearTarget()
+            clearMissionControlObservation(reason: "scene_exited")
         case let .indeterminate(code):
             if code == "scene-mc-root-stabilizing" {
                 // The Dock publishes `mc` before its thumbnail subtree is
@@ -3108,6 +2872,14 @@ final class MissionControlInteractionMonitor {
             lhs.application.processIdentifier == rhs.application.processIdentifier
     }
 
+    private func beginMissionControlObservation() {
+        // An entry notification may race an old negative inspection. Advance
+        // the session while keeping that in-flight slot occupied until drain.
+        clearMissionControlObservation(reason: "scene_entered")
+        markMissionControlObserved()
+        scheduleInspection(force: true)
+    }
+
     private func markMissionControlObserved() {
         lastMissionControlEvidenceNanoseconds = DispatchTime.now().uptimeNanoseconds
         missionControlHierarchyObserved = true
@@ -3138,12 +2910,17 @@ final class MissionControlInteractionMonitor {
         missionControlSessionValidationWorkItem?.cancel()
         missionControlSessionValidationWorkItem = nil
         axResolver.resetMissionControlSession()
+        postActionInspectionWorkItems.forEach { $0.cancel() }
+        postActionInspectionWorkItems.removeAll()
+        clearTarget(clearPendingKeyboardTarget: true)
     }
 
     private func scheduleMissionControlSessionValidation() {
         missionControlSessionValidationWorkItem?.cancel()
+        let generation = inspectionGeneration
         let item = DispatchWorkItem { [weak self] in
-            guard let self, self.missionControlHierarchyObserved else { return }
+            guard let self, self.inspectionGeneration == generation,
+                  self.missionControlHierarchyObserved else { return }
             self.missionControlSessionValidationWorkItem = nil
             let now = DispatchTime.now().uptimeNanoseconds
             if now &- self.lastMissionControlEvidenceNanoseconds <= 700_000_000 {
@@ -3152,7 +2929,6 @@ final class MissionControlInteractionMonitor {
                 return
             }
             self.clearMissionControlObservation(reason: "evidence_expired")
-            self.clearTarget(clearPendingKeyboardTarget: true)
         }
         missionControlSessionValidationWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
@@ -3161,9 +2937,10 @@ final class MissionControlInteractionMonitor {
     private func schedulePostActionInspection() {
         postActionInspectionWorkItems.forEach { $0.cancel() }
         postActionInspectionWorkItems.removeAll()
+        let generation = inspectionGeneration
         for delay in [0.16, 0.24] {
             let item = DispatchWorkItem { [weak self] in
-                guard let self else { return }
+                guard let self, self.inspectionGeneration == generation else { return }
                 self.scheduleInspection(force: true)
                 self.postActionInspectionWorkItems.removeAll(where: { $0.isCancelled })
             }
@@ -3293,6 +3070,191 @@ final class MissionControlInteractionMonitor {
         return elements
     }
 }
+
+#if DEBUG
+/// Adapters expose observations of the real resolver/monitor, not another copy
+/// of their transition rules. No fixture starts monitors or presents a panel.
+enum MissionControlSceneResolverFixture {
+    enum Input {
+        case outside(String)
+        case indeterminate(String)
+        case unresolved(String)
+    }
+
+    struct Result: Equatable {
+        let state: String
+        let reason: String
+    }
+
+    static func resolve(_ input: Input) -> Result {
+        let resolution: MissionControlAXResolution
+        switch input {
+        case let .outside(reason): resolution = .outsideMissionControl(reason)
+        case let .indeterminate(reason): resolution = .indeterminate(reason)
+        case let .unresolved(reason): resolution = .missionControlWithoutExactTarget(reason)
+        }
+        return MissionControlAXResolver.resolveFixture(resolution)
+    }
+}
+
+extension MissionControlAXResolver {
+    static func resolveFixture(
+        _ scene: MissionControlAXResolution
+    ) -> MissionControlSceneResolverFixture.Result {
+        let resolver = MissionControlAXResolver()
+        resolver.sceneSnapshotForTesting = scene
+        let result = resolver.resolveSynchronously(point: .zero, dockPID: 123)
+        let state: String
+        switch result {
+        case .outsideMissionControl: state = "outside"
+        case .indeterminate: state = "indeterminate"
+        case .missionControlWithoutExactTarget: state = "unresolved"
+        case .valid: state = "valid"
+        }
+        return .init(state: state, reason: result.diagnosticCode)
+    }
+}
+
+extension MissionControlInteractionMonitor {
+    @MainActor
+    final class TestFixture {
+        struct Snapshot: Equatable {
+            let observed: Bool
+            let hasEvidence: Bool
+            let targetWindow: CGWindowID?
+            let pendingKeyboardWindow: CGWindowID?
+            let generation: UInt64
+            let inFlightGeneration: UInt64?
+            let closeGeneration: UInt64
+            let keyboardGeneration: UInt64
+            let inspectionPending: Bool
+            let inspectionScheduled: Bool
+            let rootRecoveryScheduled: Bool
+            let validationScheduled: Bool
+            let keyboardExpirationScheduled: Bool
+            let postActionCount: Int
+        }
+
+        private let monitor = MissionControlInteractionMonitor()
+        private let application: NSRunningApplication
+        private let identity: WindowThumbnailApplicationIdentity
+        private var trackedWorkItems: [DispatchWorkItem] = []
+        private let closeRegion = CGRect(x: 10, y: 40, width: 24, height: 24)
+
+        init?() {
+            let application = NSRunningApplication.current
+            guard let identity = WindowThumbnailApplicationIdentity(application: application) else {
+                return nil
+            }
+            self.application = application
+            self.identity = identity
+            monitor.canInspectSceneForTesting = true
+        }
+
+        var snapshot: Snapshot {
+            Snapshot(
+                observed: monitor.missionControlHierarchyObserved,
+                hasEvidence: monitor.lastMissionControlEvidenceNanoseconds != 0,
+                targetWindow: monitor.currentTarget?.windowNumber,
+                pendingKeyboardWindow: monitor.pendingKeyboardTarget?.target.windowNumber,
+                generation: monitor.inspectionGeneration,
+                inFlightGeneration: monitor.inspectionInFlightGeneration,
+                closeGeneration: monitor.closeValidationGeneration,
+                keyboardGeneration: monitor.pendingKeyboardTargetGeneration,
+                inspectionPending: monitor.inspectionPending,
+                inspectionScheduled: monitor.inspectionWorkItem != nil,
+                rootRecoveryScheduled: monitor.rootRecoveryWorkItem != nil,
+                validationScheduled: monitor.missionControlSessionValidationWorkItem != nil,
+                keyboardExpirationScheduled: monitor.pendingKeyboardTargetExpiration != nil,
+                postActionCount: monitor.postActionInspectionWorkItems.count
+            )
+        }
+
+        var trackedWorkCancellation: [Bool] { trackedWorkItems.map(\.isCancelled) }
+
+        func seedSession() {
+            monitor.inspectionGeneration = 10
+            monitor.closeValidationGeneration = 20
+            monitor.markMissionControlObserved()
+            installTarget(windowNumber: 41)
+            monitor.inspectionInFlightGeneration = monitor.inspectionGeneration
+            monitor.inspectionPending = true
+            monitor.inspectionWorkItem = DispatchWorkItem {}
+            monitor.rootRecoveryWorkItem = DispatchWorkItem {}
+            monitor.schedulePostActionInspection()
+            trackedWorkItems = [
+                monitor.inspectionWorkItem,
+                monitor.rootRecoveryWorkItem,
+                monitor.missionControlSessionValidationWorkItem,
+                monitor.pendingKeyboardTargetExpiration
+            ].compactMap { $0 } + monitor.postActionInspectionWorkItems
+        }
+
+        func installTarget(windowNumber: CGWindowID) {
+            let target = makeTarget(windowNumber: windowNumber)
+            monitor.currentTarget = target
+            monitor.currentTargetResolvedNanoseconds = DispatchTime.now().uptimeNanoseconds
+            monitor.stagePendingKeyboardTarget(action: .closeWindow, target: target)
+            monitor.closeInteractionState.updateVisibleRegion(closeRegion)
+        }
+
+        func enterScene() { monitor.beginMissionControlObservation() }
+
+        func clearSession() {
+            monitor.clearMissionControlObservation(reason: "test_reset")
+        }
+
+        func beginCurrentInspection() {
+            monitor.inspectionWorkItem?.cancel()
+            monitor.inspectionWorkItem = nil
+            monitor.inspectionInFlightGeneration = monitor.inspectionGeneration
+            monitor.inspectionPending = false
+        }
+
+        func finishOutside(generation: UInt64) {
+            monitor.finishInspection(
+                .outsideMissionControl("scene-marker-not-found"),
+                elapsedNanoseconds: 1_000_000, generation: generation
+            )
+        }
+
+        func finishValid(generation: UInt64) {
+            let target = makeTarget(windowNumber: 41)
+            monitor.finishInspection(
+                .valid(MissionControlAXHit(
+                    thumbnailFrame: target.thumbnailFrame, window: target.window,
+                    windowNumber: target.windowNumber,
+                    ownerPID: application.processIdentifier, canClose: true
+                )),
+                elapsedNanoseconds: 1_000_000, generation: generation
+            )
+        }
+
+        func finishClose(generation: UInt64) {
+            monitor.finishValidatedClose(
+                .outsideMissionControl("close-mc-root-missing"),
+                expected: makeTarget(windowNumber: 41), generation: generation,
+                elapsedNanoseconds: 1_000_000
+            )
+        }
+
+        func closeClickDecision() -> MissionControlCloseClickDecision {
+            let point = CGPoint(x: closeRegion.midX, y: closeRegion.midY)
+            let decision = monitor.closeInteractionState.decision(for: .leftMouseDown, location: point)
+            _ = monitor.closeInteractionState.decision(for: .leftMouseUp, location: point)
+            return decision
+        }
+
+        private func makeTarget(windowNumber: CGWindowID) -> Target {
+            Target(
+                application: application, applicationIdentity: identity,
+                applicationName: "Fixture", window: AXUIElementCreateApplication(application.processIdentifier),
+                windowNumber: windowNumber, thumbnailFrame: closeRegion, canClose: true
+            )
+        }
+    }
+}
+#endif
 
 @MainActor
 private final class MissionControlInteractionPanel: NSPanel {

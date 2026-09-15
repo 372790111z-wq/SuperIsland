@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import ScreenCaptureKit
 import XCTest
 @testable import SuperIsland
 
@@ -1869,5 +1870,80 @@ final class WindowInventoryReconcilerTests: XCTestCase {
             ownerWasPrivatelyValidated: ownerValidated ?? (source == .skyLight),
             levelWasPrivatelyValidated: levelValidated ?? (source == .skyLight)
         )
+    }
+}
+
+final class WindowThumbnailCaptureGeometryTests: XCTestCase {
+    func testCaptureSizeIgnoresDesktopOrigin() throws {
+        for origin in [CGPoint.zero, CGPoint(x: 1512, y: 122), CGPoint(x: -2560, y: -1440)] {
+            let configuration = try XCTUnwrap(WindowThumbnailCaptureConfiguration.make(
+                contentRect: CGRect(origin: origin, size: CGSize(width: 1920, height: 958))
+            ))
+            XCTAssertEqual(configuration.width, 480)
+            XCTAssertEqual(configuration.height, 240)
+            XCTAssertEqual(configuration.sourceRect, .zero)
+            XCTAssertEqual(configuration.destinationRect, .zero)
+        }
+    }
+
+    func testCaptureConfigurationFitsLandscapeAndPortraitWithoutStretching() throws {
+        for (size, expected) in [
+            (CGSize(width: 1600, height: 900), CGSize(width: 480, height: 270)),
+            (CGSize(width: 900, height: 1600), CGSize(width: 270, height: 480))
+        ] {
+            let configuration = try XCTUnwrap(WindowThumbnailCaptureConfiguration.make(
+                contentRect: CGRect(origin: .zero, size: size)
+            ))
+            XCTAssertEqual(configuration.width, Int(expected.width))
+            XCTAssertEqual(configuration.height, Int(expected.height))
+            XCTAssertTrue(configuration.scalesToFit)
+            XCTAssertTrue(configuration.preservesAspectRatio)
+            XCTAssertFalse(configuration.showsCursor)
+            XCTAssertTrue(configuration.ignoreShadowsSingleWindow)
+        }
+    }
+
+    func testCaptureDimensionsRespectUpscalingAndDecodedSizeBounds() throws {
+        for (size, expected) in [
+            (CGSize(width: 120, height: 80), CGSize(width: 240, height: 160)),
+            (CGSize(width: 240, height: 120), CGSize(width: 480, height: 240)),
+            (CGSize(width: 96_000, height: 48_000), CGSize(width: 480, height: 240)),
+            (CGSize(width: 0.1, height: 0.2), CGSize(width: 1, height: 1)),
+            (CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude / 2),
+             CGSize(width: 480, height: 240))
+        ] {
+            let configuration = try XCTUnwrap(WindowThumbnailCaptureConfiguration.make(
+                contentRect: CGRect(origin: .zero, size: size)
+            ))
+            XCTAssertEqual(configuration.width, Int(expected.width))
+            XCTAssertEqual(configuration.height, Int(expected.height))
+            XCTAssertTrue((1...480).contains(configuration.width))
+            XCTAssertTrue((1...480).contains(configuration.height))
+        }
+    }
+
+    func testCaptureRejectsInvalidSourceDimensions() {
+        for invalid in [CGFloat.zero, -1, .infinity, -.infinity, .nan] {
+            XCTAssertNil(WindowThumbnailCaptureConfiguration.make(
+                contentRect: CGRect(x: 0, y: 0, width: invalid, height: 900)
+            ))
+            XCTAssertNil(WindowThumbnailCaptureConfiguration.make(
+                contentRect: CGRect(x: 0, y: 0, width: 1600, height: invalid)
+            ))
+        }
+    }
+
+    func testChangedSourceSizeCreatesIndependentConfiguration() throws {
+        let landscape = try XCTUnwrap(WindowThumbnailCaptureConfiguration.make(
+            contentRect: CGRect(x: 1512, y: 122, width: 1920, height: 958)
+        ))
+        let portrait = try XCTUnwrap(WindowThumbnailCaptureConfiguration.make(
+            contentRect: CGRect(x: 1512, y: 122, width: 958, height: 1920)
+        ))
+        XCTAssertFalse(landscape === portrait)
+        XCTAssertEqual(portrait.width, 240)
+        XCTAssertEqual(portrait.height, 480)
+        XCTAssertEqual(landscape.width, 480)
+        XCTAssertEqual(landscape.height, 240)
     }
 }
