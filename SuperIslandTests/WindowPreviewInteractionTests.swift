@@ -1,10 +1,60 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 import XCTest
 @testable import SuperIsland
 
 @MainActor
 final class WindowPreviewInteractionTests: XCTestCase {
+    func testAXLifecycleAdmitsOnlyAConfirmedRootForTheExactOwnerAndWindow() {
+        XCTAssertTrue(WindowAXLifecycleAdmissionPolicy.allowsTracking(
+            expectedOwnerPID: 568, reportedOwnerPID: 568, windowID: 130,
+            roleReadResult: .success, role: kAXWindowRole as String
+        ))
+        // AXWindow is the root role even for document/dialog subroles; this
+        // identity gate must not duplicate the later presentation policy.
+        XCTAssertTrue(WindowAXLifecycleAdmissionPolicy.allowsTracking(
+            expectedOwnerPID: 568, reportedOwnerPID: 568, windowID: 24636,
+            roleReadResult: .success, role: "AXWindow"
+        ))
+    }
+
+    func testAXLifecycleRejectsForeignOwnerAndMissingOrZeroWindowIdentity() {
+        let identities: [(pid_t, pid_t, CGWindowID?)] = [
+            (568, 569, 130), (568, 0, 130), (0, 0, 130),
+            (-1, -1, 130), (568, 568, nil), (568, 568, 0)
+        ]
+        for (expectedOwner, reportedOwner, windowID) in identities {
+            XCTAssertFalse(WindowAXLifecycleAdmissionPolicy.allowsTracking(
+                expectedOwnerPID: expectedOwner, reportedOwnerPID: reportedOwner,
+                windowID: windowID, roleReadResult: .success, role: "AXWindow"
+            ), "A root role alone cannot establish a different or missing identity")
+        }
+    }
+
+    func testSameWindowNumberOnNonRootProxyCannotReplaceAnExistingWindow() {
+        let roles: [String?] = ["AXApplication", "AXGroup", "AXUnknown", "AXButton", "AXSheet", "", nil]
+        for role in roles {
+            XCTAssertFalse(WindowAXLifecycleAdmissionPolicy.allowsTracking(
+                expectedOwnerPID: 568, reportedOwnerPID: 568, windowID: 130,
+                roleReadResult: .success, role: role
+            ), "An inherited WID must not admit a non-window proxy")
+        }
+    }
+
+    func testFailedOrTimedOutRootReadCannotAdmitAReplacementWithAStaleRoleValue() {
+        let failures: [AXError] = [
+            .invalidUIElement, .cannotComplete, .apiDisabled, .noValue,
+            .attributeUnsupported, .failure, .illegalArgument
+        ]
+        for failure in failures {
+            XCTAssertFalse(WindowAXLifecycleAdmissionPolicy.allowsTracking(
+                expectedOwnerPID: 568, reportedOwnerPID: 568, windowID: 130,
+                roleReadResult: failure, role: "AXWindow"
+            ), "Only a successful role read permits a new or replacement binding")
+        }
+    }
+
     private let a = WindowPreviewIdentity(processID: 10, windowID: 100)
     private let b = WindowPreviewIdentity(processID: 10, windowID: 200)
     private let bodyA = CGPoint(x: 60, y: 60)
@@ -46,6 +96,41 @@ final class WindowPreviewInteractionTests: XCTestCase {
         var state = state()
         XCTAssertNil(state.handle(.leftMouseUp, at: closeA))
         XCTAssertNil(state.handle(.leftMouseUp, at: bodyA))
+    }
+
+    func testPendingGestureRemainsOwnedUntilItsReleaseEventIsDelivered() {
+        var state = state()
+        XCTAssertFalse(state.hasPendingPress)
+        _ = state.handle(.leftMouseDown, at: bodyA)
+        XCTAssertTrue(state.hasPendingPress)
+        _ = state.handle(.mouseMoved, at: bodyA)
+        XCTAssertTrue(state.hasPendingPress, "Physical button state cannot finish an undelivered event pair")
+        XCTAssertEqual(state.handle(.leftMouseUp, at: bodyA), .activate(a))
+        XCTAssertFalse(state.hasPendingPress)
+        _ = state.handle(.leftMouseDown, at: closeA)
+        XCTAssertTrue(state.hasPendingPress)
+        _ = state.handle(.mouseExited, at: closeA)
+        XCTAssertFalse(state.hasPendingPress)
+        XCTAssertNil(state.handle(.leftMouseUp, at: closeA))
+    }
+
+    func testDockExposesUnfinishedClickToRecoveryUntilReleaseOrGeometryReset() {
+        let model = DockWindowPreviewModel()
+        var activated = 0
+        let row = DockPreviewRow(id: 100, title: "Test", isMinimized: false, canActivate: true,
+                                 isPreviewOnly: false, canClose: true, thumbnailResult: nil,
+                                 action: { activated += 1 }, closeAction: {})
+        model.update(appName: "Test", icon: nil, rows: [row], canManageWindows: true)
+        model.setPreviewFrames([100: CGRect(x: 0, y: 0, width: 100, height: 100)])
+        model.handlePointer(.leftMouseDown, at: bodyA)
+        XCTAssertTrue(model.hasPendingPointerPress)
+        model.handlePointer(.leftMouseUp, at: bodyA)
+        XCTAssertEqual(activated, 1)
+        XCTAssertFalse(model.hasPendingPointerPress)
+        model.handlePointer(.leftMouseDown, at: closeA)
+        XCTAssertTrue(model.hasPendingPointerPress)
+        model.resetPointerGeometry()
+        XCTAssertFalse(model.hasPendingPointerPress)
     }
 
     func testDraggingFromBodyIntoCloseDoesNotClose() {
@@ -482,12 +567,14 @@ final class WindowPreviewInteractionTests: XCTestCase {
         XCTAssertNil(model.selectedItem?.windows[1].thumbnailResult)
 
         _ = model.handlePointer(.leftMouseDown, at: bodyB)
+        XCTAssertTrue(model.hasPendingPointerPress)
         model.update(items: [cmdItem([a, b], thumbnails: [.fresh(freshImage), .fresh(freshImage)])],
                      selectedID: 0, previewTileWidth: 100, reduceMotion: true)
 
         XCTAssertEqual(model.selectedItem?.windows.map(\.identity), [a, b])
         XCTAssertTrue(model.selectedItem?.windows[1].thumbnailResult?.image === freshImage)
         XCTAssertEqual(model.handlePointer(.leftMouseUp, at: bodyB), .activate(target))
+        XCTAssertFalse(model.hasPendingPointerPress)
         XCTAssertNil(model.handlePointer(.leftMouseUp, at: bodyB))
     }
 
@@ -588,6 +675,354 @@ final class WindowPreviewInteractionTests: XCTestCase {
         model.update(items: [cmdItem([a], canClose: false)], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
         model.update(items: [cmdItem([a])], selectedID: 0, previewTileWidth: 100, reduceMotion: true)
         XCTAssertNil(model.handlePointer(.leftMouseUp, at: closeA))
+    }
+
+    private func addDockFrameReporter(
+        to panel: NSPanel,
+        model: DockWindowPreviewModel,
+        id: Int,
+        frame: CGRect
+    ) -> WindowPreviewFrameReportingView<Int> {
+        let generation = model.previewFrameGeneration
+        let reporter = WindowPreviewFrameReportingView(target: id, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        reporter.frame = frame
+        panel.contentView!.addSubview(reporter)
+        reporter.layout()
+        return reporter
+    }
+
+    func testDockRetainedReporterRestoresSameRectangleAfterGeometryReset() {
+        let model = DockWindowPreviewModel()
+        var activated = 0
+        var closed = 0
+        let row = DockPreviewRow(id: 100, title: "Test", isMinimized: false, canActivate: true,
+                                 isPreviewOnly: false, canClose: true, thumbnailResult: nil,
+                                 action: { activated += 1 }, closeAction: { closed += 1 })
+        model.update(appName: "Test", icon: nil, rows: [row], canManageWindows: true)
+        let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 240, height: 180),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.contentView = NSView(frame: CGRect(x: 0, y: 0, width: 240, height: 180))
+        defer { panel.close() }
+        let reporter = addDockFrameReporter(to: panel, model: model, id: row.id,
+                                            frame: CGRect(x: 0, y: 80, width: 100, height: 100))
+        let oldGeneration = model.previewFrameGeneration
+        model.handlePointer(.leftMouseDown, at: bodyA)
+        XCTAssertEqual(model.hoveredRowID, row.id)
+
+        // The same NSView can survive a hide/re-show or a neighboring row's
+        // removal. Its unchanged rectangle must be registered in the new table.
+        model.resetPointerGeometry()
+        let generation = model.previewFrameGeneration
+        XCTAssertNotEqual(generation, oldGeneration)
+        model.handlePointer(.mouseMoved, at: bodyA)
+        XCTAssertNil(model.hoveredRowID)
+        reporter.update(target: row.id, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        reporter.layout()
+        model.handlePointer(.mouseMoved, at: bodyA)
+        XCTAssertEqual(model.hoveredRowID, row.id)
+        model.handlePointer(.leftMouseUp, at: bodyA)
+        XCTAssertEqual(activated, 0, "Reset must not carry an earlier press into this presentation")
+        model.setPreviewFrame(nil, for: row.id, generation: oldGeneration, owner: reporter.frameOwner)
+        model.handlePointer(.leftMouseDown, at: bodyA)
+        model.handlePointer(.leftMouseUp, at: bodyA)
+        XCTAssertEqual(activated, 1)
+        model.handlePointer(.leftMouseDown, at: closeA)
+        model.handlePointer(.leftMouseUp, at: closeA)
+        XCTAssertEqual(closed, 1)
+        XCTAssertFalse(panel.isVisible)
+    }
+
+    func testDockRetiringReporterCannotEraseOrRestoreReplacementFrame() {
+        let model = DockWindowPreviewModel()
+        var closed = 0
+        let row = DockPreviewRow(id: 100, title: "Test", isMinimized: false, canActivate: true,
+                                 isPreviewOnly: false, canClose: true, thumbnailResult: nil,
+                                 action: {}, closeAction: { closed += 1 })
+        model.update(appName: "Test", icon: nil, rows: [row], canManageWindows: true)
+        let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 240, height: 180),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.contentView = NSView(frame: CGRect(x: 0, y: 0, width: 240, height: 180))
+        defer { panel.close() }
+        let old = addDockFrameReporter(to: panel, model: model, id: row.id,
+                                      frame: CGRect(x: 0, y: 80, width: 100, height: 100))
+        let replacement = addDockFrameReporter(to: panel, model: model, id: row.id,
+                                              frame: CGRect(x: 0, y: 80, width: 100, height: 100))
+        XCTAssertLessThan(old.frameOwner, replacement.frameOwner)
+        model.handlePointer(.leftMouseDown, at: closeA)
+        old.frame = CGRect(x: 110, y: 80, width: 100, height: 100)
+        old.layout()
+        old.detach()
+        model.handlePointer(.leftMouseUp, at: closeA)
+        XCTAssertEqual(closed, 1)
+        XCTAssertEqual(model.hoveredRowID, row.id)
+
+        replacement.detach()
+        let generation = model.previewFrameGeneration
+        old.update(target: row.id, generation: generation, onOwnedChange: {
+            model.setPreviewFrame($1, for: $0, generation: generation, owner: $2)
+        })
+        old.frame = CGRect(x: 0, y: 80, width: 100, height: 100)
+        old.layout()
+        model.handlePointer(.mouseMoved, at: closeA)
+        XCTAssertNil(model.hoveredRowID, "The retired owner cannot resurrect its old rectangle")
+        model.handlePointer(.leftMouseDown, at: closeA)
+        model.handlePointer(.leftMouseUp, at: closeA)
+        XCTAssertEqual(closed, 1)
+        XCTAssertFalse(panel.isVisible)
+    }
+
+    func testDockRecoveryKeepsHealthyOwnerAndRestoresOnlyExactOwnerPixelsAndActions() {
+        var activated: [pid_t] = []
+        let healthyImage = NSImage(size: NSSize(width: 20, height: 20))
+        let recoveredImage = NSImage(size: NSSize(width: 30, height: 20))
+        let healthy = DockPreviewRow(
+            id: 100, ownerProcessIdentifier: 10, ownerProcessLifetimeKey: "10-first",
+            title: "Healthy", isMinimized: false, canActivate: true, isPreviewOnly: false,
+            canClose: true, thumbnailResult: .fresh(healthyImage),
+            action: { activated.append(10) }, closeAction: {}
+        )
+        let previewOnly = DockPreviewRow(
+            id: 200, ownerProcessIdentifier: 20, ownerProcessLifetimeKey: "20-first",
+            title: "Preview", isMinimized: false, canActivate: false, isPreviewOnly: true,
+            canClose: false, thumbnailResult: .fresh(recoveredImage), action: {}, closeAction: {}
+        )
+        let restored = DockPreviewRow(
+            id: 200, ownerProcessIdentifier: 20, ownerProcessLifetimeKey: "20-first",
+            title: "Restored", isMinimized: false, canActivate: true, isPreviewOnly: false,
+            canClose: true, thumbnailResult: nil, action: { activated.append(20) }, closeAction: {}
+        )
+        let current = [healthy, previewOnly]
+        let request = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: current, requestedOwners: [20: "20-first"]
+        )
+        let rows = DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: current, refreshed: [restored], request: request
+        )!.rows
+        XCTAssertEqual(rows.map(\.id), [100, 200])
+        XCTAssertTrue(rows[0].thumbnailResult?.image === healthyImage)
+        XCTAssertTrue(rows[1].thumbnailResult?.image === recoveredImage)
+        XCTAssertTrue(rows[1].canActivate)
+        XCTAssertTrue(rows[1].canClose)
+        rows[0].action()
+        rows[1].action()
+        XCTAssertEqual(activated, [10, 20])
+
+        let model = DockWindowPreviewModel()
+        model.update(appName: "Test", icon: nil, rows: current, canManageWindows: true)
+        let generation = model.previewFrameGeneration
+        model.update(appName: "Test", icon: nil, rows: rows, canManageWindows: true)
+        XCTAssertEqual(model.previewFrameGeneration, generation, "Capability restoration does not move unchanged cards")
+        model.setPreviewFrames([100: CGRect(x: 0, y: 0, width: 100, height: 100)])
+        model.handlePointer(.leftMouseDown, at: bodyA)
+        model.update(appName: "Test", icon: nil,
+                     rows: [rows[0], rows[1].replacingThumbnailResult(.captureFailed)], canManageWindows: true)
+        model.handlePointer(.leftMouseUp, at: bodyA)
+        XCTAssertEqual(activated, [10, 20, 10], "Another owner's image completion must not cancel this click")
+    }
+
+    func testDockRecoveryRejectsPixelsWithoutOperationsAndWrongProcessLaunch() {
+        let previewOnly = DockPreviewRow(
+            id: 200, ownerProcessIdentifier: 20, ownerProcessLifetimeKey: "20-first",
+            title: "Preview", isMinimized: false, canActivate: false, isPreviewOnly: true,
+            canClose: false, thumbnailResult: .fresh(NSImage(size: NSSize(width: 20, height: 20))),
+            action: {}, closeAction: {}
+        )
+        let request = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: [previewOnly], requestedOwners: [20: "20-first"]
+        )
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: [previewOnly], refreshed: [previewOnly], request: request
+        ))
+        let differentLaunch = DockPreviewRow(
+            id: 200, ownerProcessIdentifier: 20, ownerProcessLifetimeKey: "20-second",
+            title: "Wrong launch", isMinimized: false, canActivate: true, isPreviewOnly: false,
+            canClose: true, thumbnailResult: nil, action: {}, closeAction: {}
+        )
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: [previewOnly], refreshed: [differentLaunch], request: request
+        ))
+    }
+
+    func testDockRecoveryRejectsDifferentWindowAndDuplicateTargets() {
+        let old = DockPreviewRow(
+            id: 200, ownerProcessIdentifier: 20, ownerProcessLifetimeKey: "20-first",
+            title: "Old", isMinimized: false, canActivate: false, isPreviewOnly: true,
+            canClose: false, thumbnailResult: .fresh(NSImage(size: NSSize(width: 20, height: 20))),
+            action: {}, closeAction: {}
+        )
+        let new = DockPreviewRow(
+            id: 201, ownerProcessIdentifier: 20, ownerProcessLifetimeKey: "20-first",
+            title: "New", isMinimized: false, canActivate: true, isPreviewOnly: false,
+            canClose: true, thumbnailResult: nil, action: {}, closeAction: {}
+        )
+        let request = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: [old], requestedOwners: [20: "20-first"]
+        )
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: [old], refreshed: [new], request: request
+        ))
+        let exact = DockPreviewRow(
+            id: 200, ownerProcessIdentifier: 20, ownerProcessLifetimeKey: "20-first",
+            title: "Exact", isMinimized: false, canActivate: true, isPreviewOnly: false,
+            canClose: true, thumbnailResult: nil, action: {}, closeAction: {}
+        )
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: [old], refreshed: [exact, exact], request: request
+        ))
+    }
+
+    private func recoveryRow(
+        id: Int,
+        owner: pid_t = 10,
+        lifetime: String = "10-first",
+        actionable: Bool,
+        image: NSImage? = nil,
+        action: @escaping () -> Void = {},
+        close: @escaping () -> Void = {}
+    ) -> DockPreviewRow {
+        DockPreviewRow(
+            id: id, ownerProcessIdentifier: owner, ownerProcessLifetimeKey: lifetime,
+            title: "Test", isMinimized: false, canActivate: actionable, isPreviewOnly: !actionable,
+            canClose: actionable, thumbnailResult: image.map(WindowThumbnailResult.fresh),
+            action: action, closeAction: close
+        )
+    }
+
+    func testDockPartialRecoveryRequiresEachMissingWindowAndKeepsHealthySibling() {
+        var actions: [String] = []
+        var closed: [String] = []
+        let images = (0..<3).map { _ in NSImage(size: NSSize(width: 20, height: 20)) }
+        let a = recoveryRow(id: 100, actionable: true, image: images[0],
+                            action: { actions.append("A-original") }, close: { closed.append("A-original") })
+        let b = recoveryRow(id: 200, actionable: false, image: images[1])
+        let c = recoveryRow(id: 300, actionable: false, image: images[2])
+        let current = [a, b, c]
+        let request = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: current, requestedOwners: [10: "10-first"]
+        )
+        XCTAssertEqual(request.missingTargets, [
+            WindowPreviewIdentity(processID: 10, windowID: 200),
+            WindowPreviewIdentity(processID: 10, windowID: 300)
+        ])
+        let refreshedA = recoveryRow(id: 100, actionable: true,
+                                     action: { actions.append("A-new") }, close: { closed.append("A-new") })
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: current, refreshed: [refreshedA], request: request
+        ), "An already healthy sibling is not recovery progress")
+
+        let refreshedB = recoveryRow(id: 200, actionable: true,
+                                     action: { actions.append("B") }, close: { closed.append("B") })
+        let afterB = DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: current,
+            refreshed: [recoveryRow(id: 100, actionable: false), refreshedB],
+            request: request
+        )!
+        XCTAssertEqual(afterB.rows.map(\.id), [100, 200, 300])
+        XCTAssertEqual(afterB.rows.map(\.canActivate), [true, true, false])
+        XCTAssertEqual(afterB.recoveredTargets, [WindowPreviewIdentity(processID: 10, windowID: 200)])
+        XCTAssertEqual(afterB.remainingRequest.missingTargets, [WindowPreviewIdentity(processID: 10, windowID: 300)])
+        XCTAssertEqual(afterB.remainingRequest.pendingOwners, [10])
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: afterB.rows, refreshed: [refreshedA, refreshedB], request: afterB.remainingRequest
+        ), "C remains pending even when both healthy siblings reappear")
+
+        let afterC = DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: afterB.rows,
+            refreshed: [recoveryRow(id: 300, actionable: true,
+                                    action: { actions.append("C") }, close: { closed.append("C") })],
+            request: afterB.remainingRequest
+        )!
+        XCTAssertEqual(afterC.rows.map(\.id), [100, 200, 300])
+        XCTAssertTrue(afterC.rows.allSatisfy(\.canActivate))
+        XCTAssertTrue(afterC.remainingRequest.pendingOwners.isEmpty)
+        for index in afterC.rows.indices {
+            XCTAssertTrue(afterC.rows[index].thumbnailResult?.image === images[index])
+            afterC.rows[index].action()
+            afterC.rows[index].closeAction()
+        }
+        XCTAssertEqual(actions, ["A-original", "B", "C"])
+        XCTAssertEqual(closed, ["A-original", "B", "C"])
+    }
+
+    func testDockPartialRecoveryIgnoresForeignOrUnrequestedWindows() {
+        let current = [recoveryRow(id: 100, actionable: true), recoveryRow(id: 200, actionable: false)]
+        let request = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: current, requestedOwners: [10: "10-first"]
+        )
+        let foreign = recoveryRow(id: 200, owner: 20, lifetime: "20-first", actionable: true)
+        let wrongLifetime = recoveryRow(id: 200, lifetime: "10-second", actionable: true)
+        let differentWindow = recoveryRow(id: 300, actionable: true)
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: current, refreshed: [foreign, wrongLifetime, differentWindow], request: request
+        ))
+        let update = DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: current,
+            refreshed: [foreign, wrongLifetime, differentWindow, recoveryRow(id: 200, actionable: true)],
+            request: request
+        )!
+        XCTAssertEqual(update.rows.map(\.id), [100, 200])
+        XCTAssertEqual(update.recoveredTargets, [WindowPreviewIdentity(processID: 10, windowID: 200)])
+        XCTAssertTrue(update.remainingRequest.pendingOwners.isEmpty)
+    }
+
+    func testDockPartialRecoveryCannotResurrectAWindowMissingFromCurrentPresentation() {
+        let a = recoveryRow(id: 100, actionable: true)
+        let b = recoveryRow(id: 200, actionable: false)
+        let request = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: [a, b], requestedOwners: [10: "10-first"]
+        )
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: [a], refreshed: [recoveryRow(id: 200, actionable: true)], request: request
+        ))
+    }
+
+    func testDockEmptyOwnerDiscoveryAcceptsRealTargetsAndRemovesOnlySyntheticPlaceholder() {
+        let placeholder = recoveryRow(id: -21, actionable: false)
+        let request = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: [placeholder], requestedOwners: [10: "10-first"], discoveryOwners: [10]
+        )
+        XCTAssertTrue(request.missingTargets.isEmpty)
+        XCTAssertEqual(request.pendingOwners, [10])
+        let update = DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: [placeholder], refreshed: [recoveryRow(id: 100, actionable: true)], request: request
+        )!
+        XCTAssertEqual(update.rows.map(\.id), [100])
+        XCTAssertNil(update.rows[0].thumbnailResult)
+        XCTAssertTrue(update.remainingRequest.pendingOwners.isEmpty)
+    }
+
+    func testDockDiscoveryKeepsPositiveUnboundWindowWhenAnotherWindowIsFound() {
+        let image = NSImage(size: NSSize(width: 20, height: 20))
+        let old = recoveryRow(id: 200, actionable: false, image: image)
+        let request = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: [old], requestedOwners: [10: "10-first"], discoveryOwners: [10]
+        )
+        let discovered = recoveryRow(id: 201, actionable: true)
+        let first = DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: [old], refreshed: [discovered], request: request
+        )!
+        XCTAssertEqual(first.rows.map(\.id), [200, 201])
+        XCTAssertFalse(first.rows[0].canActivate)
+        XCTAssertTrue(first.rows[0].thumbnailResult?.image === image)
+        XCTAssertNil(first.rows[1].thumbnailResult)
+        XCTAssertEqual(first.remainingRequest.missingTargets, [WindowPreviewIdentity(processID: 10, windowID: 200)])
+        XCTAssertTrue(first.remainingRequest.discoveryOwners.isEmpty)
+        XCTAssertNil(DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: first.rows, refreshed: [discovered], request: first.remainingRequest
+        ))
+        let second = DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+            current: first.rows, refreshed: [recoveryRow(id: 200, actionable: true)], request: first.remainingRequest
+        )!
+        XCTAssertEqual(second.rows.map(\.id), [200, 201])
+        XCTAssertTrue(second.rows.allSatisfy(\.canActivate))
+        XCTAssertTrue(second.rows[0].thumbnailResult?.image === image)
+        XCTAssertTrue(second.remainingRequest.pendingOwners.isEmpty)
     }
 
     func testDockModelHoverAndCloseUseSameTargetAndDispatchExactlyOnce() {

@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import CryptoKit
 import Darwin
 import OSLog
 import ScreenCaptureKit
@@ -93,6 +94,24 @@ struct WindowAXLifecycleRevision: Equatable, Sendable {
     }
 }
 
+enum WindowAXLifecycleActionPolicy {
+    static func guardedAction(
+        captured: WindowAXLifecycleRevision?,
+        current: @escaping () -> WindowAXLifecycleRevision?,
+        action: @escaping () -> Void
+    ) -> () -> Void {
+        // Captured by the displayed row, independent of hover/capture cleanup
+        // during the panel's delayed-hide grace period.
+        { if isCurrent(captured: captured, current: current()) { action() } }
+    }
+
+    static func isCurrent(captured: WindowAXLifecycleRevision?, current: WindowAXLifecycleRevision?) -> Bool {
+        // A missing observer must not turn a previously guarded row into an
+        // unguarded one while its invalidation notification is still queued.
+        captured == nil || captured == current
+    }
+}
+
 struct WindowAXLifecycleChange: Sendable {
     let processLifetimeKey: String
     let windowIDs: Set<CGWindowID>
@@ -110,6 +129,30 @@ struct WindowAXLifecycleChange: Sendable {
     func invalidates(_ capturedRevision: WindowAXLifecycleRevision) -> Bool {
         capturedRevision.observationID == revision.observationID
             && capturedRevision.generation < revision.generation
+    }
+}
+
+/// Diagnostic reasons only. These codes never select cache or action behavior.
+enum WindowPreviewCacheClearReason: String {
+    case unspecified, dockStopped, commandTabStopped
+    case dockAllPreviewsDisabled, commandTabAllPreviewsDisabled
+    case willSleep, sessionResigned, appTerminating, screenPermissionRevoked
+    case permissionRequired, permissionRestartRequired
+}
+
+/// A window number can also be inherited by application/group proxies. Only a
+/// successful root-window observation may enter or replace an exact binding.
+enum WindowAXLifecycleAdmissionPolicy {
+    static func allowsTracking(
+        expectedOwnerPID: pid_t,
+        reportedOwnerPID: pid_t,
+        windowID: CGWindowID?,
+        roleReadResult: AXError,
+        role: String?
+    ) -> Bool {
+        expectedOwnerPID > 0 && reportedOwnerPID == expectedOwnerPID
+            && windowID.map { $0 > 0 } == true
+            && roleReadResult == .success && role == kAXWindowRole as String
     }
 }
 
@@ -246,11 +289,14 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
         let observer: AXObserver
         var revision = WindowAXLifecycleRevision()
         var windowsByID: [CGWindowID: AXUIElement] = [:]
+        var recoveredWindowIDs: Set<CGWindowID> = []
         var subscribedWindowIDs: Set<CGWindowID> = []
         var notificationRegistrationResults: [
             String: WindowAXNotificationRegistrationDiagnostic
         ] = [:]
         var accessSequence: UInt64 = 0
+        let diagnosticLifetimeToken: String
+        var lastSeedDiagnostic: SeedDiagnostic?
 
         init(
             identity: WindowThumbnailApplicationIdentity,
@@ -260,7 +306,32 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             self.identity = identity
             self.applicationElement = applicationElement
             self.observer = observer
+            self.diagnosticLifetimeToken = WindowAXLifecycleRegistry.diagnosticLifetimeToken(identity)
         }
+    }
+
+    private struct SeedDiagnostic: Equatable {
+        let hasFocused: Bool
+        let hasMain: Bool
+        let windowsResult: Int32
+        let windowsCount: Int
+        let hasWindowsValue: Bool
+        let windowsArrayDecoded: Bool
+        let candidateCount: Int
+        let retainedCount: Int
+        let invalidCount: Int
+    }
+
+    private enum RemovalReason: String {
+        case processIdentityChanged, processCapacity, processTerminated, registryReset
+    }
+
+    private enum TrackSource: String {
+        case seed, windowCreated, focusedChanged, miniaturized, deminiaturized, exactRecovery
+    }
+
+    private enum RetirementReason: String {
+        case destroyedCallback, invalidProxy
     }
 
     private struct ObserverCreationDiagnostic {
@@ -289,6 +360,8 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
         pid_t: ObserverCreationDiagnostic
     ] = [:]
     private var accessSequence: UInt64 = 0
+    // Independent from the business revision/guards; changes only for diagnostics.
+    private var diagnosticRegistryEpoch: UInt64 = 0
     private let maximumObservedProcesses = 24
     private let maximumWindowsPerProcess = 64
     private let perWindowNotifications = [
@@ -298,6 +371,41 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
     ]
 
     private init() {}
+
+    private static func diagnosticLifetimeToken(
+        _ identity: WindowThumbnailApplicationIdentity
+    ) -> String {
+#if DEBUG
+        guard WindowInventoryDiagnosticGate.isEnabled(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        ) else { return "disabled" }
+        return SHA256.hash(data: Data(identity.processLifetimeKey.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+#else
+        return "disabled"
+#endif
+    }
+
+    private func recordDiagnostic(
+        _ event: String,
+        observation: ProcessObservation? = nil,
+        metadata: [String: WindowInteractionDiagnosticValue] = [:]
+    ) {
+#if DEBUG
+        guard WindowInventoryDiagnosticGate.isEnabled(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        ) else { return }
+        var values = metadata
+        values["registryEpoch"] = .integer(Int64(bitPattern: diagnosticRegistryEpoch))
+        if let observation {
+            values["ownerPID"] = .integer(Int64(observation.identity.processIdentifier))
+            values["observerID"] = .code(observation.revision.observationID.uuidString)
+            values["lifetimeToken"] = .code(observation.diagnosticLifetimeToken)
+            values["bindingGeneration"] = .integer(Int64(bitPattern: observation.revision.generation))
+        }
+        WindowLifecycleDiagnosticRecorder.shared.record(event: event, metadata: values)
+#endif
+    }
 
     /// Installs one observer for this concrete process launch and refreshes its
     /// current AX identities. Unsupported individual notifications do not
@@ -317,7 +425,7 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                 seedCurrentWindows(in: existing)
                 return
             }
-            removeObservation(processIdentifier: identity.processIdentifier)
+            removeObservation(processIdentifier: identity.processIdentifier, reason: .processIdentityChanged)
         }
 
         let applicationElement = AXUIElementCreateApplication(
@@ -340,7 +448,14 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                 )
         }
         guard observerCreationResult == .success,
-              let observer = createdObserver else { return }
+              let observer = createdObserver else {
+            recordDiagnostic("observerCreateFailed", metadata: [
+                "ownerPID": .integer(Int64(identity.processIdentifier)),
+                "lifetimeToken": .code(Self.diagnosticLifetimeToken(identity)),
+                "axResult": .integer(Int64(observerCreationResult.rawValue))
+            ])
+            return
+        }
 
         let observation = ProcessObservation(
             identity: identity,
@@ -349,6 +464,9 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
         )
         observationsByPID[identity.processIdentifier] = observation
         touch(observation)
+        recordDiagnostic("observerCreated", observation: observation, metadata: [
+            "observerCount": .integer(Int64(observationsByPID.count))
+        ])
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         addNotification(
             kAXWindowCreatedNotification as String,
@@ -376,9 +494,15 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
     /// Returns only exact-ID AX elements from this same process launch. The
     /// normal candidate policy and private WindowServer reconciliation still
     /// decide whether each element may become a visible preview card.
-    func windowElements(for application: NSRunningApplication) -> [AXUIElement] {
+    func windowElements(
+        for application: NSRunningApplication,
+        refreshBeforeRead: Bool = true
+    ) -> [AXUIElement] {
         dispatchPrecondition(condition: .onQueue(.main))
-        observe(application: application)
+        // Recovery callers already read fresh AX sources and hold a lifecycle
+        // token. Re-seeding here could replace a proxy and invalidate that very
+        // recovery. A snapshot read preserves real observer invalidations.
+        if refreshBeforeRead { observe(application: application) }
         guard let identity = WindowThumbnailApplicationIdentity(
                   application: application
               ),
@@ -386,8 +510,78 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
               observation.identity == identity else { return [] }
         touch(observation)
         return observation.windowsByID
+            .filter { windowID, _ in
+                !observation.recoveredWindowIDs.contains(windowID) ||
+                    (WindowThumbnailProvider.allowsPreviewDiscovery(applicationIdentity: identity, windowID: windowID) &&
+                     WindowServerPrivateBridge.isOrderedIn(windowID: windowID, ownerPID: identity.processIdentifier) == true)
+            }
             .sorted { $0.key < $1.key }
             .map(\.value)
+    }
+
+    /// Recovery fills missing registrations only. Replacing a known proxy is
+    /// left to the normal lifecycle path, which advances its invalidation token.
+    func recoverableWindowIDs(
+        _ windowIDs: Set<CGWindowID>, identity: WindowThumbnailApplicationIdentity,
+        discoverWhenEmpty: Bool = false
+    ) -> Set<CGWindowID> {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard identity.matchesCurrentProcess(),
+              let observation = observationsByPID[identity.processIdentifier],
+              observation.identity == identity else { return [] }
+        var targets = windowIDs
+        if targets.isEmpty && discoverWhenEmpty {
+            let snapshot = WindowServerInventoryService.shared.snapshot(for: [identity.processIdentifier])
+            targets = Set(snapshot.surfaces.filter {
+                $0.ownerPID == identity.processIdentifier && $0.bounds.width >= 160 && $0.bounds.height >= 100 &&
+                    WindowInventoryReconciler.isRetainablePrivateTarget($0, mode: snapshot.mode)
+            }.map(\.windowID))
+        }
+        return Set(targets.filter {
+            $0 > 0 && observation.windowsByID[$0] == nil &&
+                WindowThumbnailProvider.allowsPreviewDiscovery(applicationIdentity: identity, windowID: $0)
+        })
+    }
+
+    func allowsRecoveredAction(windowID: CGWindowID, identity: WindowThumbnailApplicationIdentity) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let observation = observationsByPID[identity.processIdentifier],
+              observation.identity == identity,
+              observation.recoveredWindowIDs.contains(windowID) else { return true }
+        return WindowThumbnailProvider.allowsPreviewDiscovery(applicationIdentity: identity, windowID: windowID) &&
+            WindowServerPrivateBridge.isOrderedIn(windowID: windowID, ownerPID: identity.processIdentifier) == true
+    }
+
+    @discardableResult
+    func admitRecoveredWindows(
+        _ result: WindowAXExactRecoveryResult,
+        identity: WindowThumbnailApplicationIdentity,
+        expectedRevision: WindowAXLifecycleRevision?
+    ) -> Int {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard AXIsProcessTrusted(), identity.matchesCurrentProcess(),
+              let observation = observationsByPID[identity.processIdentifier],
+              observation.identity == identity, observation.revision == expectedRevision else { return 0 }
+        let eligible = recoverableWindowIDs(Set(result.elements.keys), identity: identity)
+        var accepted = 0
+        for windowID in eligible.sorted() {
+            guard let element = result.elements[windowID],
+                  windowDirectWindowNumber(of: element) == windowID,
+                  WindowServerPrivateBridge.isOrderedIn(windowID: windowID, ownerPID: identity.processIdentifier) == true
+            else { continue }
+            track(element, in: observation, source: .exactRecovery)
+            if observation.windowsByID[windowID].map({ CFEqual($0, element) }) == true {
+                observation.recoveredWindowIDs.insert(windowID)
+                accepted += 1
+            }
+        }
+        recordDiagnostic("exactRecovery", observation: observation, metadata: [
+            "attempts": .integer(Int64(result.attempts)),
+            "foundCount": .integer(Int64(result.elements.count)),
+            "acceptedCount": .integer(Int64(accepted)),
+            "elapsedMS": .integer(Int64(result.elapsedMilliseconds.rounded()))
+        ])
+        return accepted
     }
 
     /// Does not seed AX windows or install an observer. Consumers compare the
@@ -413,7 +607,8 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                 observerCreationResult: nil,
                 isObservationInstalled: false,
                 windowIDs: [],
-                notificationRegistrations: []
+                notificationRegistrations: [],
+                registryEpoch: diagnosticRegistryEpoch
             )
         }
         let observation = observationsByPID[identity.processIdentifier]
@@ -436,22 +631,37 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                         return ($0.targetWindowID ?? 0) < ($1.targetWindowID ?? 0)
                     }
                     return $0.notification < $1.notification
-                } ?? []
+                } ?? [],
+            observerID: matchingObservation?.revision.observationID.uuidString,
+            registryEpoch: diagnosticRegistryEpoch,
+            bindingGeneration: matchingObservation?.revision.generation
         )
     }
 
     func remove(processIdentifier: pid_t) {
         dispatchPrecondition(condition: .onQueue(.main))
-        removeObservation(processIdentifier: processIdentifier)
+        removeObservation(processIdentifier: processIdentifier, reason: .processTerminated)
     }
 
-    func reset() {
+    func reset(
+        reason: WindowPreviewCacheClearReason = .unspecified,
+        clearRequestID: String? = nil
+    ) {
         dispatchPrecondition(condition: .onQueue(.main))
+        diagnosticRegistryEpoch &+= 1
+        var metadata: [String: WindowInteractionDiagnosticValue] = [
+            "reason": .code(reason.rawValue),
+            "observerCount": .integer(Int64(observationsByPID.count))
+        ]
+        if let clearRequestID { metadata["clearRequestID"] = .code(clearRequestID) }
+        recordDiagnostic("registryResetStarted", metadata: metadata)
         for processIdentifier in Array(observationsByPID.keys) {
-            removeObservation(processIdentifier: processIdentifier)
+            removeObservation(processIdentifier: processIdentifier, reason: .registryReset)
         }
         accessSequence = 0
         observerCreationResultsByPID.removeAll(keepingCapacity: false)
+        metadata["observerCount"] = .integer(Int64(observationsByPID.count))
+        recordDiagnostic("registryResetApplied", metadata: metadata)
     }
 
     private func receive(
@@ -466,16 +676,20 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
         touch(observation)
 
         switch notification {
-        case kAXWindowCreatedNotification as String,
-             kAXWindowMiniaturizedNotification as String,
-             kAXWindowDeminiaturizedNotification as String:
-            track(element, in: observation)
+        case kAXWindowCreatedNotification as String:
+            track(element, in: observation, source: .windowCreated)
+        case kAXWindowMiniaturizedNotification as String:
+            track(element, in: observation, source: .miniaturized)
+        case kAXWindowDeminiaturizedNotification as String:
+            track(element, in: observation, source: .deminiaturized)
         case kAXFocusedWindowChangedNotification as String:
             if let focused = elementAttribute(
                 kAXFocusedWindowAttribute,
                 of: observation.applicationElement
             ) {
-                track(focused, in: observation)
+                track(focused, in: observation, source: .focusedChanged)
+            } else {
+                recordDiagnostic("focusedCallbackEmpty", observation: observation)
             }
         case kAXUIElementDestroyedNotification as String:
             let removedIDs = WindowAXLifecycleRetirementPolicy.matchingWindowIDs(
@@ -483,7 +697,10 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                 currentWindows: observation.windowsByID,
                 sameElement: { CFEqual($0, $1) }
             )
-            retire(removedIDs, in: observation)
+            recordDiagnostic("destructionCallback", observation: observation, metadata: [
+                "matchedWindowCount": .integer(Int64(removedIDs.count))
+            ])
+            retire(removedIDs, in: observation, reason: .destroyedCallback)
         default:
             break
         }
@@ -491,6 +708,8 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
 
     private func seedCurrentWindows(in observation: ProcessObservation) {
         var windows: [AXUIElement] = []
+        var hasFocused = false
+        var hasMain = false
         for attribute in [
             kAXFocusedWindowAttribute,
             kAXMainWindowAttribute
@@ -498,23 +717,32 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             if let window = elementAttribute(
                 attribute,
                 of: observation.applicationElement
-            ), !windows.contains(where: { CFEqual($0, window) }) {
-                windows.append(window)
+            ) {
+                if attribute == kAXFocusedWindowAttribute { hasFocused = true }
+                if attribute == kAXMainWindowAttribute { hasMain = true }
+                if !windows.contains(where: { CFEqual($0, window) }) {
+                    windows.append(window)
+                }
             }
         }
         var value: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
+        let windowsResult = AXUIElementCopyAttributeValue(
             observation.applicationElement,
             kAXWindowsAttribute as CFString,
             &value
-        ) == .success,
+        )
+        var windowsCount = 0
+        var windowsArrayDecoded = false
+        if windowsResult == .success,
         let available = value as? [AXUIElement] {
+            windowsArrayDecoded = true
+            windowsCount = available.count
             for window in available
             where !windows.contains(where: { CFEqual($0, window) }) {
                 windows.append(window)
             }
         }
-        for window in windows { track(window, in: observation) }
+        for window in windows { track(window, in: observation, source: .seed) }
 
         // Some Apps do not deliver every destruction notification. Only an
         // explicitly invalid cached AX object is sufficient fallback evidence;
@@ -526,25 +754,78 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                 kAXRoleAttribute as CFString,
                 &role
             )
-            return WindowAXLifecycleRetirementPolicy.shouldRetire(
+            let shouldRetire = WindowAXLifecycleRetirementPolicy.shouldRetire(
                 roleReadResult: result
-            ) ? windowID : nil
+            )
+            if shouldRetire {
+                recordDiagnostic("proxyReadInvalid", observation: observation, metadata: [
+                    "windowID": .integer(Int64(windowID)),
+                    "axResult": .integer(Int64(result.rawValue))
+                ])
+            }
+            return shouldRetire ? windowID : nil
         })
-        retire(invalidIDs, in: observation)
+        retire(invalidIDs, in: observation, reason: .invalidProxy)
+        let diagnostic = SeedDiagnostic(
+            hasFocused: hasFocused, hasMain: hasMain,
+            windowsResult: Int32(windowsResult.rawValue), windowsCount: windowsCount,
+            hasWindowsValue: value != nil, windowsArrayDecoded: windowsArrayDecoded,
+            candidateCount: windows.count, retainedCount: observation.windowsByID.count,
+            invalidCount: invalidIDs.count
+        )
+        if diagnostic != observation.lastSeedDiagnostic {
+            observation.lastSeedDiagnostic = diagnostic
+            recordDiagnostic("seedState", observation: observation, metadata: [
+                "hasFocused": .flag(hasFocused), "hasMain": .flag(hasMain),
+                "axResult": .integer(Int64(windowsResult.rawValue)),
+                "attributeWindowCount": .integer(Int64(windowsCount)),
+                "hasWindowsValue": .flag(value != nil),
+                "windowsArrayDecoded": .flag(windowsArrayDecoded),
+                "candidateCount": .integer(Int64(windows.count)),
+                "retainedCount": .integer(Int64(observation.windowsByID.count)),
+                "invalidCount": .integer(Int64(invalidIDs.count))
+            ])
+        }
     }
 
     private func track(
         _ element: AXUIElement,
-        in observation: ProcessObservation
+        in observation: ProcessObservation,
+        source: TrackSource
     ) {
         var ownerPID: pid_t = 0
         guard AXUIElementGetPid(element, &ownerPID) == .success,
               ownerPID == observation.identity.processIdentifier,
               let windowID = windowDirectWindowNumber(of: element),
-              windowID > 0 else { return }
+              windowID > 0 else {
+            if source != .seed {
+                recordDiagnostic("callbackWithoutExactWindow", observation: observation, metadata: [
+                    "source": .code(source.rawValue)
+                ])
+            }
+            return
+        }
+        let wasTracked = observation.windowsByID[windowID] != nil
         let replacedProxy = observation.windowsByID[windowID].map {
             !CFEqual($0, element)
         } ?? false
+        if !wasTracked || replacedProxy {
+            // Validate before removing subscriptions or replacing a retained
+            // proxy. A bad candidate with the same WID must not evict a healthy
+            // window returned earlier in this seed. Unchanged entries retain
+            // the existing seed role check without an extra AX round trip.
+            var role: CFTypeRef?
+            let roleReadResult = AXUIElementCopyAttributeValue(
+                element, kAXRoleAttribute as CFString, &role
+            )
+            guard WindowAXLifecycleAdmissionPolicy.allowsTracking(
+                expectedOwnerPID: observation.identity.processIdentifier,
+                reportedOwnerPID: ownerPID,
+                windowID: windowID,
+                roleReadResult: roleReadResult,
+                role: role as? String
+            ) else { return }
+        }
         if replacedProxy, let existing = observation.windowsByID[windowID] {
             removeWindowNotifications(
                 from: existing,
@@ -553,6 +834,20 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             observation.subscribedWindowIDs.remove(windowID)
         }
         observation.windowsByID[windowID] = element
+        if source != .exactRecovery {
+            observation.recoveredWindowIDs.remove(windowID)
+        }
+        if !wasTracked || replacedProxy || source != .seed {
+            recordDiagnostic(
+                !wasTracked ? "windowTracked" : replacedProxy ? "proxyReplaced" : "windowSignal",
+                observation: observation,
+                metadata: [
+                    "windowID": .integer(Int64(windowID)),
+                    "source": .code(source.rawValue),
+                    "retainedCount": .integer(Int64(observation.windowsByID.count))
+                ]
+            )
+        }
         if observation.windowsByID.count > maximumWindowsPerProcess {
             let retainedIDs = Set(
                 observation.windowsByID.keys.sorted().suffix(
@@ -561,6 +856,10 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             )
             for (candidateID, candidateElement) in observation.windowsByID
             where !retainedIDs.contains(candidateID) {
+                recordDiagnostic("windowEvicted", observation: observation, metadata: [
+                    "windowID": .integer(Int64(candidateID)),
+                    "reason": .code("windowCapacity")
+                ])
                 removeWindowNotifications(
                     from: candidateElement,
                     observation: observation
@@ -571,6 +870,7 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             }
             observation.subscribedWindowIDs = observation.subscribedWindowIDs
                 .intersection(retainedIDs)
+            observation.recoveredWindowIDs.formIntersection(retainedIDs)
         }
         if observation.subscribedWindowIDs.insert(windowID).inserted {
             let refcon = Unmanaged.passUnretained(self).toOpaque()
@@ -601,25 +901,35 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                    ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID &&
                        ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ownerPID
                }) {
-                WindowThumbnailProvider.reestablishPreviewDiscovery(
+                let reestablished = WindowThumbnailProvider.reestablishPreviewDiscovery(
                     applicationIdentity: observation.identity,
                     windowID: windowID
                 )
+                recordDiagnostic("discoveryReestablishResult", observation: observation, metadata: [
+                    "windowID": .integer(Int64(windowID)),
+                    "changed": .flag(reestablished)
+                ])
             }
         }
     }
 
     private func retire(
         _ windowIDs: Set<CGWindowID>,
-        in observation: ProcessObservation
+        in observation: ProcessObservation,
+        reason: RetirementReason
     ) {
         let currentIDs = windowIDs.intersection(observation.windowsByID.keys)
         guard !currentIDs.isEmpty else { return }
         for windowID in currentIDs {
+            recordDiagnostic("windowRetired", observation: observation, metadata: [
+                "windowID": .integer(Int64(windowID)),
+                "reason": .code(reason.rawValue)
+            ])
             if let element = observation.windowsByID.removeValue(forKey: windowID) {
                 removeWindowNotifications(from: element, observation: observation)
             }
             observation.subscribedWindowIDs.remove(windowID)
+            observation.recoveredWindowIDs.remove(windowID)
         }
         invalidateBindings(currentIDs, in: observation, recordsRetirement: true)
     }
@@ -638,6 +948,10 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
             processLifetimeKey: observation.identity.processLifetimeKey
         )
         observation.revision = observation.revision.advanced()
+        recordDiagnostic("bindingsInvalidated", observation: observation, metadata: [
+            "windowCount": .integer(Int64(windowIDs.count)),
+            "reason": .code(recordsRetirement ? "retired" : "proxyReplaced")
+        ])
         if recordsRetirement {
             WindowThumbnailProvider.retirePreviewDiscovery(
                 applicationIdentity: observation.identity,
@@ -690,6 +1004,11 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
                     targetWindowID: targetWindowID,
                     result: Int32(result.rawValue)
                 )
+            recordDiagnostic("notificationRegistered", observation: observation, metadata: [
+                "notification": .code(notification),
+                "windowID": .integer(Int64(targetWindowID ?? 0)),
+                "axResult": .integer(Int64(result.rawValue))
+            ])
         }
     }
 
@@ -731,15 +1050,20 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
               let oldestPID = observationsByPID.min(by: {
                   $0.value.accessSequence < $1.value.accessSequence
               })?.key {
-            removeObservation(processIdentifier: oldestPID)
+            removeObservation(processIdentifier: oldestPID, reason: .processCapacity)
         }
     }
 
-    private func removeObservation(processIdentifier: pid_t) {
+    private func removeObservation(processIdentifier: pid_t, reason: RemovalReason) {
         observerCreationResultsByPID.removeValue(forKey: processIdentifier)
         guard let observation = observationsByPID.removeValue(
             forKey: processIdentifier
         ) else { return }
+        recordDiagnostic("observerRemoved", observation: observation, metadata: [
+            "reason": .code(reason.rawValue),
+            "windowCount": .integer(Int64(observation.windowsByID.count)),
+            "remainingObserverCount": .integer(Int64(observationsByPID.count))
+        ])
         CFRunLoopRemoveSource(
             CFRunLoopGetMain(),
             AXObserverGetRunLoopSource(observation.observer),
@@ -946,6 +1270,29 @@ enum WindowRendererSelectionPolicy {
     }
 }
 
+/// The filter's content size is the capture source in points. Its desktop
+/// origin must not contribute to output dimensions or crop the window.
+enum WindowThumbnailCaptureConfiguration {
+    static func make(contentRect: CGRect) -> SCStreamConfiguration? {
+        let size = contentRect.size
+        guard size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0 else { return nil }
+
+        // Preserve the existing preview memory budget and maximum upscaling.
+        // Pixel rounding may differ by half a pixel on the shorter edge;
+        // ScreenCaptureKit preserves the source aspect ratio within that box.
+        let scale = min(2, 480 / max(size.width, size.height))
+        let configuration = SCStreamConfiguration()
+        configuration.width = max(1, Int((size.width * scale).rounded()))
+        configuration.height = max(1, Int((size.height * scale).rounded()))
+        configuration.scalesToFit = true
+        configuration.preservesAspectRatio = true
+        configuration.showsCursor = false
+        configuration.ignoreShadowsSingleWindow = true
+        return configuration
+    }
+}
+
 enum WindowThumbnailProvider {
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.workview.SuperIsland",
@@ -983,6 +1330,8 @@ enum WindowThumbnailProvider {
     )
     private static let cacheLock = NSLock()
     private static var thumbnailCache: [String: CachedThumbnail] = [:]
+    // Protected by cacheLock; coalesces only repeated empty diagnostic purges.
+    private static var lastDiagnosticPurgeReason: WindowPreviewCacheClearReason?
     private static var expirationSweepWorkItem: DispatchWorkItem?
     private static var expirationSweepGeneration: UInt64 = 0
     /// Invalidates captures that were already in flight when a privacy or
@@ -2053,20 +2402,12 @@ enum WindowThumbnailProvider {
     }
 
     private static func captureResult(window: SCWindow, allowsUniformContent: Bool) async -> CaptureResult {
-        let configuration = SCStreamConfiguration()
-        let longestSide = max(window.frame.width, window.frame.height)
-        guard longestSide > 0 else { return .failed }
-        // Preview cards never render near full-window resolution. Capping the
-        // decoded longest side keeps one cached BGRA image below ~1 MiB while
-        // retaining more than 2x detail for the largest current card.
-        let scale = min(2, 480 / longestSide)
-        configuration.width = max(1, Int((window.frame.width * scale).rounded()))
-        configuration.height = max(1, Int((window.frame.height * scale).rounded()))
-        configuration.showsCursor = false
-        configuration.ignoreShadowsSingleWindow = true
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        guard let configuration = WindowThumbnailCaptureConfiguration.make(
+            contentRect: filter.contentRect
+        ) else { return .failed }
 
         do {
-            let filter = SCContentFilter(desktopIndependentWindow: window)
             let image = try await SCScreenshotManager.captureImage(
                 contentFilter: filter,
                 configuration: configuration
@@ -2384,12 +2725,12 @@ enum WindowThumbnailProvider {
             if permissionManager.screenRecordingGrantedAtProcessLaunch {
                 markPermissionRevokedAfterLaunch()
             }
-            purgeAllCache()
+            purgeAllCache(reason: .permissionRequired)
             return .permissionRequired
         }
         guard permissionManager.screenRecordingGrantedAtProcessLaunch,
               !permissionRevocationRequiresRestart() else {
-            purgeAllCache()
+            purgeAllCache(reason: .permissionRestartRequired)
             return .restartRequired
         }
         return .authorized
@@ -2606,20 +2947,23 @@ enum WindowThumbnailProvider {
 
     /// Called only after registry validation of a live AX window, its direct
     /// number, and the current WindowServer owner. A screenshot is insufficient.
+    @discardableResult
     static func reestablishPreviewDiscovery(
         applicationIdentity: WindowThumbnailApplicationIdentity,
         windowID: CGWindowID
-    ) {
-        guard applicationIdentity.matchesCurrentProcess() else { return }
+    ) -> Bool {
+        guard applicationIdentity.matchesCurrentProcess() else { return false }
         cacheLock.lock()
-        if discoveryRetirements.reestablish(
+        let reestablished = discoveryRetirements.reestablish(
             windowID: windowID,
             processIdentifier: applicationIdentity.processIdentifier,
             processLifetimeKey: applicationIdentity.processLifetimeKey
-        ) {
+        )
+        if reestablished {
             captureGenerations.invalidate(processLifetimeKey: applicationIdentity.processLifetimeKey)
         }
         cacheLock.unlock()
+        return reestablished
     }
 
     private static func removeRetirementsForTerminatedProcess(_ processIdentifier: pid_t) {
@@ -2662,12 +3006,17 @@ enum WindowThumbnailProvider {
         }
     }
 
-    static func clearAllCache() {
-        purgeAllCache()
+    static func clearAllCache(reason: WindowPreviewCacheClearReason = .unspecified) {
+        let clearRequestID = UUID().uuidString
+        WindowLifecycleDiagnosticRecorder.shared.record(event: "cacheClearRequested", metadata: [
+            "clearRequestID": .code(clearRequestID), "reason": .code(reason.rawValue),
+            "requestedOnMain": .flag(Thread.isMainThread)
+        ])
+        purgeAllCache(reason: reason, clearRequestID: clearRequestID)
         WindowInventoryBindingHistory.shared.reset()
         WindowServerInventoryService.shared.invalidate()
         let resetRegistry = {
-            WindowAXLifecycleRegistry.shared.reset()
+            WindowAXLifecycleRegistry.shared.reset(reason: reason, clearRequestID: clearRequestID)
         }
         if Thread.isMainThread {
             resetRegistry()
@@ -2681,14 +3030,29 @@ enum WindowThumbnailProvider {
     /// They must purge image memory without cancelling that same UI update;
     /// lifecycle and explicit feature boundaries call `clearAllCache()` and
     /// therefore also invalidate every persistent consumer model.
-    private static func purgeAllCache() {
+    private static func purgeAllCache(
+        reason: WindowPreviewCacheClearReason,
+        clearRequestID: String? = nil
+    ) {
         cacheLock.lock()
+        let imageCount = thumbnailCache.count
+        let shouldRecordPurge = clearRequestID != nil || imageCount > 0 ||
+            lastDiagnosticPurgeReason != reason
+        lastDiagnosticPurgeReason = reason
         captureGenerations.invalidateAll()
         expirationSweepGeneration &+= 1
         expirationSweepWorkItem?.cancel()
         expirationSweepWorkItem = nil
         thumbnailCache.removeAll(keepingCapacity: false)
         cacheLock.unlock()
+        guard shouldRecordPurge else { return }
+        var metadata: [String: WindowInteractionDiagnosticValue] = [
+            "reason": .code(reason.rawValue),
+            "imageCount": .integer(Int64(imageCount)),
+            "registryResetRequested": .flag(clearRequestID != nil)
+        ]
+        if let clearRequestID { metadata["clearRequestID"] = .code(clearRequestID) }
+        WindowLifecycleDiagnosticRecorder.shared.record(event: "imageCachePurged", metadata: metadata)
     }
 
     static func clearCache(processIdentifier: pid_t) {
@@ -2736,14 +3100,14 @@ enum WindowThumbnailProvider {
                 forName: NSWorkspace.willSleepNotification,
                 object: nil,
                 queue: .main
-            ) { _ in invalidateAllPreviews() }
+            ) { _ in invalidateAllPreviews(reason: .willSleep) }
         )
         lifecycleObservers.append(
             workspaceCenter.addObserver(
                 forName: NSWorkspace.sessionDidResignActiveNotification,
                 object: nil,
                 queue: .main
-            ) { _ in invalidateAllPreviews() }
+            ) { _ in invalidateAllPreviews(reason: .sessionResigned) }
         )
         lifecycleObservers.append(
             workspaceCenter.addObserver(
@@ -2770,7 +3134,7 @@ enum WindowThumbnailProvider {
                 forName: NSApplication.willTerminateNotification,
                 object: nil,
                 queue: .main
-            ) { _ in invalidateAllPreviews() }
+            ) { _ in invalidateAllPreviews(reason: .appTerminating) }
         )
 
         lastKnownScreenRecordingPermission = PermissionsManager.shared.checkScreenRecording()
@@ -2778,7 +3142,7 @@ enum WindowThumbnailProvider {
             Task { @MainActor in
                 let currentPermission = PermissionsManager.shared.checkScreenRecording()
                 if lastKnownScreenRecordingPermission == true, !currentPermission {
-                    invalidateAllPreviews()
+                    invalidateAllPreviews(reason: .screenPermissionRevoked)
                 }
                 lastKnownScreenRecordingPermission = currentPermission
             }
@@ -2787,8 +3151,8 @@ enum WindowThumbnailProvider {
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    private static func invalidateAllPreviews() {
-        clearAllCache()
+    private static func invalidateAllPreviews(reason: WindowPreviewCacheClearReason) {
+        clearAllCache(reason: reason)
     }
 
     private static func notifyPreviewInvalidation() {

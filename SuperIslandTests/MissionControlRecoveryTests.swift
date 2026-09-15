@@ -2,6 +2,152 @@ import XCTest
 @testable import SuperIsland
 
 final class MissionControlRecoveryTests: XCTestCase {
+    func testMissingSceneRootRemainsOutsideThroughRealResolverRouting() {
+        let reason = "scene-marker-not-found-mc-root-v2"
+        XCTAssertEqual(MissionControlSceneResolverFixture.resolve(.outside(reason)),
+                       .init(state: "outside", reason: reason))
+    }
+
+    func testAmbiguousSceneRootCannotBecomeAnOrdinaryApplicationTarget() {
+        let reason = "scene-marker-not-found-ambiguous-mc-root-v3"
+        XCTAssertEqual(MissionControlSceneResolverFixture.resolve(.outside(reason)),
+                       .init(state: "outside", reason: reason))
+    }
+
+    func testPresentButIncompleteSceneKeepsItsResolverOutcome() {
+        XCTAssertEqual(MissionControlSceneResolverFixture.resolve(
+            .indeterminate("scene-mc-root-stabilizing")),
+            .init(state: "indeterminate", reason: "scene-mc-root-stabilizing"))
+        XCTAssertEqual(MissionControlSceneResolverFixture.resolve(
+            .unresolved("scene-no-exact-target")),
+            .init(state: "unresolved", reason: "scene-no-exact-target"))
+    }
+
+    @MainActor
+    func testOutsideCompletionClearsSessionTargetsAndEveryPendingTask() throws {
+        let fixture = try XCTUnwrap(MissionControlInteractionMonitor.TestFixture())
+        defer { fixture.clearSession() }
+        fixture.seedSession()
+        let before = fixture.snapshot
+        XCTAssertEqual(before.targetWindow, 41)
+        XCTAssertEqual(before.pendingKeyboardWindow, 41)
+        XCTAssertEqual(fixture.closeClickDecision(), .consumeAndTrigger)
+        XCTAssertEqual(fixture.trackedWorkCancellation, Array(repeating: false, count: 6))
+
+        fixture.finishOutside(generation: before.generation)
+
+        let after = fixture.snapshot
+        XCTAssertFalse(after.observed)
+        XCTAssertFalse(after.hasEvidence)
+        XCTAssertNil(after.targetWindow)
+        XCTAssertNil(after.pendingKeyboardWindow)
+        XCTAssertNil(after.inFlightGeneration)
+        XCTAssertEqual(after.generation, before.generation + 1)
+        XCTAssertEqual(after.closeGeneration, before.closeGeneration + 1)
+        XCTAssertEqual(after.keyboardGeneration, before.keyboardGeneration + 1)
+        XCTAssertFalse(after.inspectionPending)
+        XCTAssertFalse(after.inspectionScheduled)
+        XCTAssertFalse(after.rootRecoveryScheduled)
+        XCTAssertFalse(after.validationScheduled)
+        XCTAssertFalse(after.keyboardExpirationScheduled)
+        XCTAssertEqual(after.postActionCount, 0)
+        XCTAssertEqual(fixture.trackedWorkCancellation, Array(repeating: true, count: 6))
+        XCTAssertEqual(fixture.closeClickDecision(), .passThrough)
+    }
+
+    @MainActor
+    func testLateValidCompletionDrainsOldSlotWithoutReopeningExitedSession() throws {
+        let fixture = try XCTUnwrap(MissionControlInteractionMonitor.TestFixture())
+        defer { fixture.clearSession() }
+        fixture.seedSession()
+        let generation = fixture.snapshot.generation
+        fixture.clearSession()
+        XCTAssertEqual(fixture.snapshot.inFlightGeneration, generation)
+
+        fixture.finishValid(generation: generation)
+
+        XCTAssertNil(fixture.snapshot.inFlightGeneration)
+        XCTAssertFalse(fixture.snapshot.observed)
+        XCTAssertFalse(fixture.snapshot.hasEvidence)
+        XCTAssertNil(fixture.snapshot.targetWindow)
+        XCTAssertNil(fixture.snapshot.pendingKeyboardWindow)
+        XCTAssertFalse(fixture.snapshot.inspectionScheduled)
+        XCTAssertEqual(fixture.closeClickDecision(), .passThrough)
+    }
+
+    @MainActor
+    func testRepeatedAwakeKeepsLatestSessionWhenOldOutsideCompletionArrives() throws {
+        let fixture = try XCTUnwrap(MissionControlInteractionMonitor.TestFixture())
+        defer { fixture.clearSession() }
+        fixture.seedSession()
+        let oldGeneration = fixture.snapshot.generation
+
+        fixture.enterScene()
+        fixture.enterScene()
+        let newGeneration = fixture.snapshot.generation
+        XCTAssertEqual(newGeneration, oldGeneration + 2)
+        XCTAssertEqual(fixture.snapshot.inFlightGeneration, oldGeneration)
+        XCTAssertTrue(fixture.snapshot.inspectionPending)
+        XCTAssertFalse(fixture.snapshot.inspectionScheduled)
+        fixture.installTarget(windowNumber: 42)
+
+        fixture.finishOutside(generation: oldGeneration)
+
+        XCTAssertEqual(fixture.snapshot.generation, newGeneration)
+        XCTAssertTrue(fixture.snapshot.observed)
+        XCTAssertTrue(fixture.snapshot.hasEvidence)
+        XCTAssertTrue(fixture.snapshot.validationScheduled)
+        XCTAssertEqual(fixture.snapshot.targetWindow, 42)
+        XCTAssertEqual(fixture.snapshot.pendingKeyboardWindow, 42)
+        XCTAssertNil(fixture.snapshot.inFlightGeneration)
+        XCTAssertFalse(fixture.snapshot.inspectionPending)
+        XCTAssertTrue(fixture.snapshot.inspectionScheduled)
+        XCTAssertEqual(fixture.closeClickDecision(), .consumeAndTrigger)
+
+        // The fresh session must still accept its own terminal result.
+        fixture.beginCurrentInspection()
+        fixture.finishOutside(generation: newGeneration)
+        XCTAssertFalse(fixture.snapshot.observed)
+        XCTAssertNil(fixture.snapshot.targetWindow)
+        XCTAssertEqual(fixture.closeClickDecision(), .passThrough)
+    }
+
+    @MainActor
+    func testDuplicateOldRepliesCannotReleaseNewInspectionOrClearNewTarget() throws {
+        let fixture = try XCTUnwrap(MissionControlInteractionMonitor.TestFixture())
+        defer { fixture.clearSession() }
+        fixture.seedSession()
+        let oldGeneration = fixture.snapshot.generation
+        fixture.enterScene()
+        fixture.finishOutside(generation: oldGeneration)
+        fixture.beginCurrentInspection()
+        fixture.installTarget(windowNumber: 42)
+        let before = fixture.snapshot
+
+        fixture.finishOutside(generation: oldGeneration)
+        XCTAssertEqual(fixture.snapshot, before)
+        fixture.finishValid(generation: oldGeneration)
+        XCTAssertEqual(fixture.snapshot, before)
+        XCTAssertEqual(fixture.closeClickDecision(), .consumeAndTrigger)
+    }
+
+    @MainActor
+    func testOldCloseValidationReplyCannotClearNewSceneAffordanceOrKeyboardTarget() throws {
+        let fixture = try XCTUnwrap(MissionControlInteractionMonitor.TestFixture())
+        defer { fixture.clearSession() }
+        fixture.seedSession()
+        let oldCloseGeneration = fixture.snapshot.closeGeneration
+        fixture.enterScene()
+        fixture.installTarget(windowNumber: 42)
+        let before = fixture.snapshot
+        XCTAssertGreaterThan(before.closeGeneration, oldCloseGeneration)
+
+        fixture.finishClose(generation: oldCloseGeneration)
+
+        XCTAssertEqual(fixture.snapshot, before)
+        XCTAssertEqual(fixture.closeClickDecision(), .consumeAndTrigger)
+    }
+
     func testMissedNotificationCanRecoverWithoutSchedulingFullDesktopInspection() throws {
         XCTAssertFalse(MissionControlInspectionPolicy.shouldSchedule(
             force: false, missionControlHierarchyObserved: false

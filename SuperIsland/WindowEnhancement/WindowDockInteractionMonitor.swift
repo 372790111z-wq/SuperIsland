@@ -310,6 +310,7 @@ final class WindowDockInteractionMonitor {
     private var inspectionPending = false
     private var hoverWorkItem: DispatchWorkItem?
     private var thumbnailCaptureTask: Task<Void, Never>?
+    private var operationRecoveryTask: Task<Void, Never>?
     private var hoverCaptureGeneration = 0
     private var hideWorkItem: DispatchWorkItem?
     private var hideGeneration = 0
@@ -390,7 +391,7 @@ final class WindowDockInteractionMonitor {
         removeMonitor()
         cancelPendingWork()
         preview.hide()
-        WindowThumbnailProvider.clearAllCache()
+        WindowThumbnailProvider.clearAllCache(reason: .dockStopped)
         if let previewInvalidationObserver {
             NotificationCenter.default.removeObserver(previewInvalidationObserver)
             self.previewInvalidationObserver = nil
@@ -410,7 +411,7 @@ final class WindowDockInteractionMonitor {
             preferences.dockPreviewEnabled || preferences.cmdTabPlusEnabled
         )
         if !anyPreviewEnabled {
-            WindowThumbnailProvider.clearAllCache()
+            WindowThumbnailProvider.clearAllCache(reason: .dockAllPreviewsDisabled)
         }
         if !preferences.isEnabled || !preferences.dockPreviewEnabled {
             cancelInspection()
@@ -903,11 +904,202 @@ final class WindowDockInteractionMonitor {
                     return
                 }
                 self.pendingHoverPID = nil
+                self.scheduleOperationRecovery(
+                    hit: hit,
+                    identities: identities,
+                    memberWindows: memberWindows,
+                    lifecycleRevisions: lifecycleRevisions,
+                    cacheGenerations: cacheGenerations,
+                    generation: generation,
+                    sample: currentSample,
+                    resolvedTargetAt: resolvedTargetAt
+                )
             }
         }
         hoverWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + (isWarmSwitch ? 0 : 0.28), execute: item)
         schedulePendingInspectionIfNeeded()
+    }
+
+    /// A cold/inactive App may expose some windows without their AX operation
+    /// objects. Retry only owners with pending exact targets in this visible
+    /// session; a healthy sibling is neither replacement data nor progress.
+    private func scheduleOperationRecovery(
+        hit: DockHit,
+        identities: [WindowThumbnailApplicationIdentity?],
+        memberWindows: [[DockWindowEntry]],
+        lifecycleRevisions: [WindowAXLifecycleRevision?],
+        cacheGenerations: [WindowThumbnailCaptureGeneration?],
+        generation: Int,
+        sample: MouseSample,
+        resolvedTargetAt: TimeInterval
+    ) {
+        let missingIndexes = hit.applications.indices.filter { index in
+            identities[index] != nil && (memberWindows[index].isEmpty ||
+                memberWindows[index].contains { $0.element == nil })
+        }
+        guard !missingIndexes.isEmpty, preview.isVisible else { return }
+        let requestedOwners = Dictionary(uniqueKeysWithValues: missingIndexes.compactMap { index in
+            identities[index].map { ($0.processIdentifier, $0.processLifetimeKey) }
+        })
+        let initialRequest = DockPreviewOperationRecoveryPolicy.makeRequest(
+            current: preview.rows,
+            requestedOwners: requestedOwners,
+            discoveryOwners: Set(missingIndexes.filter { memberWindows[$0].isEmpty }
+                .map { hit.applications[$0].processIdentifier })
+        )
+        guard !initialRequest.pendingOwners.isEmpty else { return }
+        operationRecoveryTask?.cancel()
+        operationRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.hoverCaptureGeneration == generation { self.operationRecoveryTask = nil }
+            }
+            var pendingRequest = initialRequest
+            for (attempt, delay) in DockPreviewOperationRecoveryPolicy.delays.enumerated() {
+                do { try await Task.sleep(nanoseconds: delay) } catch { return }
+                guard self.isCurrentOperationRecovery(
+                    hit: hit, identities: identities, lifecycleRevisions: lifecycleRevisions,
+                    cacheGenerations: cacheGenerations, generation: generation, sample: sample
+                ) else { return }
+                // Do not replace a model between the two halves of a physical
+                // click. The finite budget still advances while a button is held.
+                guard !self.preview.hasPendingPointerPress,
+                      !CGEventSource.buttonState(.combinedSessionState, button: .left) else { continue }
+                var refreshedRows: [DockPreviewRow] = []
+                var refreshedWindows: [Int: [DockWindowEntry]] = [:]
+                let pendingIndexes = missingIndexes.filter {
+                    pendingRequest.pendingOwners.contains(hit.applications[$0].processIdentifier)
+                }
+                for index in pendingIndexes {
+                    var windows = self.windows(for: hit.applications[index], messagingTimeout: 0.075)
+                    if let identity = identities[index] {
+                        let availableIDs = Set(windows.filter { $0.element != nil }.compactMap(\.windowID))
+                        let missingIDs = Set(pendingRequest.missingTargets.filter {
+                            $0.processID == identity.processIdentifier
+                        }.map(\.windowID)).subtracting(availableIDs)
+                        let eligible = WindowAXLifecycleRegistry.shared.recoverableWindowIDs(
+                            missingIDs, identity: identity, discoverWhenEmpty: windows.isEmpty
+                        )
+                        if !eligible.isEmpty {
+                            let recovered = await WindowAXExactRecovery.shared.recover(identity: identity, windowIDs: eligible)
+                            guard self.isCurrentOperationRecovery(
+                                hit: hit, identities: identities, lifecycleRevisions: lifecycleRevisions,
+                                cacheGenerations: cacheGenerations, generation: generation, sample: sample
+                            ) else { return }
+                            guard !self.preview.hasPendingPointerPress,
+                                  !CGEventSource.buttonState(.combinedSessionState, button: .left) else { continue }
+                            if WindowAXLifecycleRegistry.shared.admitRecoveredWindows(
+                                recovered, identity: identity, expectedRevision: lifecycleRevisions[index]
+                            ) > 0 {
+                                windows = self.windows(for: hit.applications[index], messagingTimeout: 0.075)
+                            }
+                        }
+                    }
+                    guard self.isCurrentOperationRecovery(
+                        hit: hit, identities: identities, lifecycleRevisions: lifecycleRevisions,
+                        cacheGenerations: cacheGenerations, generation: generation, sample: sample
+                    ) else { return }
+                    let operationCount = windows.filter { $0.element != nil }.count
+                    WindowInteractionDiagnosticRecorder.shared.record(
+                        component: "dock", event: "operationRecovery",
+                        metadata: [
+                            "attempt": .integer(Int64(attempt + 1)),
+                            "ownerPID": .integer(Int64(hit.applications[index].processIdentifier)),
+                            "windowCount": .integer(Int64(windows.count)),
+                            "activatableCount": .integer(Int64(operationCount))
+                        ]
+                    )
+                    guard operationCount > 0 else { continue }
+                    refreshedWindows[index] = windows
+                    refreshedRows += self.previewRows(
+                        windows: windows,
+                        thumbnailResults: Array(repeating: nil, count: windows.count),
+                        application: hit.applications[index],
+                        applicationIdentity: identities[index]
+                    )
+                }
+                guard let recovery = DockPreviewOperationRecoveryPolicy.recoverMissingWindows(
+                    current: self.preview.rows, refreshed: refreshedRows, request: pendingRequest
+                ) else { continue }
+                guard !self.preview.hasPendingPointerPress,
+                      !CGEventSource.buttonState(.combinedSessionState, button: .left) else { continue }
+                guard self.publishPreview(
+                    rows: recovery.rows, hit: hit, identities: identities,
+                    lifecycleRevisions: lifecycleRevisions, cacheGenerations: cacheGenerations,
+                    generation: generation, sample: sample, allowPreview: true,
+                    animateAppearance: false, stage: "operationsRecovered", resolvedTargetAt: resolvedTargetAt
+                ) else { return }
+                pendingRequest = recovery.remainingRequest
+
+                // Publish actual AX targets immediately, preserving exact-ID
+                // pixels. Only newly returned/image-less targets need capture.
+                for index in refreshedWindows.keys.sorted() {
+                    guard let identity = identities[index], let windows = refreshedWindows[index] else { continue }
+                    let missingImages = windows.filter { window in
+                        guard let windowID = window.windowID,
+                              recovery.recoveredTargets.contains(WindowPreviewIdentity(
+                                processID: identity.processIdentifier, windowID: windowID
+                              )) else { return false }
+                        return self.preview.rows.contains {
+                            $0.id == window.id && $0.ownerProcessIdentifier == identity.processIdentifier &&
+                                $0.ownerProcessLifetimeKey == identity.processLifetimeKey &&
+                                $0.canActivate && $0.thumbnailResult?.image == nil
+                        }
+                    }
+                    guard !missingImages.isEmpty else { continue }
+                    let requests = missingImages.map {
+                        WindowThumbnailRequest(title: $0.captureTitle, occurrence: $0.captureOccurrence,
+                                               bounds: $0.captureBounds, windowID: $0.windowID,
+                                               allowsUniformContent: $0.allowsUniformContent)
+                    }
+                    let results = await WindowThumbnailProvider.captureWindows(
+                        applicationIdentity: identity, requests: requests,
+                        expectedCacheGeneration: cacheGenerations[index]
+                    )
+                    guard self.isCurrentOperationRecovery(
+                        hit: hit, identities: identities, lifecycleRevisions: lifecycleRevisions,
+                        cacheGenerations: cacheGenerations, generation: generation, sample: sample
+                    ) else { return }
+                    let resultsByID = Dictionary(uniqueKeysWithValues: zip(missingImages, results).map {
+                        ($0.0.id, $0.1)
+                    })
+                    let updatedRows = self.preview.rows.map { row in
+                        guard row.ownerProcessIdentifier == identity.processIdentifier,
+                              row.ownerProcessLifetimeKey == identity.processLifetimeKey,
+                              let result = resultsByID[row.id] else { return row }
+                        return row.replacingThumbnailResult(result)
+                    }
+                    guard self.publishPreview(
+                        rows: updatedRows, hit: hit, identities: identities,
+                        lifecycleRevisions: lifecycleRevisions, cacheGenerations: cacheGenerations,
+                        generation: generation, sample: sample, allowPreview: true,
+                        animateAppearance: false, stage: "recoveryPixelsPresented", resolvedTargetAt: resolvedTargetAt
+                    ) else { return }
+                }
+                if pendingRequest.pendingOwners.isEmpty { return }
+            }
+        }
+    }
+
+    private func isCurrentOperationRecovery(
+        hit: DockHit,
+        identities: [WindowThumbnailApplicationIdentity?],
+        lifecycleRevisions: [WindowAXLifecycleRevision?],
+        cacheGenerations: [WindowThumbnailCaptureGeneration?],
+        generation: Int,
+        sample: MouseSample
+    ) -> Bool {
+        !Task.isCancelled && AXIsProcessTrusted() && preferences.isEnabled && preferences.dockPreviewEnabled &&
+            hoverCaptureGeneration == generation && hoveredDockPID == hit.application.processIdentifier &&
+            hoveredDockElement.map({ CFEqual($0, hit.element) }) == true &&
+            hoveredApplicationIdentities == identities && preview.isVisible &&
+            preview.applicationPID == hit.application.processIdentifier &&
+            previewApplicationsAreCurrent(hit: hit, identities: identities) &&
+            identities.map({ $0.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) } }) == lifecycleRevisions &&
+            identities.map({ $0.map { WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) } }) == cacheGenerations &&
+            currentPointerContext(matching: hit.application.processIdentifier, fallback: sample,
+                                  dockItemFrame: hit.appKitFrame, allowPreview: true) != nil
     }
 
     private func publishPreview(
@@ -1029,7 +1221,8 @@ final class WindowDockInteractionMonitor {
         application: NSRunningApplication,
         applicationIdentity: WindowThumbnailApplicationIdentity?
     ) -> [DockPreviewRow] {
-        windows.enumerated().map { index, window in
+        let actionRevision = applicationIdentity.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) }
+        return windows.enumerated().map { index, window in
             let thumbnailResult = thumbnailResults.indices.contains(index)
                 ? thumbnailResults[index]
                 : nil
@@ -1048,12 +1241,20 @@ final class WindowDockInteractionMonitor {
                 isPreviewOnly: false,
                 canClose: window.element != nil && window.canClose && applicationIdentity != nil,
                 thumbnailResult: thumbnailResult,
-                action: { [weak self] in
-                    self?.activate(window: window, application: application, identity: applicationIdentity)
-                },
-                closeAction: { [weak self] in
-                    self?.close(window: window, application: application, identity: applicationIdentity)
-                }
+                action: WindowAXLifecycleActionPolicy.guardedAction(
+                    captured: actionRevision,
+                    current: { applicationIdentity.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) } },
+                    action: { [weak self] in
+                        self?.activate(window: window, application: application, identity: applicationIdentity)
+                    }
+                ),
+                closeAction: WindowAXLifecycleActionPolicy.guardedAction(
+                    captured: actionRevision,
+                    current: { applicationIdentity.flatMap { WindowAXLifecycleRegistry.shared.revision(for: $0) } },
+                    action: { [weak self] in
+                        self?.close(window: window, application: application, identity: applicationIdentity)
+                    }
+                )
             )
         }
     }
@@ -1106,6 +1307,8 @@ final class WindowDockInteractionMonitor {
         hoverWorkItem = nil
         thumbnailCaptureTask?.cancel()
         thumbnailCaptureTask = nil
+        operationRecoveryTask?.cancel()
+        operationRecoveryTask = nil
         if pendingHoverPID == processIdentifier { pendingHoverPID = nil }
         if hoveredDockPID == processIdentifier { hoveredDockPID = nil }
 
@@ -1151,8 +1354,10 @@ final class WindowDockInteractionMonitor {
         hoveredLifecycleRevisions.removeAll()
         hoverWorkItem?.cancel()
         thumbnailCaptureTask?.cancel()
+        operationRecoveryTask?.cancel()
         hoverWorkItem = nil
         thumbnailCaptureTask = nil
+        operationRecoveryTask = nil
         pendingHoverPID = nil
         if clearTarget {
             hoveredDockPID = nil
@@ -1561,12 +1766,16 @@ final class WindowDockInteractionMonitor {
         var allowsUniformContent = false
     }
 
-    private func windows(for application: NSRunningApplication) -> [DockWindowEntry] {
+    private func windows(
+        for application: NSRunningApplication,
+        messagingTimeout: Float? = nil
+    ) -> [DockWindowEntry] {
         guard AXIsProcessTrusted() else { return [] }
         let diagnosticsEnabled = WindowInventoryDiagnosticGate.isEnabled(
             bundleIdentifier: Bundle.main.bundleIdentifier
         )
         let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        if let messagingTimeout { AXUIElementSetMessagingTimeout(appElement, messagingTimeout) }
         let focusedWindow = elementAttribute(kAXFocusedWindowAttribute, of: appElement)
         let mainWindow = elementAttribute(kAXMainWindowAttribute, of: appElement)
         var collectedWindows: [AXUIElement] = []
@@ -1603,7 +1812,8 @@ final class WindowDockInteractionMonitor {
         // WID elements observed for this same process launch; the shared
         // WindowServer reconciler remains the final anti-phantom boundary.
         let lifecycleWindows = WindowAXLifecycleRegistry.shared.windowElements(
-            for: application
+            for: application,
+            refreshBeforeRead: messagingTimeout == nil
         )
         for window in lifecycleWindows
         where !collectedWindows.contains(where: { CFEqual($0, window) }) {
@@ -1613,6 +1823,7 @@ final class WindowDockInteractionMonitor {
         var rawEntries: [DockWindowEntry] = []
         var rawAXDiagnostics: [WindowInventoryAXCandidateDiagnostics] = []
         for (index, window) in collectedWindows.enumerated() {
+            if let messagingTimeout { AXUIElementSetMessagingTimeout(window, messagingTimeout) }
             var ownerPID: pid_t = 0
             guard AXUIElementGetPid(window, &ownerPID) == .success else {
                 if diagnosticsEnabled {
@@ -1917,6 +2128,9 @@ final class WindowDockInteractionMonitor {
                 lifetime: identity.processLifetimeKey
               ),
               let element = window.element, let expectedWindowID = window.windowID else { return false }
+        guard WindowAXLifecycleRegistry.shared.allowsRecoveredAction(windowID: expectedWindowID, identity: identity) else {
+            return false
+        }
         var owner: pid_t = 0
         guard AXUIElementGetPid(element, &owner) == .success,
               owner == identity.processIdentifier else { return false }
@@ -2081,6 +2295,8 @@ private final class DockWindowPreviewController {
     private let contentView: DockWindowPreviewContentView
     private(set) var applicationPID: pid_t?
     var isVisible: Bool { panel.isVisible && applicationPID != nil }
+    var rows: [DockPreviewRow] { contentModel.content.rows }
+    var hasPendingPointerPress: Bool { contentModel.hasPendingPointerPress }
     private var visibilityGeneration = 0
     private var recentCacheExpirationGeneration = 0
     private var recentCacheExpirationWorkItem: DispatchWorkItem?
@@ -2207,6 +2423,9 @@ private final class DockWindowPreviewController {
             icon: application.bundleURL.map { NSWorkspace.shared.icon(forFile: $0.path) },
             rows: rows,
             canManageWindows: canManageWindows
+        )
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "dock", event: "previewModel", metadata: contentModel.diagnosticMetadata()
         )
         rescheduleRecentCacheExpiration()
 
@@ -2448,8 +2667,12 @@ private final class DockWindowPreviewContentView: NSView {
 @MainActor
 final class DockWindowPreviewModel: ObservableObject {
     @Published private(set) var hoveredRowID: Int?
+    @Published private(set) var previewFrameGeneration: UInt64 = 0
     private var pointerState = WindowPreviewPointerState<Int>(closeButtonSize: 18)
+    var hasPendingPointerPress: Bool { pointerState.hasPendingPress }
     private var previewFrames: [Int: CGRect] = [:]
+    private var previewFrameOwners: [Int: UInt64] = [:]
+    private var lastPointerDiagnosticTime: TimeInterval = 0
     struct Content {
         let appName: String
         let icon: NSImage?
@@ -2497,7 +2720,9 @@ final class DockWindowPreviewModel: ObservableObject {
     }
 
     func resetPointerGeometry() {
+        previewFrameGeneration &+= 1
         previewFrames = [:]
+        previewFrameOwners = [:]
         pointerState = WindowPreviewPointerState<Int>(closeButtonSize: 18)
         hoveredRowID = nil
     }
@@ -2507,10 +2732,29 @@ final class DockWindowPreviewModel: ObservableObject {
         updatePointerFrames()
     }
 
-    func setPreviewFrame(_ frame: CGRect?, for id: Int) {
+    func setPreviewFrame(
+        _ frame: CGRect?,
+        for id: Int,
+        generation: UInt64? = nil,
+        owner: UInt64? = nil
+    ) {
+        if let generation, generation != previewFrameGeneration { return }
+        guard frame == nil || content.rows.contains(where: { $0.id == id }) else { return }
+        if let owner {
+            if frame != nil {
+                guard owner >= (previewFrameOwners[id] ?? 0) else { return }
+                previewFrameOwners[id] = owner
+            } else {
+                guard previewFrameOwners[id] == owner else { return }
+            }
+        } else if previewFrameOwners[id] != nil {
+            return
+        }
         if let frame {
             previewFrames[id] = frame
         } else {
+            // Retain the owner tombstone until the next geometry generation.
+            // A retiring single-card tree cannot erase its scrolling replacement.
             previewFrames.removeValue(forKey: id)
         }
         updatePointerFrames()
@@ -2528,11 +2772,48 @@ final class DockWindowPreviewModel: ObservableObject {
     func handlePointer(_ type: NSEvent.EventType, at point: CGPoint) {
         let action = pointerState.handle(type, at: point)
         if hoveredRowID != pointerState.hovered { hoveredRowID = pointerState.hovered }
+        if WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: Bundle.main.bundleIdentifier) {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastPointerDiagnosticTime >= 0.5 {
+                lastPointerDiagnosticTime = now
+                var metadata = diagnosticMetadata(at: type == .mouseExited ? nil : point)
+                metadata["insidePanel"] = .flag(type != .mouseExited)
+                metadata["eventType"] = .integer(Int64(type.rawValue))
+                WindowInteractionDiagnosticRecorder.shared.record(
+                    component: "dock", event: "previewPointer", metadata: metadata
+                )
+            }
+        }
         guard let action else { return }
         switch action {
         case let .activate(id): content.rows.first { $0.id == id && $0.canActivate }?.action()
         case let .close(id): content.rows.first { $0.id == id && $0.canClose }?.closeAction()
         }
+    }
+
+    func diagnosticMetadata(at point: CGPoint? = nil) -> [String: WindowInteractionDiagnosticValue] {
+        let rows = content.rows
+        var values: [String: WindowInteractionDiagnosticValue] = [
+            "windowCount": .integer(Int64(rows.count)),
+            "frameCount": .integer(Int64(previewFrames.count)),
+            "closableCount": .integer(Int64(rows.filter(\.canClose).count)),
+            "activatableCount": .integer(Int64(rows.filter(\.canActivate).count)),
+            "imageCount": .integer(Int64(rows.filter { $0.thumbnailResult?.image != nil }.count)),
+            "frameGeneration": .integer(Int64(clamping: previewFrameGeneration))
+        ]
+        if let point {
+            let ids = Set(rows.map(\.id))
+            let hits = previewFrames.filter { ids.contains($0.key) && $0.value.contains(point) }
+            values["hitCount"] = .integer(Int64(hits.count))
+            if hits.count == 1, let id = hits.first?.key, let row = rows.first(where: { $0.id == id }) {
+                values["hitWindowID"] = .integer(Int64(id))
+                if let pid = row.ownerProcessIdentifier { values["hitPID"] = .integer(Int64(pid)) }
+                values["hitCanClose"] = .flag(row.canClose)
+                values["hitCanActivate"] = .flag(row.canActivate)
+                values["hitHasImage"] = .flag(row.thumbnailResult?.image != nil)
+            }
+        }
+        return values
     }
 
     /// Drops the strong NSImage reference exactly when a recent full-screen
@@ -2573,13 +2854,17 @@ private struct DockWindowPreviewRootView: View {
     @ObservedObject var model: DockWindowPreviewModel
 
     var body: some View {
+        let generation = model.previewFrameGeneration
         DockWindowPreviewView(
             appName: model.content.appName,
             icon: model.content.icon,
             rows: model.content.rows,
             canManageWindows: model.content.canManageWindows,
             hoveredRowID: model.hoveredRowID,
-            onFrameChange: { id, frame in model.setPreviewFrame(frame, for: id) }
+            frameGeneration: generation,
+            onFrameChange: { id, frame, owner in
+                model.setPreviewFrame(frame, for: id, generation: generation, owner: owner)
+            }
         )
     }
 }
@@ -2613,6 +2898,115 @@ struct DockPreviewRow: Identifiable {
             action: action,
             closeAction: closeAction
         )
+    }
+}
+
+/// Value-only state and merge boundary for a bounded AX retry. Progress means
+/// one pending exact window gained an operation object, not that a sibling was
+/// returned again. Omitted or still-unbound windows remain in their old slots.
+enum DockPreviewOperationRecoveryPolicy {
+    static let delays: [UInt64] = [150_000_000, 400_000_000, 900_000_000]
+
+    struct Request {
+        let ownerLifetimes: [pid_t: String]
+        let missingTargets: Set<WindowPreviewIdentity>
+        let discoveryOwners: Set<pid_t>
+
+        var pendingOwners: Set<pid_t> {
+            Set(missingTargets.map(\.processID)).union(discoveryOwners)
+        }
+    }
+
+    struct Update {
+        let rows: [DockPreviewRow]
+        let recoveredTargets: Set<WindowPreviewIdentity>
+        let remainingRequest: Request
+    }
+
+    static func makeRequest(
+        current: [DockPreviewRow],
+        requestedOwners: [pid_t: String],
+        discoveryOwners: Set<pid_t> = []
+    ) -> Request {
+        let missingTargets = Set(current.compactMap { row -> WindowPreviewIdentity? in
+            guard !row.canActivate else { return nil }
+            return identity(of: row, ownerLifetimes: requestedOwners)
+        })
+        return Request(
+            ownerLifetimes: requestedOwners,
+            missingTargets: missingTargets,
+            discoveryOwners: discoveryOwners.intersection(requestedOwners.keys)
+        )
+    }
+
+    static func recoverMissingWindows(
+        current: [DockPreviewRow],
+        refreshed: [DockPreviewRow],
+        request: Request
+    ) -> Update? {
+        var currentByTarget: [WindowPreviewIdentity: DockPreviewRow] = [:]
+        for row in current {
+            guard let target = identity(of: row, ownerLifetimes: request.ownerLifetimes) else { continue }
+            guard currentByTarget.updateValue(row, forKey: target) == nil else { return nil }
+        }
+        var seen = Set<WindowPreviewIdentity>()
+        var accepted: [WindowPreviewIdentity: DockPreviewRow] = [:]
+        var acceptedOrder: [WindowPreviewIdentity] = []
+        for row in refreshed {
+            guard let target = identity(of: row, ownerLifetimes: request.ownerLifetimes) else { continue }
+            guard seen.insert(target).inserted else { return nil }
+            guard row.canActivate, !row.isPreviewOnly,
+                  currentByTarget[target]?.canActivate != true else { continue }
+            if request.missingTargets.contains(target) {
+                // An exact known card must still exist; true close/retirement
+                // belongs to the lifecycle boundary, never this refresh list.
+                guard currentByTarget[target] != nil else { continue }
+            } else {
+                guard request.discoveryOwners.contains(target.processID) else { continue }
+            }
+            accepted[target] = row
+            acceptedOrder.append(target)
+        }
+        guard !accepted.isEmpty else { return nil }
+        let recoveredTargets = Set(accepted.keys)
+        let discoveredOwners = Set(recoveredTargets.map(\.processID)).intersection(request.discoveryOwners)
+        var result: [DockPreviewRow] = []
+        for row in current {
+            if let target = identity(of: row, ownerLifetimes: request.ownerLifetimes),
+               let replacement = accepted.removeValue(forKey: target) {
+                result.append(replacement.replacingThumbnailResult(row.thumbnailResult ?? replacement.thumbnailResult))
+            } else if row.id <= 0, row.isPreviewOnly,
+                      let owner = row.ownerProcessIdentifier,
+                      discoveredOwners.contains(owner),
+                      row.ownerProcessLifetimeKey == request.ownerLifetimes[owner] {
+                // Only synthetic discovery placeholders disappear. A positive
+                // unbound window ID may not be replaced by a different window.
+                continue
+            } else {
+                result.append(row)
+            }
+        }
+        result.append(contentsOf: acceptedOrder.compactMap { accepted[$0] })
+        return Update(
+            rows: result,
+            recoveredTargets: recoveredTargets,
+            remainingRequest: Request(
+                ownerLifetimes: request.ownerLifetimes,
+                missingTargets: request.missingTargets.subtracting(recoveredTargets),
+                discoveryOwners: request.discoveryOwners.subtracting(discoveredOwners)
+            )
+        )
+    }
+
+    private static func identity(
+        of row: DockPreviewRow,
+        ownerLifetimes: [pid_t: String]
+    ) -> WindowPreviewIdentity? {
+        guard let windowID = CGWindowID(exactly: row.id), windowID > 0,
+              let pid = row.ownerProcessIdentifier, pid > 0,
+              let lifetime = row.ownerProcessLifetimeKey, !lifetime.isEmpty,
+              ownerLifetimes[pid] == lifetime else { return nil }
+        return WindowPreviewIdentity(processID: pid, windowID: windowID)
     }
 }
 
@@ -2653,7 +3047,8 @@ private struct DockWindowPreviewView: View {
     let rows: [DockPreviewRow]
     let canManageWindows: Bool
     let hoveredRowID: Int?
-    let onFrameChange: (Int, CGRect?) -> Void
+    let frameGeneration: UInt64
+    let onFrameChange: (Int, CGRect?, UInt64) -> Void
 
     var body: some View {
         let isSingleWindowPreview = canManageWindows && rows.count == 1
@@ -2684,6 +3079,7 @@ private struct DockWindowPreviewView: View {
                     appName: appName,
                     fallbackIcon: icon,
                     isHovering: hoveredRowID == row.id,
+                    frameGeneration: frameGeneration,
                     onFrameChange: onFrameChange
                 )
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -2696,6 +3092,7 @@ private struct DockWindowPreviewView: View {
                                 appName: appName,
                                 fallbackIcon: icon,
                                 isHovering: hoveredRowID == row.id,
+                                frameGeneration: frameGeneration,
                                 onFrameChange: onFrameChange
                             )
                         }
@@ -2728,7 +3125,8 @@ private struct DockPreviewCard: View {
     let fallbackIcon: NSImage?
 
     let isHovering: Bool
-    let onFrameChange: (Int, CGRect?) -> Void
+    let frameGeneration: UInt64
+    let onFrameChange: (Int, CGRect?, UInt64) -> Void
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -2770,7 +3168,8 @@ private struct DockPreviewCard: View {
         .background(
             WindowPreviewFrameReporter(
                 target: row.id,
-                onChange: onFrameChange
+                generation: frameGeneration,
+                onOwnedChange: onFrameChange
             )
         )
     }

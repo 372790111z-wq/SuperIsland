@@ -97,6 +97,9 @@ struct WindowAXLifecycleDiagnosticSnapshot: Sendable, Equatable {
     let isObservationInstalled: Bool
     let windowIDs: [CGWindowID]
     let notificationRegistrations: [WindowAXNotificationRegistrationDiagnostic]
+    var observerID: String? = nil
+    var registryEpoch: UInt64? = nil
+    var bindingGeneration: UInt64? = nil
 }
 
 enum WindowInventoryDiagnosticGate {
@@ -217,6 +220,9 @@ final class WindowInventoryDiagnosticRecorder: @unchecked Sendable {
         let isObservationInstalled: Bool
         let windowIDs: [CGWindowID]
         let notificationRegistrations: [RegistrationRecord]
+        let observerID: String?
+        let registryEpoch: UInt64?
+        let bindingGeneration: UInt64?
     }
 
     private struct Record: Codable {
@@ -363,7 +369,10 @@ final class WindowInventoryDiagnosticRecorder: @unchecked Sendable {
                         targetWindowID: $0.targetWindowID,
                         result: $0.result
                     )
-                }
+                },
+                observerID: lifecycle.observerID,
+                registryEpoch: lifecycle.registryEpoch,
+                bindingGeneration: lifecycle.bindingGeneration
             ),
             inventoryMode: snapshot.mode.rawValue,
             inventoryIsComplete: snapshot.isComplete,
@@ -1294,6 +1303,9 @@ private typealias WindowInventoryCGSGetWindowLevel = @convention(c) (
     CGWindowID,
     UnsafeMutablePointer<Int32>
 ) -> Int32
+private typealias WindowInventorySLSWindowIsOrderedIn = @convention(c) (
+    Int32, CGWindowID, UnsafeMutablePointer<UInt8>
+) -> Int32
 private typealias WindowInventoryCGSHWCaptureWindowList = @convention(c) (
     UInt32,
     UnsafeMutablePointer<CGWindowID>,
@@ -1317,6 +1329,7 @@ private typealias WindowInventorySLPSSetFrontProcessWithOptions = @convention(c)
 enum WindowServerPrivateBridge {
     private struct Resolvers {
         let mainConnectionID: WindowInventoryCGSMainConnectionID
+        let windowIsOrderedIn: WindowInventorySLSWindowIsOrderedIn?
         let captureWindowList: WindowInventoryCGSHWCaptureWindowList?
         let getProcessForPID: WindowInventoryGetProcessForPID?
         let setFrontProcessWithOptions: WindowInventorySLPSSetFrontProcessWithOptions?
@@ -1343,6 +1356,9 @@ enum WindowServerPrivateBridge {
                 mainSymbol,
                 to: WindowInventoryCGSMainConnectionID.self
             ),
+            windowIsOrderedIn: symbol("SLSWindowIsOrderedIn").map {
+                unsafeBitCast($0, to: WindowInventorySLSWindowIsOrderedIn.self)
+            },
             captureWindowList: symbol("CGSHWCaptureWindowList").map {
                 unsafeBitCast($0, to: WindowInventoryCGSHWCaptureWindowList.self)
             },
@@ -1359,6 +1375,23 @@ enum WindowServerPrivateBridge {
             }
         )
     }()
+
+    /// Ordered-out backing stores may retain both pixels and an AX root after
+    /// closing. Unknown state never authorizes a newly recovered operation.
+    static func isOrderedIn(windowID: CGWindowID, ownerPID: pid_t) -> Bool? {
+        guard windowID > 0, ownerPID > 0, let resolvers,
+              let query = resolvers.windowIsOrderedIn,
+              let descriptions = WindowServerWindowDescriptions.copy(for: [windowID]) as? [[String: Any]],
+              descriptions.contains(where: {
+                  ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID &&
+                      ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ownerPID
+              }) else { return nil }
+        let connection = resolvers.mainConnectionID()
+        guard connection != 0 else { return nil }
+        var value: UInt8 = 255
+        guard query(Int32(bitPattern: connection), windowID, &value) == 0, value <= 1 else { return nil }
+        return value == 1
+    }
 
     static func capture(windowID: CGWindowID) -> CGImage? {
         guard windowID > 0,

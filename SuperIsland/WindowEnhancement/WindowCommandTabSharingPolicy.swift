@@ -1,5 +1,67 @@
 import Foundation
 
+/// Recovery is complete only after the selected owner's AX operation objects
+/// return. A captured/retained WindowServer surface alone must keep retrying.
+enum WindowCommandTabRecoveryPolicy {
+    static let delays: [UInt64] = [60_000_000, 120_000_000, 220_000_000]
+
+    static func ownersNeedingRecovery<Window>(
+        windows: [Window], owners: Set<Int32>,
+        owner: (Window) -> Int32, hasOperation: (Window) -> Bool
+    ) -> Set<Int32> {
+        Set(owners.filter { pid in
+            let owned = windows.filter { owner($0) == pid }
+            return owned.isEmpty || owned.contains { !hasOperation($0) }
+        })
+    }
+
+    private struct Target: Hashable {
+        let owner: Int32
+        let windowID: UInt32
+    }
+
+    /// A healthy sibling is neither progress nor permission to replace the
+    /// entire owner's list. Only an exact missing target may be upgraded.
+    static func restoringMissingWindows<Window>(
+        current: [Window],
+        refreshed: [Window],
+        requestedOwners: Set<Int32>,
+        owner: (Window) -> Int32,
+        windowID: (Window) -> UInt32?,
+        hasOperation: (Window) -> Bool
+    ) -> [Window]? {
+        func target(_ window: Window) -> Target? {
+            guard let id = windowID(window), id > 0 else { return nil }
+            return Target(owner: owner(window), windowID: id)
+        }
+        var byTarget: [Target: Window] = [:]
+        for window in refreshed where requestedOwners.contains(owner(window)) {
+            guard let key = target(window) else { continue }
+            guard byTarget[key] == nil else { return nil }
+            byTarget[key] = window
+        }
+        var madeProgress = false
+        var result = current.map { window in
+            guard !hasOperation(window), requestedOwners.contains(owner(window)),
+                  let key = target(window), let replacement = byTarget[key],
+                  hasOperation(replacement) else { return window }
+            madeProgress = true
+            return replacement
+        }
+        // A genuinely empty owner has no target IDs to restore yet. Admit its
+        // validated fresh list once an actual operation arrives; retained
+        // siblings remain noninteractive and stay in the finite retry set.
+        let emptyOwners = requestedOwners.subtracting(current.map(owner))
+        let discoveredOwners = Set(byTarget.values.filter(hasOperation).map(owner))
+            .intersection(emptyOwners)
+        for window in refreshed where discoveredOwners.contains(owner(window)) && target(window) != nil {
+            result.append(window)
+            madeProgress = true
+        }
+        return madeProgress ? result : nil
+    }
+}
+
 /// A display policy for the two explicitly authorized WeChat installations.
 /// It is separate from native tile identity and must not be used by Dock.
 enum WindowCommandTabSharingPolicy {
@@ -91,7 +153,7 @@ enum WindowCommandTabSharingPolicy {
               let runningByPID = uniqueApplications(running),
               let selectedByPID = uniqueApplications(selected),
               selectedByPID.values.allSatisfy({
-                  runningByPID[$0.processID] == $0 && installation(for: $0) != nil
+                  runningByPID[$0.processID] == $0
               }) else { return nil }
 
         let members = runningByPID.values.compactMap { application -> Member? in
@@ -109,19 +171,36 @@ enum WindowCommandTabSharingPolicy {
         case .resolvedIdentity:
             // Several live processes at the same known installation are fine.
             // Strong evidence spanning distinct installations is a conflict.
-            guard Set(selectedByPID.values.compactMap { installation(for: $0) }).count == 1 else {
+            guard selectedByPID.values.allSatisfy({ installation(for: $0) != nil }),
+                  Set(selectedByPID.values.compactMap { installation(for: $0) }).count == 1 else {
                 return nil
             }
         case let .weakSelectedButton(title, isLeaf, searchComplete, hasStrongIdentity):
+            let selectedRoots = selectedByPID.values.filter { installation(for: $0) != nil }
             guard (title == "微信" || title == "WeChat"),
                   isLeaf, searchComplete, !hasStrongIdentity,
-                  Set(selectedByPID.keys) == Set(members.map { $0.application.processID }) else {
+                  Set(selectedRoots.map(\.processID)) == Set(members.map { $0.application.processID }),
+                  selectedByPID.values.allSatisfy({ application in
+                      installation(for: application) != nil
+                          || isKnownNestedAppEx(application, rootMembers: members)
+                  }) else {
                 return nil
             }
         case .unresolvedOrConflicting:
             return nil
         }
         return Group(members: members)
+    }
+
+    /// AppEx can become a regular, same-name application while its root is
+    /// running. Its exact bundle explains an extra weak match, but supplies
+    /// neither an installation nor a window/action owner to the shared group.
+    private static func isKnownNestedAppEx(_ application: Application, rootMembers: [Member]) -> Bool {
+        guard application.processID > 0,
+              application.bundleIdentifier == "com.tencent.flue.WeChatAppEx" else { return false }
+        return rootMembers.contains {
+            application.bundlePath == $0.installation.bundlePath + "/Contents/MacOS/WeChatAppEx.app"
+        }
     }
 
     enum RequestedAction {

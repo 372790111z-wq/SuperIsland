@@ -1,3 +1,89 @@
+## 2026-09-15 - preserve174214 as local Git checkpoint before QQ investigation
+
+User explicitly requested a Git commit preserving the installed174214 source, beyond the verified file snapshot. This checkpoint includes the accumulated generic AX lifecycle recovery, Mission Control scene-exit fixes and exact WeChat shared-selection handling, with their regression tests and evidence notes.332 tests and independent build/Analyze passed for this code; both WeChat Cmd-Tab cards, hover close control and activation were accepted by user. No QQ-specific implementation has been added.
+
+New open report: QQ preview remains noninteractive after closing via Dock, Cmd-Tab and Mission Control. Frozen logs show original419 receives destruction/retirement, followed by a preview-only422 card; the precise fallback source is still being investigated. Actual close execution from Mission Control is not established by the frozen log. Preserve this baseline before working on the new defect. Full recoverable app/source backup: parent .codex-audit/checkpoints/WE1-174214-accepted-20260915-1815/. No remote operation is part of this checkpoint.
+
+## 2026-09-15 - Cmd-Tab WeChat174214: preview, hover control and click accepted
+
+User confirmed installation. Normal WE1 Quit removed oldPID88070 before recoverable bundle replacement. Installed20260915174214 at /Applications/SuperIsland-WE1-Debug.app now runs asPID21679, launch17:52:14 CST. Exact prior165120 is preserved at /Users/muyz/.Trash/SuperIsland-WE1-Debug-pre-20260915174214.app. Installed99-file manifest matches tested candidate; old installation99-file manifest matches rollback; both strict signatures pass.127 source hashes and the source-to-package payload were independently rechecked; no code changes in this installation turn.
+
+Native window-enhancement Recheck reports Accessibility and Screen Recording effective; all previously enabled feature switches remain enabled and settings are closed. New lifecycle/inventory/interaction sessions report174214; first37 lifecycle records1-37 are contiguous, logs parse cleanly. Main WeChat27623 is retired with AX invalidProxy after startup; that record alone does not establish a new defect or validate the new Cmd-Tab path. No new shared selection is present in the initial snapshot. Two WeChats17311/17755, AppEx44654, QQ564, Lemon568, Sunlogin1077 and Dock570 retain prior launch times; none was restarted or activated by the agent. No permission change, source edit, commit or push.
+
+User replied “可以” to the requested checks: both WeChat Cmd-Tab cards appear, hover shows the close control, and card click activates the window. These three interactions are now accepted by user report on installed174214. Actual window closing, long-idle durability and deferred primary-WeChat thumbnail transparency are outside this acceptance; no automated visual acceptance is claimed. Previous candidate-only and165120 installed notes are historical. Evidence: parent .codex-audit/wins/2026-09-15/cmdtab-wechat-appex-fix/installation/.
+
+## 2026-09-15 - Cmd-Tab WeChat AppEx ambiguity: candidate174214 ready, not installed
+
+User reports WeChat cards absent in Cmd-Tab. Frozen native-identity/interaction records identify regular same-name candidates17311/17755/44654; the third is the exact Work2 nested WeChatAppEx (bundle ID com.tencent.flue.WeChatAppEx). Main WeChat AX windows13422/26925 remain actionable. Identical three-candidate ambiguity exists in prior144257 logs, so this is not evidence that165120 AX recovery caused it.
+
+Only shared-selection policy and six regression tests changed: a complete weak WeChat leaf may contain exact nested AppEx evidence alongside both live known roots; shared members stay roots17311/17755. Unknown candidates, stale snapshots, missing roots and conflicting/strong helper identities still reject. Dock, action ownership, MC and exact AX recovery implementations are unchanged from165120. A read-only live production-policy comparison returns nil before and [17311,17755] after with the same current three candidates; this is not native UI acceptance.
+
+332 tests pass; independent Debug build and Analyze pass; 116 source hashes remain stable during checks and 11 ExtensionHost hashes match the preceding frozen baseline. Packaged20260915174214 has verified stable signature/source payload,99-file manifest and89 unchanged resources. Previous165120 candidate is backed up at build/WE1-Debug/backups/SuperIsland-WE1-Debug-20260915-174214.app and matches its frozen manifest. Installed165120/PID88070 is unchanged. Existing dirty-worktree baseline is preserved; no business app restart, permission change, commit or push. Next is separate WE1-only installation confirmation and native WeChat Cmd-Tab display/activation/close-control acceptance. Earlier idle durability and primary-WeChat pixel limitations remain open. Evidence: parent .codex-audit/wins/2026-09-15/cmdtab-wechat-appex-fix/.
+
+## 2026-09-15 - exact AX recovery165120 installed; native Dock acceptance pending
+
+User confirmed installation. Reviewed20260915165120 replaced144257 after normal WE1 Quit and verified no running WE1. Exact previous installation is preserved at /Users/muyz/.Trash/SuperIsland-WE1-Debug-pre-20260915165120.app. Installed99-file manifest matches tested candidate; old backup matches actual prior installation, strict signatures pass. New WE1 PID88070 launched16:58:00 from exact target path. No source implementation changes in this installation turn.
+
+Native settings Recheck reports Accessibility and Screen Recording effective. Master/Dock/Cmd-Tab/MC and MC Command-W remain enabled; settings closed after check. Initial new lifecycle session has23 contiguous records1–23/build165120/PID88070, no parse errors, file0600; inventory and interaction streams also contain new build/session. No exactRecovery event in the initial sample; startup is not proof of missing-AX recovery. User initial Dock Lemon hover/click question pending. QQ564, Lemon568, Sunlogin1077, both WeChats17311/17755 and Dock570 retain prior launch times. No business-app restart, permission change, commit or push. Evidence: parent .codex-audit/wins/2026-09-15/bounded-exact-ax-recovery/installation/.
+
+## 2026-09-15 - exact AX recovery candidate165120 ready; native acceptance pending
+
+User explicitly requested continued implementation. Added shared bounded remote AX recovery for Dock/Cmd-Tab, exact owner/lifetime/WID/root-role and ordered-in verification, retirement protection, cursor retry/target-change handling, and bad-proxy replacement protection. Dock actions now retain a lifecycle revision in the displayed card closure, including delayed-hide/return transitions. This is generic; no Lemon/QQ/Sunlogin special case.
+
+326 tests, independent Debug build/Analyze, 127 frozen source hashes, stable deep/strict signature, source payload digest and 89 unchanged resource files pass. Read-only production scanner finds Lemon130 and rejects ordered-out24636 without activation; this is resolver evidence, not native UI acceptance. The historical failure's ordered-in state and original AX omission cause remain unknown; this path does not recover ordered-out or unknown targets.
+
+Candidate build20260915165120 is packaged but not installed. Installed144257/PID6793 remains unchanged. Prior144257 package is backed up at build/WE1-Debug/backups/SuperIsland-WE1-Debug-20260915-164529.app; current dirty baseline is preserved in parent .codex-audit/wins/2026-09-15/bounded-exact-ax-recovery/before/ and before.diff. No commit/push, business app restart or permission change. Next: WE1-only install confirmation, then actual Dock/Cmd-Tab click/close, rapid return, minimized/closed and dual-instance regressions. Evidence and limits: parent .codex-audit/wins/2026-09-15/bounded-exact-ax-recovery/README.md.
+
+## 2026-09-15 - Lemon same-window recovery confirmed; idle loss remains unresolved
+
+Current144257 Lemon568/130 has correct preview hit and image but no AX action object. User has not clicked; no hover close control is confirmed. A fresh independent AX caller sees the same successful-empty window list. New observer starts empty, with no prior current-process window track/reset/removal; earlier182653 samples were already empty before installation. Root cause remains unknown and cannot be assigned to MC repair or this process clearing a previously tracked Lemon window.
+
+Do not infer closed state or add app-wide activation/close from screenshot-only fallback. User recalls direct switching away, and subsequently reports a click restored it. Same568/130 is reacquired at07:56:33Z by the original observer, Dock actions become true, and independent07:57:44Z background readback retains130 with a close button. No app/WE1 restart occurred and no further activation permission is pending. User confirms normal Dock icon click, not preview click, caused the recovery. The initial AX disappearance and long-idle durability remain unresolved. No agent UI action, source fix or installation performed. Evidence: parent .codex-audit/wins/2026-09-15/lemon-idle-recurrence/071905Z/diagnosis.json. MC exit/hover/reentry/both close routes retain their scoped user acceptance.
+
+## 2026-09-15 - scoped MC defect closed; idle preview cause still open
+
+Authorized WE1-only installation and startup verification are complete: new PID6793, full candidate/rollback manifests, stable strict signatures, native effective permissions and new lifecycle/interaction/inventory logs verified. No installation approval remains pending for144257. Exact182653 rollback is in /Users/muyz/.Trash/SuperIsland-WE1-Debug-pre-20260915144257.app. Existing business processes retain their launches.
+
+User confirms the unwanted blue outline and close control no longer appear over ordinary content after MC exit. That scoped native blocker is closed. User also confirms close-control hover appearance on entry and reentry. User then confirmed both click-close and hovered Command-W close only the selected targets, preserve other windows and leave no exit outline. The scoped MC defect is closed by user native acceptance; no further MC test or install gate is pending for these scenarios. Other apps/unsaved dialogs/Spaces/displays and ordinary Dock/Cmd-Tab durability are not covered. See installation/native-acceptance.json. No automated native UI observation is claimed. The independent long-idle missing-AX cause remains unproven; diagnostic-only lifecycle logging is now active. Deferred primary-WeChat capture and Chrome pixel issue stay open. Earlier not-installed notes are historical. Evidence: parent .codex-audit/wins/2026-09-15/mission-control-scene-exit/installation/.
+
+## 2026-09-15 - MC repair144257 awaits installation/native validation
+
+The ordinary-content blue outline/close control is a confirmed generic scene-admission defect: no-mc fallback accepted an app AXGroup's containing window ID and subrectangle as a thumbnail. Candidate20260915144257 removes that fallback, unifies exit cleanup and protects rapid reentry/late-close replies.308 tests/build/Analyze/package/source/backup checks pass. It includes the093947 lifecycle diagnostics but is not installed;182653/PID816 remains active.
+
+Next gate is explicit WE1-only installation, followed by real MC hover/close and exit to ordinary app content, repeated rapid entry/exit and normal Dock/Cmd-Tab use. No native success follows from fixtures or package checks. Systems without a unique mc root now have no point-only fallback; compatibility is unverified. QQ/Sunlogin long-idle AX absence, primary-WeChat transparent capture and original Chrome bitmap issue remain separate open problems. See parent .codex-audit/wins/2026-09-15/mission-control-scene-exit/README.md.
+
+## 2026-09-15 - root trigger still unknown; diagnostic093947 awaits installation
+
+Sunlogin's exact main1077/371 was omitted from all sampled WE1 AX sources while auxiliary372 remained; after371 returned at08:56:12CST, the existing bounded recovery upgraded the card. The original trigger is still unconfirmed. A90-second later read-only observer probe preserved the healthy background window and cannot explain the earlier absence. QQ has the same missing-action-source symptom; identical root cause is not yet proven.
+
+Diagnostic-only candidate20260915093947 passed300 tests/build/Analyze/source/signature/resource/backup verification. It records observer lifecycle and reset/removal reasons without changing action eligibility or recovery policy. Candidate is not installed; current182653 remains running. Next gate: user approval to replace/restart only WE1, then runtime diagnostic readback and failed-state capture before manually activating the affected app. Logs have explicit queue/write gaps and session/rotation limits; absence across a gap is not proof of a missing event.
+
+Intermittent Dock/Cmd-Tab hover close and exact activation remain unaccepted; original Chrome bitmap placement and primary-WeChat transparent capture remain separate. No stronger conclusion follows from automated tests or same-WID metadata recovery. Evidence: parent .codex-audit/wins/2026-09-15/window-registration-diagnostics/README.md.
+
+## 2026-09-14 - QQ Dock still fails on installed182653; Cmd-Tab untested
+
+QQ564/WID419 is image-bearing and the pointer hits the registered card, but all AX operation sources remain empty and the card is intentionally noninteractive. Three recovery rounds have run without finding a window. Independent read-only metadata confirms no direct AX window children and isHidden=false; the failed baseline was preserved before later UI selection and recovery, described below. The reason for the absent AX window remains unknown. Do not call this fixed, infer Cmd-Tab acceptance, loosen canonical ownership, or extend finite retries without new evidence. The user subsequently confirmed switching away without close/minimize. Evidence: parent .codex-audit/wins/2026-09-14/qq-dock-182653-failure/142128Z/.
+
+Follow-up: user confirms only switching to another app, without close/minimize. At14:30:09Z the same QQ564/419 becomes onscreen and all AX sources/registry recover;14:30:13 Dock hit now reports both capabilities. Two CUA Dock-selection calls timed out; a later QQ selection returned the main AX tree, with no explicit click/raise dispatched. The exact recovery trigger is pending user clarification. This transient metadata recovery is not native action or durability acceptance.
+
+## 2026-09-14 - 182653 installation complete; waiting for native results
+
+Candidate182653 is installed and running as PID816 after user confirmation. Exact installed bytes/signature, native effective permissions and enabled preview settings are verified; business-app PIDs stayed unchanged. Former installed145456 remains recoverable in Trash and complete checkpoint/package backups.
+
+Multi-app Dock/Cmd-Tab close-control/activation, same-app partial recovery, Chrome pixels and idle/reentry durability are still unaccepted. Two native test questions are pending. Single-display context cannot close the original second-display Chrome case; main-WeChat transparent capture remains deferred. Installation evidence: parent .codex-audit/wins/2026-09-14/partial-window-operation-recovery/final-candidate/installation/.
+
+## 2026-09-14 - partial-window coverage implemented; native durability still open
+
+Candidate20260914182653 covers known same-owner partial AX recovery in Dock/Cmd-Tab, retains healthy cards and protects pending clicks.291 tests/build/Analyze/signature checks pass, and both independent reviews have no blockers. This closes the code coverage gap described in the180011 note, not native durability acceptance.
+
+Installed145456 remains unchanged. Await confirmation for WE1-only installation, then multi-app hover close/exact activation, partial and idle/reentry cases, and Chrome screenshot placement. Finite retries cannot guarantee unknown/unreported windows or AX that never returns. QQ initial missing-AX cause and the old Chrome bitmap cause remain unproven; main-WeChat capture stays deferred. See parent .codex-audit/wins/2026-09-14/partial-window-operation-recovery/final-candidate/README.md.
+
+## 2026-09-14 — durability reopened; candidate180011 awaits installation/native tests
+
+QQ419 retained pixels while all sampled Dock AX sources were empty. A real WindowServer surface alone cannot grant close/activate operations. A separate source gap could lose Dock frame registration after reset. Candidate20260914180011 addresses bounded recovery/frame registration and adjusts Chrome capture sizing;279 tests/build/Analyze/signatures pass, with no native stability or pixel acceptance claimed.
+
+Installed145456 is unchanged and backed up. Next: confirm WE1-only installation, verify QQ Dock/Cmd-Tab × and activation, Chrome thumbnail size/position on the affected display, then idle/reentry behavior. QQ initial missing AX and original Chrome bitmap causes remain unproven. Recovery covers owners with no actionable AX windows, not unbound siblings of an otherwise healthy owner. Main-WeChat capture remains deferred. See parent `.codex-audit/wins/2026-09-14/idle-preview-interaction-regression/final-candidate/README.md`.
+
 ## 2026-09-14 — tested fullscreen cross-desktop return passes
 
 The user accepts same TextEdit A fullscreen preview, click return and native strip dismissal on145456. Exact commit/focus, one actionable image card and retained fullscreen status corroborate it. This closes the single-window fullscreen scenario, not all Spaces/displays/apps or deferred primary-WeChat capture. Temporary A is closed and source test files are preserved. See cmdtab-fullscreen-validation/native-acceptance.json; earlier pending-retest notes are historical.

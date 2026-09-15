@@ -277,7 +277,7 @@ final class WindowCommandTabMonitor {
         removeNativePointerTap(force: true)
         nativeSwitcher.reset()
         cancelPrewarmTasks()
-        WindowThumbnailProvider.clearAllCache()
+        WindowThumbnailProvider.clearAllCache(reason: .commandTabStopped)
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
             self.activationObserver = nil
@@ -302,7 +302,7 @@ final class WindowCommandTabMonitor {
         )
         if !anyPreviewEnabled {
             cancelPrewarmTasks()
-            WindowThumbnailProvider.clearAllCache()
+            WindowThumbnailProvider.clearAllCache(reason: .commandTabAllPreviewsDisabled)
         } else if let frontmostApplication = NSWorkspace.shared.frontmostApplication {
             schedulePrewarm(for: frontmostApplication)
         }
@@ -1037,35 +1037,52 @@ final class WindowCommandTabMonitor {
         presentOverlay(thumbnails: currentThumbnailResults, for: selectedIndex)
     }
 
-    private func renderOverlay(retryMissingWindows: Bool = true) {
+    private func renderOverlay(
+        retryMissingWindows: Bool = true,
+        preservingThumbnails: [WindowThumbnailResult?]? = nil,
+        continuingRecovery: Bool = false
+    ) {
         guard isPresenting, candidates.indices.contains(selectedIndex) else { return }
         let renderStartedAt = ProcessInfo.processInfo.systemUptime
-        selectedApplicationRefreshTask?.cancel()
-        selectedApplicationRefreshTask = nil
+        if !continuingRecovery {
+            selectedApplicationRefreshTask?.cancel()
+            selectedApplicationRefreshTask = nil
+        }
         thumbnailCaptureTask?.cancel()
         thumbnailCaptureTask = nil
         sharedPreviewFallbackTask?.cancel()
         sharedPreviewFallbackTask = nil
         thumbnailCaptureGeneration &+= 1
 
-        currentThumbnailResults = []
+        let now = Date()
+        let retainedThumbnails = preservingThumbnails?.map { result -> WindowThumbnailResult? in
+            if case let .some(.recentCache(_, timestamp)) = result,
+               timestamp.addingTimeInterval(WindowThumbnailProvider.recentCacheTTL) <= now { return nil }
+            return result
+        }
+        currentThumbnailResults = retainedThumbnails ?? []
         previewOnlyWindows = []
-        previewLoading = true
+        previewLoading = retainedThumbnails == nil
         // Updating to an empty loading model clears the previous target's
         // identities and pointer state without hiding and reopening the panel.
         // AX-less helpers keep this state until their original discovery path
         // produces independently validated windows.
-        presentOverlay(thumbnails: [], for: selectedIndex)
+        // An operation recovery keeps the current exact-ID pixels visible.
+        // Only an ordinary selection starts with an empty loading model.
+        presentOverlay(thumbnails: currentThumbnailResults, for: selectedIndex)
 
         let selectedWindows = candidates[selectedIndex].windows
         if candidates[selectedIndex].isSharedWeChat && !selectedWindows.isEmpty {
             discoverSharedPreviewFallbacks()
-            if retryMissingWindows {
-                scheduleSelectedApplicationWindowRefresh()
-            }
+        }
+        // A normal application's retained window can have pixels but no AX
+        // object, just like a missing member of a shared selection. It must
+        // receive the same bounded recovery without losing its visible card.
+        if retryMissingWindows && !selectedWindows.isEmpty {
+            scheduleSelectedApplicationWindowRefresh()
         }
         guard !selectedWindows.isEmpty else {
-            scheduleSelectedApplicationWindowRefresh()
+            if retryMissingWindows { scheduleSelectedApplicationWindowRefresh() }
             return
         }
         let candidate = candidates[selectedIndex]
@@ -1079,6 +1096,8 @@ final class WindowCommandTabMonitor {
             let occurrence = titleOccurrences[window.title, default: 0]
             titleOccurrences[window.title] = occurrence + 1
             titleOccurrencesByPID[processIdentifier] = titleOccurrences
+            if let retainedThumbnails, retainedThumbnails.indices.contains(index),
+               retainedThumbnails[index]?.image != nil { continue }
             guard let applicationIdentity = WindowThumbnailApplicationIdentity(
                 application: window.application
             ) else {
@@ -1111,7 +1130,7 @@ final class WindowCommandTabMonitor {
         }
         guard !batches.isEmpty else {
             previewLoading = false
-            currentThumbnailResults = [WindowThumbnailResult?](
+            currentThumbnailResults = retainedThumbnails ?? [WindowThumbnailResult?](
                 repeating: .notEnumerated,
                 count: selectedWindows.count
             )
@@ -1123,9 +1142,9 @@ final class WindowCommandTabMonitor {
         }
         let captureIndex = selectedIndex
         let captureProcessIdentifiers = candidate.processIdentifiers
-        let captureApplicationIdentities = batches
-            .map(\.applicationIdentity)
-            .sorted { $0.processIdentifier < $1.processIdentifier }
+        // The capture batch can omit owners whose images were retained. The
+        // publication guard must still validate every owner in the model.
+        let captureApplicationIdentities = thumbnailApplicationIdentities(for: candidate)
         let lifecycleRevisions = captureApplicationIdentities.map {
             candidateLifecycleRevisions[$0.processLifetimeKey]
         }
@@ -1223,7 +1242,7 @@ final class WindowCommandTabMonitor {
         }
 
         thumbnailCaptureTask = Task.detached(priority: .userInitiated) {
-            var thumbnails = [WindowThumbnailResult?](
+            var thumbnails = retainedThumbnails ?? [WindowThumbnailResult?](
                 repeating: nil,
                 count: thumbnailCount
             )
@@ -1279,20 +1298,15 @@ final class WindowCommandTabMonitor {
         let applicationIndex = selectedIndex
         let candidate = candidates[applicationIndex]
         let hasExistingWindows = !candidate.windows.isEmpty
-        let missingApplications = candidate.applications.filter { application in
-            !candidate.windows.contains {
-                $0.application.processIdentifier == application.processIdentifier && $0.element != nil
-            }
-        }
-        guard !hasExistingWindows || candidate.isSharedWeChat,
-              !missingApplications.isEmpty else { return }
-        let missingProcessIdentifiers = Set(missingApplications.map(\.processIdentifier))
         let processIdentifiers = candidate.processIdentifiers
+        let requestedOwners = Set(processIdentifiers)
+        guard !WindowCommandTabRecoveryPolicy.ownersNeedingRecovery(
+            windows: candidate.windows, owners: requestedOwners,
+            owner: { $0.application.processIdentifier }, hasOperation: { $0.element != nil }
+        ).isEmpty else { return }
         let sequenceID = eventSequenceID
-        let captureGeneration = thumbnailCaptureGeneration
-        let applicationIdentities = thumbnailApplicationIdentities(
-            for: candidate.applications
-        )
+        let originalCaptureGeneration = thumbnailCaptureGeneration
+        let applicationIdentities = thumbnailApplicationIdentities(for: candidate.applications)
         guard applicationIdentities.count == candidate.applications.count else {
             if !hasExistingWindows {
                 previewLoading = false
@@ -1300,49 +1314,105 @@ final class WindowCommandTabMonitor {
             }
             return
         }
+        let revisions = applicationIdentities.map { WindowAXLifecycleRegistry.shared.revision(for: $0) }
+        let cacheGenerations = applicationIdentities.map { WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }
 
         selectedApplicationRefreshTask = Task { @MainActor [weak self] in
-            for delay in [60_000_000, 120_000_000, 220_000_000] as [UInt64] {
-                do {
-                    try await Task.sleep(nanoseconds: delay)
-                } catch {
-                    return
+            guard let self else { return }
+            var captureGeneration = originalCaptureGeneration
+            defer {
+                if self.eventSequenceID == sequenceID && self.thumbnailCaptureGeneration == captureGeneration {
+                    self.selectedApplicationRefreshTask = nil
                 }
-                guard let self,
-                      !Task.isCancelled,
-                      self.isPresenting,
+            }
+            for (attempt, delay) in WindowCommandTabRecoveryPolicy.delays.enumerated() {
+                do { try await Task.sleep(nanoseconds: delay) } catch { return }
+                guard !Task.isCancelled, self.isPresenting,
                       self.eventSequenceID == sequenceID,
                       self.thumbnailCaptureGeneration == captureGeneration,
                       self.selectedIndex == applicationIndex,
                       self.candidates.indices.contains(applicationIndex),
-                      self.candidates[applicationIndex].processIdentifiers
-                        == processIdentifiers else { return }
-                if self.nativeSelectionPending { continue }
+                      self.candidates[applicationIndex].processIdentifiers == processIdentifiers,
+                      applicationIdentities.map({ WindowAXLifecycleRegistry.shared.revision(for: $0) }) == revisions,
+                      applicationIdentities.map({ WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }) == cacheGenerations
+                else { return }
+                if self.nativeSelectionPending || self.nativePointerClickCaptured || self.overlay.hasPendingPointerPress ||
+                    CGEventSource.buttonState(.combinedSessionState, button: .left) { continue }
 
                 let currentApplications = processIdentifiers.compactMap {
                     NSRunningApplication(processIdentifier: $0)
                 }.filter { !$0.isTerminated }
                 guard currentApplications.count == processIdentifiers.count,
-                      self.thumbnailApplicationIdentities(
-                        for: currentApplications
-                      ) == applicationIdentities else { return }
-
-                let retryApplications = currentApplications.filter {
-                    missingProcessIdentifiers.contains($0.processIdentifier)
-                }
-                for application in retryApplications {
-                    WindowAXLifecycleRegistry.shared.observe(application: application)
-                }
-                let refreshedWindows = self.windowCandidates(for: retryApplications)
-                self.recordLifecycleRevisions(for: retryApplications)
-                guard applicationIdentities.allSatisfy({ $0.matchesCurrentProcess() }) else { return }
-                guard !refreshedWindows.isEmpty else { continue }
-                // A screenshot-only surface is not recovery of an operation
-                // target. Keep its fallback until the true owner's AX returns.
-                let recoveredOwners = Set(refreshedWindows.filter { $0.element != nil }
-                    .map { $0.application.processIdentifier })
-                if hasExistingWindows && recoveredOwners.isEmpty { continue }
+                      self.thumbnailApplicationIdentities(for: currentApplications) == applicationIdentities else { return }
                 let currentCandidate = self.candidates[applicationIndex]
+                let missingOwners = WindowCommandTabRecoveryPolicy.ownersNeedingRecovery(
+                    windows: currentCandidate.windows, owners: requestedOwners,
+                    owner: { $0.application.processIdentifier }, hasOperation: { $0.element != nil }
+                )
+                guard !missingOwners.isEmpty else { return }
+                let retryApplications = currentApplications.filter { missingOwners.contains($0.processIdentifier) }
+                var refreshedWindows = self.windowCandidates(for: retryApplications, messagingTimeout: 0.075)
+                var admittedRecovery = false
+                for identity in applicationIdentities where missingOwners.contains(identity.processIdentifier) {
+                    let availableIDs = Set(refreshedWindows.filter {
+                        $0.application.processIdentifier == identity.processIdentifier && $0.element != nil
+                    }.compactMap(\.windowID))
+                    let missingIDs = Set(currentCandidate.windows.filter {
+                        $0.application.processIdentifier == identity.processIdentifier && $0.element == nil
+                    }.compactMap(\.windowID)).union(self.previewOnlyWindows.filter {
+                        $0.identity.processID == identity.processIdentifier && !$0.canActivate
+                    }.map { $0.identity.windowID }).subtracting(availableIDs)
+                    let eligible = WindowAXLifecycleRegistry.shared.recoverableWindowIDs(
+                        missingIDs, identity: identity,
+                        discoverWhenEmpty: !refreshedWindows.contains { $0.application.processIdentifier == identity.processIdentifier }
+                    )
+                    guard !eligible.isEmpty else { continue }
+                    let recovered = await WindowAXExactRecovery.shared.recover(identity: identity, windowIDs: eligible)
+                    // The pointer may have selected another App, dismissed the
+                    // native switcher, or begun a click while the worker ran.
+                    guard !Task.isCancelled, self.isPresenting,
+                          self.eventSequenceID == sequenceID,
+                          self.thumbnailCaptureGeneration == captureGeneration,
+                          self.selectedIndex == applicationIndex,
+                          self.candidates.indices.contains(applicationIndex),
+                          self.candidates[applicationIndex].processIdentifiers == processIdentifiers,
+                          applicationIdentities.allSatisfy({ $0.matchesCurrentProcess() }),
+                          applicationIdentities.map({ WindowAXLifecycleRegistry.shared.revision(for: $0) }) == revisions,
+                          applicationIdentities.map({ WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }) == cacheGenerations
+                    else { return }
+                    guard !self.nativeSelectionPending, !self.nativePointerClickCaptured,
+                          !self.overlay.hasPendingPointerPress,
+                          !CGEventSource.buttonState(.combinedSessionState, button: .left) else { continue }
+                    guard let identityIndex = applicationIdentities.firstIndex(of: identity) else { continue }
+                    if WindowAXLifecycleRegistry.shared.admitRecoveredWindows(
+                        recovered, identity: identity, expectedRevision: revisions[identityIndex]
+                    ) > 0 { admittedRecovery = true }
+                }
+                if admittedRecovery {
+                    refreshedWindows = self.windowCandidates(for: retryApplications, messagingTimeout: 0.075)
+                }
+                guard !Task.isCancelled, applicationIdentities.allSatisfy({ $0.matchesCurrentProcess() }),
+                      applicationIdentities.map({ WindowAXLifecycleRegistry.shared.revision(for: $0) }) == revisions,
+                      applicationIdentities.map({ WindowThumbnailProvider.cacheGenerationSnapshot(for: $0) }) == cacheGenerations
+                else { return }
+                guard !self.nativePointerClickCaptured, !self.overlay.hasPendingPointerPress,
+                      !CGEventSource.buttonState(.combinedSessionState, button: .left) else { continue }
+                let replacementWindows = WindowCommandTabRecoveryPolicy.restoringMissingWindows(
+                    current: currentCandidate.windows, refreshed: refreshedWindows,
+                    requestedOwners: missingOwners, owner: { $0.application.processIdentifier },
+                    windowID: \.windowID, hasOperation: { $0.element != nil }
+                )
+                WindowInteractionDiagnosticRecorder.shared.record(
+                    component: "cmdTab", event: "operationRecoveryAttempt",
+                    metadata: [
+                        "attempt": .integer(Int64(attempt + 1)),
+                        "requestedOwnerCount": .integer(Int64(missingOwners.count)),
+                        "windowCount": .integer(Int64(refreshedWindows.count)),
+                        "madeProgress": .flag(replacementWindows != nil),
+                        "keptExistingCards": .flag(hasExistingWindows)
+                    ]
+                )
+                guard let replacementWindows else { continue }
                 let previousSelection: WindowActionTarget? = {
                     guard self.hasExplicitWindowSelection,
                           currentCandidate.windows.indices.contains(self.selectedWindowIndex) else { return nil }
@@ -1350,33 +1420,67 @@ final class WindowCommandTabMonitor {
                     guard let identity = WindowThumbnailApplicationIdentity(application: window.application) else { return nil }
                     return WindowActionTarget(window: window, applicationIdentity: identity)
                 }()
-                let replacementWindows = hasExistingWindows
-                    ? currentCandidate.windows.filter { !recoveredOwners.contains($0.application.processIdentifier) }
-                        + refreshedWindows.filter { recoveredOwners.contains($0.application.processIdentifier) }
-                    : refreshedWindows
+                let retainedThumbnails = replacementWindows.map { window -> WindowThumbnailResult? in
+                    guard let id = window.windowID, id > 0 else { return nil }
+                    let matches = currentCandidate.windows.indices.filter {
+                        currentCandidate.windows[$0].application.processIdentifier == window.application.processIdentifier &&
+                            currentCandidate.windows[$0].windowID == id
+                    }
+                    guard matches.count == 1, let index = matches.first,
+                          self.currentThumbnailResults.indices.contains(index) else { return nil }
+                    let result = self.currentThumbnailResults[index]
+                    if case let .some(.recentCache(_, timestamp)) = result,
+                       timestamp.addingTimeInterval(WindowThumbnailProvider.recentCacheTTL) <= Date() { return nil }
+                    return result
+                }
+                let sameTopology = currentCandidate.windows.count == replacementWindows.count &&
+                    zip(currentCandidate.windows, replacementWindows).allSatisfy {
+                        $0.application.processIdentifier == $1.application.processIdentifier && $0.windowID == $1.windowID
+                    }
+                let recoveredWindowNeedsImage = replacementWindows.indices.contains { index in
+                    let window = replacementWindows[index]
+                    guard window.element != nil, retainedThumbnails[index]?.image == nil else { return false }
+                    return !currentCandidate.windows.contains {
+                        $0.application.processIdentifier == window.application.processIdentifier &&
+                            $0.windowID == window.windowID && $0.element != nil
+                    }
+                }
                 self.candidates[applicationIndex] = Candidate(
-                    applications: currentApplications,
-                    windows: replacementWindows,
+                    applications: currentApplications, windows: replacementWindows,
                     isSharedWeChat: candidate.isSharedWeChat
                 )
                 let restoredSelection = previousSelection.flatMap { self.location(of: $0) }
-                self.selectedWindowIndex = restoredSelection?.window ?? 0
+                self.selectedWindowIndex = restoredSelection?.window ?? min(self.selectedWindowIndex, max(0, replacementWindows.count - 1))
                 self.hasExplicitWindowSelection = restoredSelection != nil
-                self.selectedApplicationRefreshTask = nil
+                if sameTopology && !recoveredWindowNeedsImage {
+                    // Upgrade only AX capabilities. Keep image work, ordering
+                    // and frame generation for the unchanged exact targets.
+                    self.previewLoading = false
+                    self.currentThumbnailResults = retainedThumbnails
+                    self.presentOverlay(thumbnails: self.currentThumbnailResults, for: applicationIndex)
+                } else {
+                    // Changed topology invalidates old image/fallback indexes.
+                    // This is the same finite recovery task, not a fresh budget.
+                    self.renderOverlay(retryMissingWindows: false,
+                                       preservingThumbnails: retainedThumbnails,
+                                       continuingRecovery: true)
+                    captureGeneration = self.thumbnailCaptureGeneration
+                }
+                let remaining = WindowCommandTabRecoveryPolicy.ownersNeedingRecovery(
+                    windows: replacementWindows, owners: requestedOwners,
+                    owner: { $0.application.processIdentifier }, hasOperation: { $0.element != nil }
+                )
                 WindowInteractionDiagnosticRecorder.shared.record(
                     component: "cmdTab", event: "selectedWindowsRecovered",
                     metadata: [
                         "sharedWeChat": .flag(candidate.isSharedWeChat),
-                        "recoveredOwnerCount": .integer(Int64(recoveredOwners.count)),
+                        "remainingOwnerCount": .integer(Int64(remaining.count)),
                         "windowCount": .integer(Int64(replacementWindows.count))
                     ]
                 )
-                // Recovery must not start another full retry cycle.
-                self.renderOverlay(retryMissingWindows: false)
-                return
+                if remaining.isEmpty { return }
             }
-            self?.selectedApplicationRefreshTask = nil
-            if !hasExistingWindows { self?.discoverPreviewOnlyWindows() }
+            if self.candidates[applicationIndex].windows.isEmpty { self.discoverPreviewOnlyWindows() }
         }
     }
 
@@ -2481,11 +2585,12 @@ final class WindowCommandTabMonitor {
     /// three public AX sources, then collapse distinct proxies only when their
     /// exact WindowServer identity proves that they represent the same window.
     private func windowCandidates(
-        for applications: [NSRunningApplication]
+        for applications: [NSRunningApplication],
+        messagingTimeout: Float? = nil
     ) -> [WindowCandidate] {
         let collected = applications
             .filter { !$0.isTerminated }
-            .flatMap { windowCandidates(for: $0) }
+            .flatMap { windowCandidates(for: $0, messagingTimeout: messagingTimeout) }
         return WindowAXProxyPreDeduplicator.deduplicate(
             collected,
             ownerPID: { $0.application.processIdentifier },
@@ -2506,12 +2611,14 @@ final class WindowCommandTabMonitor {
     }
 
     private func windowCandidates(
-        for application: NSRunningApplication
+        for application: NSRunningApplication,
+        messagingTimeout: Float? = nil
     ) -> [WindowCandidate] {
         let diagnosticsEnabled = WindowInventoryDiagnosticGate.isEnabled(
             bundleIdentifier: Bundle.main.bundleIdentifier
         )
         let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        if let messagingTimeout { AXUIElementSetMessagingTimeout(appElement, messagingTimeout) }
         let focusedWindow = elementAttribute(kAXFocusedWindowAttribute, of: appElement)
         let mainWindow = elementAttribute(kAXMainWindowAttribute, of: appElement)
         var collectedWindows: [AXUIElement] = []
@@ -2539,7 +2646,8 @@ final class WindowCommandTabMonitor {
         // This covers Apps that omit inactive real windows from AXWindows;
         // current private WindowServer evidence still decides admission.
         let lifecycleWindows = WindowAXLifecycleRegistry.shared.windowElements(
-            for: application
+            for: application,
+            refreshBeforeRead: messagingTimeout == nil
         )
         for window in lifecycleWindows
         where !collectedWindows.contains(where: { CFEqual($0, window) }) {
@@ -2548,6 +2656,7 @@ final class WindowCommandTabMonitor {
 
         var rawAXDiagnostics: [WindowInventoryAXCandidateDiagnostics] = []
         let resolvedCandidates = collectedWindows.compactMap { window -> WindowCandidate? in
+            if let messagingTimeout { AXUIElementSetMessagingTimeout(window, messagingTimeout) }
             let token = rawAXDiagnostics.count
             var ownerPID: pid_t = 0
             guard AXUIElementGetPid(window, &ownerPID) == .success else {
@@ -2881,6 +2990,9 @@ final class WindowCommandTabMonitor {
                 if self?.eventTap == nil {
                     self?.updateEnabledState()
                 }
+                WindowLifecycleDiagnosticRecorder.shared.record(event: "applicationActivated", metadata: [
+                    "ownerPID": .integer(Int64(application.processIdentifier))
+                ])
                 WindowAXLifecycleRegistry.shared.observe(
                     application: application
                 )
@@ -2901,6 +3013,9 @@ final class WindowCommandTabMonitor {
                       application.activationPolicy == .regular,
                       !application.isTerminated,
                       !self.preferences.isExcluded(application) else { return }
+                WindowLifecycleDiagnosticRecorder.shared.record(event: "applicationDeactivated", metadata: [
+                    "ownerPID": .integer(Int64(application.processIdentifier))
+                ])
                 // Refresh the event-driven registry as the App leaves the
                 // foreground. This performs AX reads only at a lifecycle edge;
                 // WindowServer reconciliation remains demand-driven on hover
@@ -4553,6 +4668,7 @@ private final class CommandTabOverlayController {
     }
 
     private let model: CommandTabOverlayModel
+    var hasPendingPointerPress: Bool { model.hasPendingPointerPress }
     private let previewPanel: WindowPreviewInteractionPanel
     private let previewContentView: CommandTabPanelContentView<CommandTabPreviewView>
     private var presentationScreen: NSScreen?
@@ -4694,15 +4810,16 @@ private final class CommandTabOverlayController {
         allowsHoverSelection: Bool = true
     ) -> Bool {
         guard previewPanel.isVisible else { return false }
-        guard previewPanel.frame.contains(screenLocation) else {
-            handlePointer(type: .mouseExited, point: .zero, deferAction: deferAction)
-            return false
-        }
         let panelPoint = previewPanel.convertPoint(fromScreen: screenLocation)
-        handlePointer(type: type, point: CGPoint(
+        let point = CGPoint(
             x: panelPoint.x,
             y: (previewPanel.contentView?.bounds.height ?? 0) - panelPoint.y
-        ), deferAction: deferAction, allowsHoverSelection: allowsHoverSelection)
+        )
+        guard previewPanel.frame.contains(screenLocation) else {
+            handlePointer(type: .mouseExited, point: point, deferAction: deferAction)
+            return false
+        }
+        handlePointer(type: type, point: point, deferAction: deferAction, allowsHoverSelection: allowsHoverSelection)
         return true
     }
 
@@ -4725,6 +4842,18 @@ private final class CommandTabOverlayController {
                 metadata["insidePanel"] = .flag(type != .mouseExited)
                 metadata["externalTap"] = .flag(deferAction)
                 metadata["eventType"] = .integer(Int64(type.rawValue))
+                if type == .mouseExited || metadata["hitCount"] != .integer(1) {
+                    // Only failed hits need coordinates; keep successful-hit
+                    // records within the recorder's 16-field privacy budget.
+                    // Coordinates are relative to our panel, never AX text.
+                    for (key, value) in [
+                        ("pointerX", point.x), ("pointerY", point.y),
+                        ("panelWidth", previewPanel.frame.width),
+                        ("panelHeight", previewPanel.frame.height)
+                    ] where value.isFinite && abs(value) < 1_000_000 {
+                        metadata[key] = .integer(Int64(value.rounded()))
+                    }
+                }
                 WindowInteractionDiagnosticRecorder.shared.record(
                     component: "cmdTab", event: "previewPointer", metadata: metadata
                 )
@@ -4998,6 +5127,7 @@ final class CommandTabOverlayModel: ObservableObject {
     private var previewFrames: [CommandTabPreviewTarget: CGRect] = [:]
     private var previewFrameOwners: [CommandTabPreviewTarget: UInt64] = [:]
     private var pointerState = WindowPreviewPointerState<CommandTabPreviewTarget>()
+    var hasPendingPointerPress: Bool { pointerState.hasPendingPress }
 
     var onCommitWindow: (Int, Int) -> Void = { _, _ in }
     var onHoverWindow: (Int, Int) -> Void = { _, _ in }

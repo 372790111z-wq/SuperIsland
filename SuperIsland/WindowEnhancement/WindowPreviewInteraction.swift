@@ -23,6 +23,9 @@ struct WindowPreviewPointerState<Target: Hashable> {
     private var closable: Set<Target> = []
     private var activatable: Set<Target> = []
     var closeButtonSize: CGFloat = 20
+    /// A physical release can precede delivery of our matching mouseUp event.
+    /// Recovery must not change capabilities while that pair is unfinished.
+    var hasPendingPress: Bool { pressed != nil }
 
     init(closeButtonSize: CGFloat = 20) { self.closeButtonSize = closeButtonSize }
 
