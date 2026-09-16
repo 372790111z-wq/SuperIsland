@@ -4,6 +4,23 @@ import Darwin
 import OSLog
 import SwiftUI
 
+enum WindowCommandTabEventTapFactory {
+    /// Resource creation must run once per attempted location. A lazy
+    /// compactMap followed by first can evaluate a successful transform twice,
+    /// leaving the first WindowServer tap without an owner or run-loop source.
+    static func firstAvailable<Tap>(
+        at locations: [CGEventTapLocation],
+        create: (CGEventTapLocation) -> Tap?
+    ) -> (tap: Tap, location: CGEventTapLocation)? {
+        for location in locations {
+            if let tap = create(location) {
+                return (tap, location)
+            }
+        }
+        return nil
+    }
+}
+
 /// Reuse the bounded, gap-reporting writer in a separate stream. The sampled
 /// interaction log deliberately drops bursts and cannot diagnose input edges.
 private enum WindowCommandTabDiagnostics {
@@ -431,24 +448,22 @@ final class WindowCommandTabMonitor {
         // Command release are always passed through to Dock; SuperIsland no
         // longer replaces the native App switcher.
         let locations: [CGEventTapLocation] = [.cgSessionEventTap, .cgAnnotatedSessionEventTap]
-        var installedLocation: CGEventTapLocation?
-        let tap = locations.lazy.compactMap { location -> CFMachPort? in
-            guard let tap = CGEvent.tapCreate(
+        let installation = WindowCommandTabEventTapFactory.firstAvailable(at: locations) { location in
+            CGEvent.tapCreate(
                 tap: location,
                 place: .headInsertEventTap,
                 options: .defaultTap,
                 eventsOfInterest: mask,
                 callback: Self.eventCallback,
                 userInfo: Unmanaged.passUnretained(self).toOpaque()
-            ) else { return nil }
-            installedLocation = location
-            return tap
-        }.first
+            )
+        }
 
-        guard let tap else {
+        guard let installation else {
             eventTapInstallationFailed()
             return
         }
+        let tap = installation.tap
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
             CFMachPortInvalidate(tap)
             eventTapInstallationFailed()
@@ -469,7 +484,7 @@ final class WindowCommandTabMonitor {
         eventTapRetryTask = nil
         eventTapInstallAttempts = 0
         reportedEventTapFailure = false
-        logger.info("Cmd-Tab event tap installed at location \(String(describing: installedLocation), privacy: .public)")
+        logger.info("Cmd-Tab event tap installed at location \(String(describing: installation.location), privacy: .public)")
     }
 
     private func uninstallTap() {
@@ -1012,7 +1027,7 @@ final class WindowCommandTabMonitor {
             .cgSessionEventTap,
             .cgAnnotatedSessionEventTap
         ]
-        let tap = locations.lazy.compactMap { location in
+        let installation = WindowCommandTabEventTapFactory.firstAvailable(at: locations) { location in
             CGEvent.tapCreate(
                 tap: location,
                 place: .headInsertEventTap,
@@ -1021,14 +1036,15 @@ final class WindowCommandTabMonitor {
                 callback: Self.nativePointerEventCallback,
                 userInfo: Unmanaged.passUnretained(self).toOpaque()
             )
-        }.first
-        guard let tap else {
+        }
+        guard let installation else {
             logger.error("Native Cmd-Tab pointer event tap could not be installed")
             WindowInteractionDiagnosticRecorder.shared.record(
                 component: "cmdTab", event: "pointerTapInstall", metadata: ["installed": .flag(false)]
             )
             return
         }
+        let tap = installation.tap
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
             CFMachPortInvalidate(tap)
             logger.error("Native Cmd-Tab pointer run-loop source could not be created")

@@ -1,4 +1,5 @@
 import XCTest
+import CoreGraphics
 @testable import SuperIsland
 
 final class WindowCommandTabCommitCoordinatorTests: XCTestCase {
@@ -317,6 +318,77 @@ final class WindowCommandTabCommitCoordinatorTests: XCTestCase {
                 }
             )
         }
+    }
+}
+
+final class WindowCommandTabEventTapFactoryTests: XCTestCase {
+    func testFirstSuccessfulLocationAllocatesAndReturnsExactlyOneTap() {
+        var attempts: [CGEventTapLocation] = []
+        var allocatedIDs: [Int] = []
+        let result = WindowCommandTabEventTapFactory.firstAvailable(
+            at: [.cgSessionEventTap, .cgAnnotatedSessionEventTap],
+            create: { location in
+                attempts.append(location)
+                let id = allocatedIDs.count + 1
+                allocatedIDs.append(id)
+                return id
+            }
+        )
+
+        XCTAssertEqual(attempts, [.cgSessionEventTap])
+        XCTAssertEqual(allocatedIDs, [1])
+        XCTAssertEqual(result?.tap, 1)
+        XCTAssertEqual(result?.location, .cgSessionEventTap)
+    }
+
+    func testFallbackAttemptsEachLocationOnceAndReturnsItsOnlyAllocation() {
+        var attempts: [CGEventTapLocation] = []
+        var allocatedIDs: [Int] = []
+        let result = WindowCommandTabEventTapFactory.firstAvailable(
+            at: [.cgSessionEventTap, .cgAnnotatedSessionEventTap],
+            create: { location -> Int? in
+                attempts.append(location)
+                guard location == .cgAnnotatedSessionEventTap else { return nil }
+                let id = allocatedIDs.count + 1
+                allocatedIDs.append(id)
+                return id
+            }
+        )
+
+        XCTAssertEqual(attempts, [.cgSessionEventTap, .cgAnnotatedSessionEventTap])
+        XCTAssertEqual(allocatedIDs, [1])
+        XCTAssertEqual(result?.tap, 1)
+        XCTAssertEqual(result?.location, .cgAnnotatedSessionEventTap)
+    }
+
+    func testUnavailableLocationsAreAttemptedOnceWithoutReturningATap() {
+        var attempts: [CGEventTapLocation] = []
+        let result: (tap: Int, location: CGEventTapLocation)? =
+            WindowCommandTabEventTapFactory.firstAvailable(
+                at: [.cgSessionEventTap, .cgAnnotatedSessionEventTap],
+                create: { location in
+                    attempts.append(location)
+                    return nil
+                }
+            )
+
+        XCTAssertEqual(attempts, [.cgSessionEventTap, .cgAnnotatedSessionEventTap])
+        XCTAssertNil(result)
+    }
+
+    func testEmptyLocationsCannotAllocateATap() {
+        var allocatedIDs: [Int] = []
+        let result = WindowCommandTabEventTapFactory.firstAvailable(
+            at: [],
+            create: { _ in
+                let id = allocatedIDs.count + 1
+                allocatedIDs.append(id)
+                return id
+            }
+        )
+
+        XCTAssertTrue(allocatedIDs.isEmpty)
+        XCTAssertNil(result)
     }
 }
 
