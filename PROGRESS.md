@@ -1,3 +1,9 @@
+## 2026-09-16 - native-click candidate162956 installed; physical acceptance pending
+
+Source saved as local Git commit2bb25cc on fix/we1-cmdtab-release-20260916 before installation. Installed20260916162956 at /Applications/SuperIsland-WE1-Debug.app is running as PID62282; new monitor session4C5C0670-A3D5-46DA-9127-500A78C22F1C reports that build. Complete101-entry installed and actual140527 rollback manifests and deep/strict signatures verify. Rollback: build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-140527-before-162956.app. CUA readback reports Accessibility/Screen Recording effective, Cmd-Tab Plus/Dock/MC/display-move switches retained ON; settings are closed. Only WE1 was updated, no remote push. The initial post-Quit AX inspection relaunched oldWE1; final explicit normal quit and zero-process check preceded replacement.
+
+The user has been asked to single-click the native app row and then reenter Cmd-Tab to check preview hover. Those physical results remain pending;367 passing tests, build/Analyze, independent review and startup do not establish native acceptance. The native-only control still changed display, so this candidate makes no display-jump repair claim. See ../../.codex-audit/wins/2026-09-16/cmdtab-native-click-isolation/installation.json.
+
 ## 2026-09-16 - Cmd-Tab native icon click candidate162956 ready
 
 The native-only comparison is complete: user reports display changes still occur with Cmd-Tab Plus disabled, while app icons switch with one click. Plus was restored ON. With diagnostic140527, sequence19 shows preview re-fronting between the first native mouse down/up and after that up; the second click ends the native strip. All sampled physical Command releases arrived promptly. These observations support isolating preview updates during native clicks, but do not prove Dock's internal mechanism or explain every display change.

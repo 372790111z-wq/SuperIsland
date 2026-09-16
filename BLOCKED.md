@@ -2,7 +2,7 @@
 
 The latest user control result is “换屏，但是不需要点两次了”: Cmd-Tab Plus OFF still changes display, but native icons need only one click. Plus is restored ON. Do not revert the accepted fullscreen Chrome movement fix or treat earlier lost-release evidence as the cause of this reproduction. Frozen140527 logs show preview republishing inside the unsuccessful first native click; all captured releases arrived.
 
-Candidate162956 isolates that native click from WE1 preview updates and has367 passing tests/build/Analyze, independent review and package/source verification. The code does not change native display selection. Next: preserve code in Git, replace only WE1 with a recoverable actual140527 backup, verify runtime, then obtain physical single-click/strip-dismissal/reentry results. Candidate tests are not native acceptance; display changes and any uncaptured within-session jumping remain unconfirmed separate behavior.
+Candidate162956 isolates that native click from WE1 preview updates and has367 passing tests/build/Analyze, independent review and package/source verification. The code does not change native display selection. Source is saved as2bb25cc. Installed162956/PID62282,101-entry installed/rollback manifests, signatures and native effective settings are verified. Actual140527 is recoverable in build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-140527-before-162956.app. Only physical single-click/strip-dismissal/reentry results remain pending. Candidate tests are not native acceptance; display changes and any uncaptured within-session jumping remain unconfirmed separate behavior.
 
 ## 2026-09-16 - Cmd-Tab real input regression remains open on diagnostic140527
 
