@@ -1,3 +1,11 @@
+## 2026-09-16 - build171017 accepted by user; stable local checkpoint
+
+User explicitly reports “之前的问题都修复了” after the installed171017 retest request. The current Cmd-Tab regression is accepted by user report, including the previously reported native icon first-click, strip dismissal/reentry and jumping complaints. This is the user's overall outcome report, not a claim that the agent independently executed every historical regression or measured long-idle durability. Earlier pending entries below describe earlier checkpoints.
+
+Installed /Applications/SuperIsland-WE1-Debug.app remains build20260916171017/PID91579. Fresh post-acceptance inventory still contains exactly four unique enabled taps (32,102,5120,16384), with no duplicate/disabled orphan after the testing interval. Temporary routing/scene probe processes have exited. Production/test sources remain byte-identical to d02443e; Chrome fullscreen movement controller retains SHA256 3e79922a020b9a1c308149b79e578ff42dd26eeec73e4d614069fb8bd48ac3c7. Prior371 passing tests/build/Analyze apply; no additional code changes, installation or app restarts in this acceptance turn.
+
+Record this accepted baseline on fix/we1-cmdtab-release-20260916 with local tag we1-171017-accepted-20260916. The exact previous162956 actual app backup remains in build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-162956-before-171017.app. Acceptance and post-test evidence are in ../../.codex-audit/wins/2026-09-16/cmdtab-native-click-isolation/single-tap-creation/{installation.json,taps-after-user-acceptance.json,native-retest/cmdtab-accepted.jsonl}. No remote push; no additional repair work is currently requested.
+
 ## 2026-09-16 - single-allocation candidate171017 installed; native retest pending
 
 Source is preserved in local commit d02443e. Installed build20260916171017 runs from /Applications/SuperIsland-WE1-Debug.app as PID91579. OldPID72071 quit normally before replacement; its complete101-entry actual162956 app backup and the new101-entry installed manifest verified. Rollback: build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-162956-before-171017.app. Native settings readback confirms Accessibility/Screen Recording effective and Cmd-Tab Plus/Dock/MC/display movement ON; settings are closed.
