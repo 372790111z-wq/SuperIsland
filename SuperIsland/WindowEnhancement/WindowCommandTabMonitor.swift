@@ -4,6 +4,58 @@ import Darwin
 import OSLog
 import SwiftUI
 
+/// Reuse the bounded, gap-reporting writer in a separate stream. The sampled
+/// interaction log deliberately drops bursts and cannot diagnose input edges.
+private enum WindowCommandTabDiagnostics {
+    static let enabled: Bool = {
+#if DEBUG
+        WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: Bundle.main.bundleIdentifier)
+#else
+        false
+#endif
+    }()
+    static let recorder = WindowLifecycleDiagnosticRecorder(
+        fileURL: WindowLifecycleDiagnosticRecorder.diagnosticFileURL?
+            .deletingLastPathComponent().appendingPathComponent("cmdtab-input.jsonl")
+    )
+
+    static func keyStates() -> [String: WindowInteractionDiagnosticValue] {
+        [
+            "hidCommand": .flag(CGEventSource.keyState(.hidSystemState, key: 55)
+                || CGEventSource.keyState(.hidSystemState, key: 54)),
+            "combinedCommand": .flag(CGEventSource.keyState(.combinedSessionState, key: 55)
+                || CGEventSource.keyState(.combinedSessionState, key: 54)),
+            "hidTab": .flag(CGEventSource.keyState(.hidSystemState, key: 48)),
+            "combinedTab": .flag(CGEventSource.keyState(.combinedSessionState, key: 48))
+        ]
+    }
+
+    static func measure<Value>(_ operation: String, sequence: Int, _ body: () -> Value) -> Value {
+        guard enabled else { return body() }
+        let start = DispatchTime.now().uptimeNanoseconds
+        let identity: [String: WindowInteractionDiagnosticValue] = [
+            "spanNS": .integer(Int64(clamping: start)),
+            "sequence": .integer(Int64(clamping: sequence))
+        ]
+        recorder.record(event: operation + "Begin", metadata: identity)
+        defer {
+            var metadata = identity.merging(keyStates()) { first, _ in first }
+            metadata["durationNS"] = .integer(Int64(clamping: DispatchTime.now().uptimeNanoseconds - start))
+            recorder.record(event: operation + "End", metadata: metadata)
+        }
+        return body()
+    }
+
+    static func addFrame(_ frame: CGRect, prefix: String, to metadata: inout [String: WindowInteractionDiagnosticValue]) {
+        // AX coordinates are untrusted. Never let diagnostic integer conversion
+        // trap or change the window operation being observed.
+        for (suffix, value) in [("X", frame.minX), ("Y", frame.minY), ("W", frame.width), ("H", frame.height)] {
+            guard value.isFinite, abs(value) < 1_000_000_000 else { continue }
+            metadata[prefix + suffix] = .integer(Int64(value.rounded()))
+        }
+    }
+}
+
 /// One inclusion policy for every window-preview entry point. Dock and
 /// Cmd-Tab deliberately share these semantics so an App's background AX shell
 /// cannot appear in one preview while being filtered from the other.
@@ -174,6 +226,7 @@ final class WindowCommandTabMonitor {
     private var isPresenting = false
     private var commandSequenceActive = false
     private var eventSequenceID = 0
+    private var diagnosticCallbackID: Int64 = 0
     private var queuedEventActions: [QueuedEventAction] = []
     private var eventActionDrainTask: Task<Void, Never>?
     private var eventActionGeneration = 0
@@ -262,6 +315,14 @@ final class WindowCommandTabMonitor {
     }
 
     func start() {
+        if WindowCommandTabDiagnostics.enabled {
+            // Warm the destination and writer before any input callback. This
+            // also states the capture boundary in every new diagnostic session.
+            WindowCommandTabDiagnostics.recorder.record(event: "monitorStart", metadata: [
+                "tabDownObserved": .flag(true), "tabUpObserved": .flag(false),
+                "commandFlagsObserved": .flag(true), "newInputTap": .flag(false)
+            ])
+        }
         WindowThumbnailProvider.beginLifecycleMonitoring()
         observePreviewInvalidationIfNeeded()
         observeApplicationActivationIfNeeded()
@@ -462,6 +523,46 @@ final class WindowCommandTabMonitor {
     }
 
     private func handleEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard WindowCommandTabDiagnostics.enabled else { return processEvent(type: type, event: event) }
+        let key = event.getIntegerValueField(.keyboardEventKeycode)
+        // Do not gate on Command flags or session state: a malformed Tab or a
+        // Command-up arriving after cancel is precisely the missing evidence.
+        let relevant = (type == .keyDown && key == 48)
+            || (type == .flagsChanged && (key == 54 || key == 55))
+            || type == .tapDisabledByTimeout || type == .tapDisabledByUserInput
+        guard relevant else { return processEvent(type: type, event: event) }
+        let start = DispatchTime.now().uptimeNanoseconds
+        diagnosticCallbackID &+= 1
+        let callbackID = diagnosticCallbackID
+        var metadata = WindowCommandTabDiagnostics.keyStates()
+        metadata["callback"] = .integer(callbackID)
+        metadata["callbackNS"] = .integer(Int64(clamping: start))
+        metadata["eventNS"] = .integer(Int64(clamping: event.timestamp))
+        metadata["sequence"] = .integer(Int64(clamping: eventSequenceID))
+        metadata["active"] = .flag(commandSequenceActive)
+        metadata["type"] = .integer(Int64(type.rawValue))
+        metadata["key"] = .integer(key)
+        metadata["eventCommand"] = .flag(event.flags.contains(.maskCommand))
+        metadata["repeat"] = .integer(event.getIntegerValueField(.keyboardEventAutorepeat))
+        metadata["sourcePID"] = .integer(event.getIntegerValueField(.eventSourceUnixProcessID))
+        metadata["sourceState"] = .integer(event.getIntegerValueField(.eventSourceStateID))
+        metadata["ownCommit"] = .flag(event.getIntegerValueField(.eventSourceUserData)
+            == NativeProcessSwitcherBridge.sharedCommitEventMarker)
+        WindowCommandTabDiagnostics.recorder.record(event: "keyboardEnter", metadata: metadata)
+        let result = processEvent(type: type, event: event)
+        var outcome = WindowCommandTabDiagnostics.keyStates()
+        outcome["callback"] = .integer(callbackID)
+        outcome["durationNS"] = .integer(Int64(clamping: DispatchTime.now().uptimeNanoseconds - start))
+        outcome["sequence"] = .integer(Int64(clamping: eventSequenceID))
+        outcome["active"] = .flag(commandSequenceActive)
+        outcome["presenting"] = .flag(isPresenting)
+        outcome["suppressed"] = .flag(zilanPointerInteraction.isSuppressed)
+        outcome["passed"] = .flag(result != nil)
+        WindowCommandTabDiagnostics.recorder.record(event: "keyboardExit", metadata: outcome)
+        return result
+    }
+
+    private func processEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             logger.warning("Cmd-Tab event tap was disabled by the system (type \(type.rawValue, privacy: .public)); re-enabling")
             reenableTap()
@@ -731,7 +832,9 @@ final class WindowCommandTabMonitor {
                       !Task.isCancelled,
                       self.commandSequenceActive,
                       self.eventSequenceID == sequenceID else { return }
-                switch self.nativeSwitcher.snapshot() {
+                switch WindowCommandTabDiagnostics.measure("nativeSnapshot", sequence: sequenceID, {
+                    self.nativeSwitcher.snapshot()
+                }) {
                 case let .visible(snapshot):
                     self.applyNativeSwitcherSnapshot(snapshot)
                     self.nativeSwitcherSyncTask = nil
@@ -769,6 +872,17 @@ final class WindowCommandTabMonitor {
     private func applyNativeSwitcherSnapshot(
         _ snapshot: NativeProcessSwitcherBridge.Snapshot
     ) {
+        if WindowCommandTabDiagnostics.enabled {
+            var metadata = WindowCommandTabDiagnostics.keyStates()
+            metadata["sequence"] = .integer(Int64(clamping: eventSequenceID))
+            metadata["ownerPID"] = .integer(Int64(snapshot.applications.first?.processIdentifier ?? 0))
+            metadata["hasItemFrame"] = .flag(snapshot.selectedItemFrame != nil)
+            WindowCommandTabDiagnostics.addFrame(snapshot.listFrame, prefix: "listAX", to: &metadata)
+            if let frame = snapshot.selectedItemFrame {
+                WindowCommandTabDiagnostics.addFrame(frame, prefix: "itemAX", to: &metadata)
+            }
+            WindowCommandTabDiagnostics.recorder.record(event: "nativePlacement", metadata: metadata)
+        }
         let applications = snapshot.applications.filter {
             !$0.isTerminated
                 && !preferences.isExcluded($0)
@@ -804,9 +918,11 @@ final class WindowCommandTabMonitor {
            isPresenting {
             return
         }
-        let windows = didChangeApplication
-            ? windowCandidates(for: applications)
-            : (candidates.first?.windows ?? windowCandidates(for: applications))
+        let windows = WindowCommandTabDiagnostics.measure("selectedWindows", sequence: eventSequenceID) {
+            didChangeApplication
+                ? windowCandidates(for: applications)
+                : (candidates.first?.windows ?? windowCandidates(for: applications))
+        }
         candidates = [Candidate(applications: applications, windows: windows, isSharedWeChat: snapshot.isSharedWeChat)]
         if didChangeApplication {
             candidateLifecycleRevisions.removeAll()
@@ -846,7 +962,9 @@ final class WindowCommandTabMonitor {
             guard let pointer = self.pendingNativePointerLocation
                     ?? CGEvent(source: nil)?.location else { return }
             self.pendingNativePointerLocation = nil
-            if case let .visible(snapshot) = self.nativeSwitcher.snapshot(at: pointer) {
+            if case let .visible(snapshot) = WindowCommandTabDiagnostics.measure("pointerSnapshot", sequence: sequenceID, {
+                self.nativeSwitcher.snapshot(at: pointer)
+            }) {
                 self.applyNativeSwitcherSnapshot(snapshot)
             }
         }
@@ -919,6 +1037,34 @@ final class WindowCommandTabMonitor {
     }
 
     private func handleNativePointerEvent(type: CGEventType, event: CGEvent) -> Bool {
+        guard WindowCommandTabDiagnostics.enabled else { return processNativePointerEvent(type: type, event: event) }
+        let relevant = ProcessInfo.processInfo.systemUptime - lastPointerDiagnosticTime >= 0.5
+            || type == .leftMouseDown || type == .leftMouseUp
+            || type == .tapDisabledByTimeout || type == .tapDisabledByUserInput
+        guard relevant else { return processNativePointerEvent(type: type, event: event) }
+        let start = DispatchTime.now().uptimeNanoseconds
+        diagnosticCallbackID &+= 1
+        let callbackID = diagnosticCallbackID
+        var metadata = WindowCommandTabDiagnostics.keyStates()
+        metadata["callback"] = .integer(callbackID)
+        metadata["callbackNS"] = .integer(Int64(clamping: start))
+        metadata["eventNS"] = .integer(Int64(clamping: event.timestamp))
+        metadata["sequence"] = .integer(Int64(clamping: eventSequenceID))
+        metadata["type"] = .integer(Int64(type.rawValue))
+        metadata["active"] = .flag(commandSequenceActive)
+        WindowCommandTabDiagnostics.recorder.record(event: "pointerEnter", metadata: metadata)
+        let captured = processNativePointerEvent(type: type, event: event)
+        var outcome = WindowCommandTabDiagnostics.keyStates()
+        outcome["callback"] = .integer(callbackID)
+        outcome["durationNS"] = .integer(Int64(clamping: DispatchTime.now().uptimeNanoseconds - start))
+        outcome["sequence"] = .integer(Int64(clamping: eventSequenceID))
+        outcome["active"] = .flag(commandSequenceActive)
+        outcome["captured"] = .flag(captured)
+        WindowCommandTabDiagnostics.recorder.record(event: "pointerExit", metadata: outcome)
+        return captured
+    }
+
+    private func processNativePointerEvent(type: CGEventType, event: CGEvent) -> Bool {
         if WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: Bundle.main.bundleIdentifier) {
             let now = ProcessInfo.processInfo.systemUptime
             if now - lastPointerDiagnosticTime >= 0.5 {
@@ -1683,6 +1829,7 @@ final class WindowCommandTabMonitor {
             items: items,
             selectedIndex: selectedIndex,
             anchorAXFrame: nativeSwitcherAnchorFrame,
+            diagnosticSequence: sequence,
             allowsSyntheticHoverSelection: !candidates[presentedIndex].isSharedWeChat,
             onCommitWindow: { [weak self] applicationIndex, windowIndex in
                 guard let self, self.eventSequenceID == sequence else { return }
@@ -2308,14 +2455,31 @@ final class WindowCommandTabMonitor {
                 self.cancel()
                 return
             }
-            let visibility = self.nativeSwitcher.commitVisibility(context)
+            let visibility = WindowCommandTabDiagnostics.measure("reconcileVisibility", sequence: sequence) {
+                self.nativeSwitcher.commitVisibility(context)
+            }
             guard !Task.isCancelled,
                   self.nativeSessionReconciliationGeneration == generation,
                   self.eventSequenceID == sequence else { return }
             let commandHeld = CGEventSource.keyState(.combinedSessionState, key: 55)
                 || CGEventSource.keyState(.combinedSessionState, key: 54)
             self.recordNativeCommit("sessionReconciled", reason: reason, visibility: visibility)
-            switch WindowCommandTabSessionReconciliation.action(visibility: visibility, commandHeld: commandHeld) {
+            let action = WindowCommandTabSessionReconciliation.action(visibility: visibility, commandHeld: commandHeld)
+            if WindowCommandTabDiagnostics.enabled {
+                var metadata = WindowCommandTabDiagnostics.keyStates()
+                metadata["sequence"] = .integer(Int64(clamping: sequence))
+                metadata["reason"] = .code(reason)
+                metadata["visibility"] = .code(visibility.rawValue)
+                metadata["policyCommandHeld"] = .flag(commandHeld)
+                metadata["active"] = .flag(self.commandSequenceActive)
+                switch action {
+                case .endSession: metadata["action"] = .code("endSession")
+                case .restorePointerSession: metadata["action"] = .code("restorePointerSession")
+                case .awaitFreshSelection: metadata["action"] = .code("awaitFreshSelection")
+                }
+                WindowCommandTabDiagnostics.recorder.record(event: "reconcileDecision", metadata: metadata)
+            }
+            switch action {
             case .endSession:
                 self.cancel()
             case .restorePointerSession:
@@ -4734,6 +4898,7 @@ private final class CommandTabOverlayController {
         items: [CommandTabDisplayItem],
         selectedIndex: Int,
         anchorAXFrame: CGRect,
+        diagnosticSequence: Int,
         allowsSyntheticHoverSelection: Bool = true,
         onCommitWindow: @escaping (Int, Int) -> Void,
         onHoverWindow: @escaping (Int, Int) -> Void,
@@ -4799,6 +4964,16 @@ private final class CommandTabOverlayController {
         // only the selected application's window preview above it.
         previewPanel.orderFrontRegardless()
         previewContentView.layoutSubtreeIfNeeded()
+        if WindowCommandTabDiagnostics.enabled {
+            var metadata: [String: WindowInteractionDiagnosticValue] = [
+                "sequence": .integer(Int64(clamping: diagnosticSequence)),
+                "displayID": .integer(Int64((screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0)),
+                "visible": .flag(previewPanel.isVisible)
+            ]
+            WindowCommandTabDiagnostics.addFrame(anchorAXFrame, prefix: "anchorAX", to: &metadata)
+            WindowCommandTabDiagnostics.addFrame(previewPanel.frame, prefix: "panelAppKit", to: &metadata)
+            WindowCommandTabDiagnostics.recorder.record(event: "previewPlacement", metadata: metadata)
+        }
         let generation = interactionGeneration
         DispatchQueue.main.async { [weak self] in
             guard let self,
