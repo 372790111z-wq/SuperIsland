@@ -319,3 +319,337 @@ final class WindowCommandTabCommitCoordinatorTests: XCTestCase {
         }
     }
 }
+
+final class WindowCommandTabNativeClickCoordinatorTests: XCTestCase {
+    private typealias Coordinator = WindowCommandTabNativeClickCoordinator
+    private typealias Visibility = WindowCommandTabCommitCoordinator.Visibility
+
+    func testPreviewPauseSurvivesReleaseUntilTheCurrentClickSettles() {
+        var coordinator = Coordinator()
+        let ticket = coordinator.begin(sequenceID: 10)
+
+        XCTAssertTrue(coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(coordinator.finish(ticket))
+        XCTAssertFalse(coordinator.canReconcile(ticket, sequenceID: 10, buttonPressed: false))
+        XCTAssertNil(coordinator.markReleased(sequenceID: 11))
+        XCTAssertFalse(coordinator.hasReleased)
+
+        XCTAssertEqual(coordinator.markReleased(sequenceID: 10), ticket)
+        XCTAssertTrue(coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(coordinator.canReconcile(ticket, sequenceID: 10, buttonPressed: true))
+        XCTAssertTrue(coordinator.canReconcile(ticket, sequenceID: 10, buttonPressed: false))
+        XCTAssertTrue(coordinator.finish(ticket))
+        XCTAssertFalse(coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(coordinator.hasReleased)
+        XCTAssertFalse(coordinator.finish(ticket))
+    }
+
+    func testSecondClickInSameSequenceDoesNotInheritReleaseOrOldCompletion() {
+        var coordinator = Coordinator()
+        let old = coordinator.begin(sequenceID: 10)
+        coordinator.markReleased(sequenceID: 10)
+        let replacement = coordinator.begin(sequenceID: 10)
+
+        XCTAssertNotEqual(old, replacement)
+        XCTAssertFalse(coordinator.hasReleased)
+        XCTAssertFalse(coordinator.finish(old))
+        XCTAssertFalse(coordinator.canReconcile(old, sequenceID: 10, buttonPressed: false))
+        XCTAssertEqual(coordinator.pending, replacement)
+        XCTAssertTrue(coordinator.blocksPreviewUpdates)
+    }
+
+    @MainActor
+    func testReleasedClickHandsSelectionToKeyboardAndRejectsItsLateReadback() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        let old = probe.ticket
+        var refreshRequests = 0
+        await probe.run(visibility: [.visible], onRead: {
+            if probe.coordinator.resumeForKeyboardInput(buttonPressed: probe.buttonPressed) {
+                refreshRequests += 1
+            }
+        })
+
+        XCTAssertEqual(refreshRequests, 1)
+        XCTAssertEqual(probe.events, ["sleep:50000000", "read:visible"])
+        XCTAssertTrue(probe.settled.isEmpty)
+        XCTAssertFalse(probe.coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(probe.coordinator.finish(old))
+        XCTAssertFalse(probe.coordinator.resumeForKeyboardInput(buttonPressed: false))
+
+        probe.beginReplacement()
+        XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(probe.coordinator.hasReleased)
+        XCTAssertFalse(probe.coordinator.finish(old))
+        XCTAssertFalse(probe.coordinator.resumeForKeyboardInput(buttonPressed: probe.buttonPressed))
+        XCTAssertEqual(probe.coordinator.pending, probe.ticket)
+    }
+
+    func testKeyboardInputDuringPhysicalPressKeepsTheOriginalClickProtected() {
+        var coordinator = Coordinator()
+        let ticket = coordinator.begin(sequenceID: 10)
+
+        XCTAssertFalse(coordinator.resumeForKeyboardInput(buttonPressed: true))
+        XCTAssertEqual(coordinator.pending, ticket)
+        XCTAssertTrue(coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(coordinator.hasReleased)
+
+        // A delayed release observation must not override a newer physical
+        // press, even before its down callback can establish a new ticket.
+        coordinator.markReleased(sequenceID: 10)
+        XCTAssertFalse(coordinator.resumeForKeyboardInput(buttonPressed: true))
+        XCTAssertEqual(coordinator.pending, ticket)
+        XCTAssertTrue(coordinator.hasReleased)
+    }
+
+    func testCancellationAndNewSequenceRejectAnOldReleaseAndCompletion() {
+        var coordinator = Coordinator()
+        let old = coordinator.begin(sequenceID: 10)
+        coordinator.markReleased(sequenceID: 10)
+        XCTAssertTrue(coordinator.invalidate())
+        XCTAssertFalse(coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(coordinator.hasReleased)
+        XCTAssertFalse(coordinator.invalidate())
+        let replacement = coordinator.begin(sequenceID: 11)
+
+        XCTAssertNil(coordinator.markReleased(sequenceID: 10))
+        XCTAssertFalse(coordinator.canReconcile(old, sequenceID: 11, buttonPressed: false))
+        XCTAssertFalse(coordinator.finish(old))
+        XCTAssertTrue(coordinator.isCurrent(replacement, sequenceID: 11))
+        XCTAssertFalse(coordinator.hasReleased)
+    }
+
+    @MainActor
+    func testHeldNativeClickDoesNotReadOrPublishEvenWhenTheStripIsVisible() async {
+        let probe = NativeClickProbe()
+        await probe.run(visibility: [.visible])
+
+        XCTAssertEqual(probe.events, ["sleep:50000000"])
+        XCTAssertEqual(probe.visibilityReadCount, 0)
+        XCTAssertTrue(probe.settled.isEmpty)
+        XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+    }
+
+    @MainActor
+    func testVisibleNativeClickWaitsAllStagesBeforeResumingPreview() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        await probe.run(visibility: [.visible, .visible, .visible, .visible], onRead: {
+            XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+            XCTAssertTrue(probe.settled.isEmpty)
+        })
+
+        XCTAssertEqual(probe.events, [
+            "sleep:50000000", "read:visible",
+            "sleep:100000000", "read:visible",
+            "sleep:150000000", "read:visible",
+            "sleep:150000000", "read:visible", "settled:visible"
+        ])
+        XCTAssertEqual(probe.elapsedNanoseconds, 450_000_000)
+        XCTAssertEqual(probe.settled, [.visible])
+        XCTAssertFalse(probe.coordinator.blocksPreviewUpdates)
+    }
+
+    @MainActor
+    func testNativeDismissalAfterSeveralStagesEndsBeforeTheDeadline() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        await probe.run(visibility: [.visible, .visible, .absent, .visible])
+
+        XCTAssertEqual(probe.visibilityReadCount, 3)
+        XCTAssertEqual(probe.elapsedNanoseconds, 300_000_000)
+        XCTAssertEqual(probe.settled, [.absent])
+        XCTAssertFalse(probe.coordinator.blocksPreviewUpdates)
+    }
+
+    @MainActor
+    func testAlreadyDismissedNativeClickDoesNotWaitOrPublishAgain() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        await probe.run(visibility: [.absent, .visible])
+
+        XCTAssertEqual(probe.events, ["sleep:50000000", "read:absent", "settled:absent"])
+        XCTAssertEqual(probe.settled, [.absent])
+    }
+
+    @MainActor
+    func testUnknownVisibilityRemainsPausedUntilTheBoundedDeadline() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        await probe.run(visibility: [.unknown, .unknown, .visible, .unknown], onRead: {
+            XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+            XCTAssertTrue(probe.settled.isEmpty)
+        })
+
+        XCTAssertEqual(probe.visibilityReadCount, 4)
+        XCTAssertEqual(probe.elapsedNanoseconds, 450_000_000)
+        XCTAssertEqual(probe.settled, [.unknown])
+        XCTAssertFalse(probe.coordinator.blocksPreviewUpdates)
+    }
+
+    @MainActor
+    func testUnknownReadDoesNotPreventLaterConfirmedNativeDismissal() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        await probe.run(visibility: [.unknown, .absent])
+
+        XCTAssertEqual(probe.visibilityReadCount, 2)
+        XCTAssertEqual(probe.elapsedNanoseconds, 150_000_000)
+        XCTAssertEqual(probe.settled, [.absent])
+    }
+
+    @MainActor
+    func testNewClickDuringDelayCannotBeReleasedByTheOldWorkflow() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        let old = probe.ticket
+        await probe.run(visibility: [.absent], onSleep: { probe.beginReplacement() })
+
+        XCTAssertEqual(probe.events, ["sleep:50000000"])
+        XCTAssertTrue(probe.settled.isEmpty)
+        XCTAssertNotEqual(probe.ticket, old)
+        XCTAssertEqual(probe.coordinator.pending, probe.ticket)
+        XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(probe.coordinator.hasReleased)
+    }
+
+    @MainActor
+    func testNewClickDuringAXReadCannotSettleUsingTheOldAbsence() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        let old = probe.ticket
+        await probe.run(visibility: [.absent], onRead: { probe.beginReplacement() })
+
+        XCTAssertEqual(probe.events, ["sleep:50000000", "read:absent"])
+        XCTAssertTrue(probe.settled.isEmpty)
+        XCTAssertNotEqual(probe.ticket, old)
+        XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+        XCTAssertFalse(probe.coordinator.hasReleased)
+    }
+
+    @MainActor
+    func testNewCommandSequenceDuringAXReadCannotReviveTheOldPreview() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        let old = probe.ticket
+        await probe.run(visibility: [.visible], onRead: {
+            probe.coordinator.invalidate()
+            probe.sequenceID += 1
+            probe.beginReplacement()
+        })
+
+        XCTAssertEqual(probe.events, ["sleep:50000000", "read:visible"])
+        XCTAssertTrue(probe.settled.isEmpty)
+        XCTAssertFalse(probe.coordinator.finish(old))
+        XCTAssertTrue(probe.coordinator.isCurrent(probe.ticket, sequenceID: 11))
+    }
+
+    @MainActor
+    func testPhysicalPressDuringAXReadPreventsPreviewResumption() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        await probe.run(visibility: [.absent], onRead: { probe.buttonPressed = true })
+
+        XCTAssertEqual(probe.events, ["sleep:50000000", "read:absent"])
+        XCTAssertTrue(probe.settled.isEmpty)
+        XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+    }
+
+    @MainActor
+    func testInterruptedNativeClickDelayDoesNotReleaseThePause() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        await probe.run(visibility: [.absent], throwsOnSleep: true)
+
+        XCTAssertEqual(probe.events, ["sleep:50000000"])
+        XCTAssertTrue(probe.settled.isEmpty)
+        XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+    }
+
+    @MainActor
+    func testCancelledNativeClickTaskCannotReadOrPublish() async {
+        let probe = NativeClickProbe()
+        probe.release()
+        let task = Task { @MainActor in
+            await probe.run(visibility: [.absent], onSleep: {
+                withUnsafeCurrentTask { $0?.cancel() }
+            })
+        }
+        await task.value
+
+        XCTAssertTrue(task.isCancelled)
+        XCTAssertEqual(probe.events, ["sleep:50000000"])
+        XCTAssertTrue(probe.settled.isEmpty)
+        XCTAssertTrue(probe.coordinator.blocksPreviewUpdates)
+    }
+
+    /// Calls the production settling workflow; injected sleep/AX boundaries
+    /// expose publication timing and supersession without generating input.
+    @MainActor
+    private final class NativeClickProbe {
+        private enum SleepFailure: Error { case interrupted }
+        var coordinator = Coordinator()
+        var ticket: Coordinator.Ticket
+        var sequenceID = 10
+        var buttonPressed = true
+        var visibilityReadCount = 0
+        var elapsedNanoseconds: UInt64 = 0
+        var settled: [Visibility] = []
+        var events: [String] = []
+
+        init() {
+            var initial = Coordinator()
+            ticket = initial.begin(sequenceID: 10)
+            coordinator = initial
+        }
+
+        func release() {
+            buttonPressed = false
+            coordinator.markReleased(sequenceID: sequenceID)
+        }
+
+        func beginReplacement() {
+            buttonPressed = true
+            ticket = coordinator.begin(sequenceID: sequenceID)
+        }
+
+        func run(
+            visibility: [Visibility],
+            onSleep: (() -> Void)? = nil,
+            onRead: (() -> Void)? = nil,
+            throwsOnSleep: Bool = false
+        ) async {
+            let observedTicket = ticket
+            await WindowCommandTabNativeClickWorkflow.run(
+                isCurrent: { self.coordinator.isCurrent(observedTicket, sequenceID: self.sequenceID) },
+                isReleased: {
+                    self.coordinator.canReconcile(
+                        observedTicket, sequenceID: self.sequenceID, buttonPressed: self.buttonPressed
+                    )
+                },
+                readVisibility: {
+                    let next = visibility.indices.contains(self.visibilityReadCount)
+                        ? visibility[self.visibilityReadCount] : .unknown
+                    self.visibilityReadCount += 1
+                    self.events.append("read:\(next.rawValue)")
+                    onRead?()
+                    return next
+                },
+                sleep: {
+                    self.elapsedNanoseconds += $0
+                    self.events.append("sleep:\($0)")
+                    onSleep?()
+                    if throwsOnSleep { throw SleepFailure.interrupted }
+                },
+                onSettled: {
+                    guard self.coordinator.finish(observedTicket) else {
+                        XCTFail("An obsolete click reached the settling callback")
+                        return
+                    }
+                    self.events.append("settled:\($0.rawValue)")
+                    self.settled.append($0)
+                }
+            )
+        }
+    }
+}
