@@ -1324,6 +1324,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         now: UInt64
     ) {
         guard Bundle.main.bundleIdentifier == "com.workview.SuperIsland.WE1Debug",
+              dockPID > 0, dockPID != ProcessInfo.processInfo.processIdentifier,
               sceneProbeRemainingSamples > 0,
               now &- sceneProbeLastSampleNanoseconds >= 300_000_000 else {
             return
@@ -1375,11 +1376,13 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         // trees. Those broad providers are retained only as a diagnostic
         // fallback when the structural path itself is missing.
         if missionControlWindowContainers.isEmpty {
-            let systemWide = AXUIElementCreateSystemWide()
-            AXUIElementSetMessagingTimeout(systemWide, 0.020)
+            // A worker must not perform system-wide hit testing: a hit on one
+            // of our windows can invoke its SwiftUI hierarchy off the main actor.
+            let dockApplication = AXUIElementCreateApplication(dockPID)
+            AXUIElementSetMessagingTimeout(dockApplication, 0.020)
             var hitElement: AXUIElement?
             if AXUIElementCopyElementAtPosition(
-                systemWide,
+                dockApplication,
                 Float(point.x),
                 Float(point.y),
                 &hitElement
@@ -1388,10 +1391,14 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 var parentHashes = Set<CFHashCode>()
                 for depth in 0..<4 {
                     guard let element = current else { break }
+                    var ownerPID: pid_t = 0
+                    guard AXUIElementGetPid(element, &ownerPID) == .success,
+                          ownerPID == dockPID else { break }
+                    AXUIElementSetMessagingTimeout(element, 0.020)
                     let hash = CFHash(element)
                     guard parentHashes.insert(hash).inserted else { break }
                     queue.append(ProbeNode(
-                        provider: "system-hit-parent",
+                        provider: "dock-hit-parent",
                         element: element,
                         depth: depth
                     ))

@@ -1316,6 +1316,71 @@ final class WindowInventoryReconcilerTests: XCTestCase {
         XCTAssertNil(WindowPreviewOnlySelectionPolicy.selectOne(from: admitted))
     }
 
+    func testRetiredMainWindowCannotReturnAsAnotherUnregisteredBackingSurface() {
+        var retirements = WindowPreviewDiscoveryRetirementHistory()
+        retirements.retire(windowIDs: [419], processIdentifier: 564, processLifetimeKey: "app|launch|564")
+        let ids: [CGWindowID] = [419, 422]
+        XCTAssertTrue(retirements.allowsDiscovery(windowID: 422, processIdentifier: 564, processLifetimeKey: "app|launch|564"))
+        let admitted = WindowPreviewDiscoveryLivenessPolicy.select(
+            from: ids, maximumCount: 8,
+            isLive: { id in
+                WindowPreviewDiscoveryLivenessPolicy.allowsSurface(
+                    discoveryAllowed: retirements.allowsDiscovery(windowID: id, processIdentifier: 564, processLifetimeKey: "app|launch|564"),
+                    orderedIn: id == 419
+                )
+            },
+            isDuplicate: { $0 == $1 }
+        )
+        XCTAssertTrue(admitted.isEmpty)
+    }
+
+    func testUnboundDiscoveryRequiresKnownOrderedStateWithoutAnOnScreenRequirement() {
+        let surfaces: [(id: Int, onScreen: Bool, orderedIn: Bool?)] = [
+            (1, false, nil), (2, false, false), (3, false, true), (4, true, nil)
+        ]
+        let admitted = WindowPreviewDiscoveryLivenessPolicy.select(
+            from: surfaces, maximumCount: 8,
+            isLive: { WindowPreviewDiscoveryLivenessPolicy.allowsSurface(discoveryAllowed: true, orderedIn: $0.orderedIn) },
+            isDuplicate: { $0.id == $1.id }
+        )
+        XCTAssertEqual(admitted.map(\.id), [3])
+        XCTAssertFalse(admitted[0].onScreen)
+    }
+
+    func testClosedOrUnknownShellsCannotConsumeDuplicateSlotsOrCaptureLimit() {
+        let surfaces: [(id: Int, frame: Int, orderedIn: Bool?)] = [
+            (1, 10, false), (2, 10, nil), (3, 10, true),
+            (4, 10, true), (5, 20, false), (6, 20, true), (7, 30, true)
+        ]
+        let admitted = WindowPreviewDiscoveryLivenessPolicy.select(
+            from: surfaces, maximumCount: 2,
+            isLive: { WindowPreviewDiscoveryLivenessPolicy.allowsSurface(discoveryAllowed: true, orderedIn: $0.orderedIn) },
+            isDuplicate: { $0.frame == $1.frame }
+        )
+        XCTAssertEqual(admitted.map(\.id), [3, 6])
+    }
+
+    func testSurfaceOrderedOutDuringCaptureCannotReturnEvenWithFreshPixels() {
+        let captured = WindowThumbnailDiscoveredWindow(
+            request: WindowThumbnailRequest(title: "App", occurrence: 0, bounds: nil, windowID: 422),
+            result: .fresh(NSImage(size: NSSize(width: 720, height: 640)))
+        )
+        let requested = WindowPreviewDiscoveryLivenessPolicy.select(
+            from: [captured], maximumCount: 8,
+            isLive: { _ in WindowPreviewDiscoveryLivenessPolicy.allowsSurface(discoveryAllowed: true, orderedIn: true) },
+            isDuplicate: { $0.request.windowID == $1.request.windowID }
+        )
+        XCTAssertEqual(requested.count, 1)
+        // Both a confirmed order-out and a failed query while capture was
+        // suspended invalidate weak discovery, despite its successful bitmap.
+        for finalState: Bool? in [false, nil] {
+            let completed = requested.filter { _ in
+                WindowPreviewDiscoveryLivenessPolicy.allowsSurface(discoveryAllowed: true, orderedIn: finalState)
+            }
+            XCTAssertNil(WindowPreviewOnlySelectionPolicy.selectOne(from: completed))
+        }
+    }
+
     func testDiscoveryRetirementDoesNotBlockUnrelatedNoAXWindowsOrProcessLaunches() {
         var exclusions = WindowPreviewDiscoveryRetirementHistory()
         exclusions.retire(windowIDs: [131], processIdentifier: 551, processLifetimeKey: "zcode|old|551")

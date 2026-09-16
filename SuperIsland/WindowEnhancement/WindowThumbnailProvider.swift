@@ -1210,6 +1210,31 @@ enum WindowThumbnailDiscoveryResult: @unchecked Sendable {
     case unavailable(WindowThumbnailResult)
 }
 
+/// Unbound compositor surfaces need positive ordered-in evidence. A separate
+/// backing store can retain pixels after the actual AX window has retired.
+/// This gate is not used for exact AX windows, including minimized windows.
+enum WindowPreviewDiscoveryLivenessPolicy {
+    static func allowsSurface(discoveryAllowed: Bool, orderedIn: Bool?) -> Bool {
+        discoveryAllowed && orderedIn == true
+    }
+
+    static func select<Candidate>(
+        from candidates: [Candidate],
+        maximumCount: Int,
+        isLive: (Candidate) -> Bool,
+        isDuplicate: (Candidate, Candidate) -> Bool
+    ) -> [Candidate] {
+        guard maximumCount > 0 else { return [] }
+        var accepted: [Candidate] = []
+        for candidate in candidates where isLive(candidate) {
+            guard !accepted.contains(where: { isDuplicate($0, candidate) }) else { continue }
+            accepted.append(candidate)
+            if accepted.count == maximumCount { break }
+        }
+        return accepted
+    }
+}
+
 /// WindowServer-only discovery has pixels but no AX operation identity. It is
 /// therefore an application preview fallback, not proof of N independent user
 /// windows. Showing every compositor surface is exactly how helper/renderer
@@ -1634,7 +1659,9 @@ enum WindowThumbnailProvider {
         }
         return .windows(zip(requests, results).filter {
             guard let windowID = $0.0.windowID else { return false }
-            return allowsPreviewDiscovery(applicationIdentity: applicationIdentity, windowID: windowID)
+            // Capture suspends; the accepted surface may have been ordered out
+            // in the meantime without ever owning an AX destruction callback.
+            return allowsUnboundPreviewDiscovery(applicationIdentity: applicationIdentity, windowID: windowID)
         }.map {
             WindowThumbnailDiscoveredWindow(request: $0.0, result: $0.1)
         })
@@ -1845,30 +1872,41 @@ enum WindowThumbnailProvider {
             parentFrames = []
         }
 
-        var accepted: [SCWindow] = []
-        for window in content.windows {
-            guard window.owningApplication?.processID == processIdentifier,
-                  window.windowLayer == 0,
-                  window.frame.width >= 160,
-                  window.frame.height >= 100,
-                  allowsPreviewDiscovery(
+        return WindowPreviewDiscoveryLivenessPolicy.select(
+            from: content.windows,
+            maximumCount: maximumFallbackWindowCount,
+            isLive: { window in
+                guard window.owningApplication?.processID == processIdentifier,
+                      window.windowLayer == 0,
+                      window.frame.width >= 160,
+                      window.frame.height >= 100,
+                      !parentFrames.contains(where: { rectDistance($0, window.frame) <= 12 }) else {
+                    return false
+                }
+                return allowsUnboundPreviewDiscovery(
                     applicationIdentity: applicationIdentity,
                     windowID: window.windowID
-                  ) else { continue }
-            // Fail closed when the helper surface is only a duplicate of the
-            // parent App's backing frame, or when the same helper publishes two
-            // near-identical surfaces for one visual window.
-            guard !parentFrames.contains(where: {
-                rectDistance($0, window.frame) <= 12
-            }), !accepted.contains(where: {
-                rectDistance($0.frame, window.frame) <= 8
-            }) else { continue }
-            accepted.append(window)
+                )
+            },
+            // Liveness precedes duplicate suppression and the capture limit,
+            // so an old shell cannot displace a real same-frame window.
+            isDuplicate: { rectDistance($0.frame, $1.frame) <= 8 }
+        )
+    }
+
+    private static func allowsUnboundPreviewDiscovery(
+        applicationIdentity: WindowThumbnailApplicationIdentity,
+        windowID: CGWindowID
+    ) -> Bool {
+        guard allowsPreviewDiscovery(applicationIdentity: applicationIdentity, windowID: windowID) else {
+            return false
         }
-        // The ordinary AX path remains unbounded and exposes every real
-        // window. Only this weaker helper-process fallback is capped so a
-        // malformed App cannot trigger an unbounded screenshot burst.
-        return Array(accepted.prefix(maximumFallbackWindowCount))
+        return WindowPreviewDiscoveryLivenessPolicy.allowsSurface(
+            discoveryAllowed: true,
+            orderedIn: WindowServerPrivateBridge.isOrderedIn(
+                windowID: windowID, ownerPID: applicationIdentity.processIdentifier
+            )
+        )
     }
 
     private static func parentProcessIdentifier(of processIdentifier: pid_t) -> pid_t? {

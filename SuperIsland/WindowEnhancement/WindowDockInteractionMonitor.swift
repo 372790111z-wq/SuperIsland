@@ -164,22 +164,35 @@ private final class DockAXHitResolver: @unchecked Sendable {
     )
     private let messagingTimeout: Float = 0.075
 
+    @MainActor
     func resolve(
         point: CGPoint,
         completion: @escaping @Sendable (DockAXHitSnapshot?) -> Void
     ) {
+        // Resolve AppKit process metadata on the main actor. A system-wide AX
+        // hit test on our worker can call this process's NSHostingView directly
+        // and violate SwiftUI's main-actor isolation when the pointer is over it.
+        let docks = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
+            .filter { !$0.isTerminated && $0.processIdentifier > 0
+                && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        guard docks.count == 1 else {
+            completion(nil)
+            return
+        }
+        let dockPID = docks[0].processIdentifier
         queue.async { [self] in
-            completion(autoreleasepool { resolveSynchronously(at: point) })
+            completion(autoreleasepool { resolveSynchronously(at: point, dockPID: dockPID) })
         }
     }
 
-    private func resolveSynchronously(at point: CGPoint) -> DockAXHitSnapshot? {
-        guard AXIsProcessTrusted() else { return nil }
-        let systemWide = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(systemWide, messagingTimeout)
+    private func resolveSynchronously(at point: CGPoint, dockPID: pid_t) -> DockAXHitSnapshot? {
+        guard AXIsProcessTrusted(), dockPID > 0,
+              dockPID != ProcessInfo.processInfo.processIdentifier else { return nil }
+        let dockApplication = AXUIElementCreateApplication(dockPID)
+        AXUIElementSetMessagingTimeout(dockApplication, messagingTimeout)
         var element: AXUIElement?
         guard AXUIElementCopyElementAtPosition(
-            systemWide,
+            dockApplication,
             Float(point.x),
             Float(point.y),
             &element
@@ -188,6 +201,10 @@ private final class DockAXHitResolver: @unchecked Sendable {
 
         var visited = Set<CFHashCode>()
         for _ in 0..<10 {
+            var ownerPID: pid_t = 0
+            guard AXUIElementGetPid(current, &ownerPID) == .success,
+                  ownerPID == dockPID else { return nil }
+            AXUIElementSetMessagingTimeout(current, messagingTimeout)
             let hash = CFHash(current)
             guard visited.insert(hash).inserted else { return nil }
             let role = stringAttribute(kAXRoleAttribute, of: current) ?? ""
@@ -195,6 +212,7 @@ private final class DockAXHitResolver: @unchecked Sendable {
             let looksLikeDockItem = role.localizedCaseInsensitiveContains("dock") ||
                 subrole.localizedCaseInsensitiveContains("dock")
             if looksLikeDockItem {
+                guard let bounds = elementBounds(current), bounds.contains(point) else { return nil }
                 let rawTitle = stringAttribute(kAXTitleAttribute, of: current)
                     ?? stringAttribute(kAXDescriptionAttribute, of: current)
                     ?? ""
@@ -204,7 +222,7 @@ private final class DockAXHitResolver: @unchecked Sendable {
                     title: rawTitle
                         .replacingOccurrences(of: "，有新窗口", with: "")
                         .trimmingCharacters(in: .whitespacesAndNewlines),
-                    quartzFrame: elementBounds(current)
+                    quartzFrame: bounds
                 )
             }
             guard let parent = elementAttribute(kAXParentAttribute, of: current) else {
