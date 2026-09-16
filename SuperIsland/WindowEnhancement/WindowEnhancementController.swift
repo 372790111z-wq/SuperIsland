@@ -6,6 +6,106 @@ import CoreGraphics
 import Foundation
 import QuartzCore
 
+/// Full-screen AX flags can change before the native Space animation and frame
+/// restoration finish. This barrier is shared by all three display-move stages;
+/// no stage can advance from one successful AX readback alone.
+@MainActor
+enum WindowFullScreenDisplayReadiness {
+    // Five matching 80 ms intervals are normally enough to prepare the next
+    // step. Slow transitions retain a four-second budget, while the existing
+    // final full-screen verification still requires four quiet seconds.
+    static let preparationQuietDuration: TimeInterval = 0.35
+    static let preparationMaximumDuration: TimeInterval = 4
+
+    struct Observation {
+        let isFullScreen: Bool
+        let displayID: CGDirectDisplayID?
+        let frame: CGRect
+        let isActionable: Bool
+    }
+
+    enum PlacementRequirement {
+        case stableWindowed, targetAnchored, targetContained
+    }
+
+    enum Outcome: String, Equatable {
+        case ready, interrupted, recoveryRequested, targetUnavailable, timedOut
+    }
+
+    static func wait(
+        expectedFullScreen: Bool,
+        expectedDisplayID: CGDirectDisplayID,
+        placement: PlacementRequirement = .targetContained,
+        maximumDuration: TimeInterval = 8,
+        quietDuration: TimeInterval = 4,
+        tolerance: CGFloat = 2,
+        isCurrent: () -> Bool,
+        shouldRecover: () -> Bool,
+        targetBounds: () -> CGRect?,
+        observe: () -> Observation?,
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        pause: () async -> Bool = {
+            do {
+                try await Task.sleep(nanoseconds: 80_000_000)
+                return true
+            } catch {
+                return false
+            }
+        }
+    ) async -> Outcome {
+        let deadline = now() + maximumDuration
+        var anchorFrame: CGRect?
+        var quietSince: TimeInterval?
+        func matches(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+            abs(lhs.minX - rhs.minX) <= tolerance &&
+                abs(lhs.minY - rhs.minY) <= tolerance &&
+                abs(lhs.width - rhs.width) <= tolerance &&
+                abs(lhs.height - rhs.height) <= tolerance
+        }
+        func placementMatches(_ observation: Observation, bounds: CGRect?) -> Bool {
+            guard placement != .stableWindowed else { return true }
+            guard let bounds else { return false }
+            let expandedBounds = bounds.insetBy(dx: -tolerance, dy: -tolerance)
+            if placement == .targetAnchored {
+                // An app-enforced minimum size can exceed the destination's
+                // windowed work area. Preserve the original move admission;
+                // the final full-screen barrier must verify the normalized fit.
+                return expandedBounds.contains(observation.frame.origin) ||
+                    bounds.contains(CGPoint(x: observation.frame.midX, y: observation.frame.midY))
+            }
+            return observation.displayID == expectedDisplayID && expandedBounds.contains(observation.frame)
+        }
+
+        while now() < deadline {
+            guard isCurrent(), !Task.isCancelled else { return .interrupted }
+            guard !shouldRecover() else { return .recoveryRequested }
+            let bounds = targetBounds()
+            guard placement == .stableWindowed || bounds != nil else { return .targetUnavailable }
+            if let current = observe(), current.isActionable,
+               current.isFullScreen == expectedFullScreen,
+               current.frame.width > 0, current.frame.height > 0,
+               current.frame.minX.isFinite, current.frame.minY.isFinite,
+               current.frame.width.isFinite, current.frame.height.isFinite,
+               placementMatches(current, bounds: bounds) {
+                // Compare with the start of the quiet interval, not just the
+                // previous sample: slow cumulative drift must also restart it.
+                if anchorFrame.map({ matches(current.frame, $0) }) != true {
+                    anchorFrame = current.frame
+                    quietSince = now()
+                }
+                if let quietSince, now() - quietSince >= quietDuration {
+                    return .ready
+                }
+            } else {
+                anchorFrame = nil
+                quietSince = nil
+            }
+            guard await pause() else { return .interrupted }
+        }
+        return .timedOut
+    }
+}
+
 @MainActor
 final class WindowEnhancementController {
     static let shared = WindowEnhancementController()
@@ -812,7 +912,7 @@ final class WindowEnhancementController {
     }
 
     private struct DisplayMoveOutcome {
-        let exact: Bool
+        let requestedFrame: CGRect
         let finalFrame: CGRect
     }
 
@@ -1273,6 +1373,11 @@ final class WindowEnhancementController {
         generation: UInt64
     ) async -> WindowMutationCompletion {
         feedback("正在将全屏窗口移动到其他显示器")
+        recordFullScreenDisplayStage(
+            "exit_requested", identity: identity, window: context.window,
+            sourceDisplayID: sourceDisplayID, targetDisplayID: initialTargetDisplayID,
+            generation: generation
+        )
         let exitOutcome = await transitionFullScreen(
             to: false,
             identity: identity,
@@ -1304,18 +1409,45 @@ final class WindowEnhancementController {
             }
             return .unresolved
         }
-        guard let originalWindowedFrame = frame(of: window) else {
+        let exitReadiness = await waitForFullScreenDisplayReadiness(
+            identity: identity, preferredElement: window,
+            expectedFullScreen: false, expectedDisplayID: sourceDisplayID,
+            placement: .stableWindowed,
+            maximumDuration: WindowFullScreenDisplayReadiness.preparationMaximumDuration,
+            quietDuration: WindowFullScreenDisplayReadiness.preparationQuietDuration,
+            sourceDisplayID: sourceDisplayID, generation: generation, stage: "exit"
+        )
+        if shouldRecoverWindowMutation(generation) {
+            return await reportFullScreenFailure(
+                "窗口增强已关闭或应用正在退出，已取消跨屏移动",
+                identity: identity, preferredElement: window,
+                sourceDisplayID: sourceDisplayID, originalWindowedFrame: nil,
+                generation: generation
+            )
+        }
+        guard case let .stable(windowedWindow) = exitReadiness else {
+            if case let .failed(reason) = exitReadiness {
+                return await reportFullScreenFailure(
+                    "退出全屏后窗口尚未稳定：\(reason)",
+                    identity: identity, preferredElement: window,
+                    sourceDisplayID: sourceDisplayID, originalWindowedFrame: nil,
+                    generation: generation
+                )
+            }
+            return .unresolved
+        }
+        guard let originalWindowedFrame = frame(of: windowedWindow) else {
             return await reportFullScreenFailure(
                 "退出全屏后无法读取窗口位置",
                 identity: identity,
-                preferredElement: window,
+                preferredElement: windowedWindow,
                 sourceDisplayID: sourceDisplayID,
                 originalWindowedFrame: nil,
                 generation: generation
             )
         }
 
-        var activeWindow = window
+        var activeWindow = windowedWindow
         var activeTargetDisplayID = initialTargetDisplayID
         var didRecomputeTarget = false
         for _ in 0..<2 {
@@ -1410,6 +1542,49 @@ final class WindowEnhancementController {
                 continue
             }
 
+            let movedReadiness = await waitForFullScreenDisplayReadiness(
+                identity: identity, preferredElement: activeWindow,
+                expectedFullScreen: false, expectedDisplayID: activeTargetDisplayID,
+                placement: .targetAnchored,
+                maximumDuration: WindowFullScreenDisplayReadiness.preparationMaximumDuration,
+                quietDuration: WindowFullScreenDisplayReadiness.preparationQuietDuration,
+                sourceDisplayID: sourceDisplayID, generation: generation, stage: "moved"
+            )
+            if shouldRecoverWindowMutation(generation) {
+                return await reportFullScreenFailure(
+                    "窗口增强已关闭或应用正在退出，已回滚跨屏移动",
+                    identity: identity, preferredElement: activeWindow,
+                    sourceDisplayID: sourceDisplayID,
+                    originalWindowedFrame: originalWindowedFrame, generation: generation
+                )
+            }
+            switch movedReadiness {
+            case let .stable(movedWindow):
+                activeWindow = movedWindow
+            case .interrupted:
+                return .unresolved
+            case let .failed(reason):
+                if !didRecomputeTarget, screen(withDisplayID: activeTargetDisplayID) == nil {
+                    // The next iteration uses the existing one-time display
+                    // replacement path before attempting another write.
+                    continue
+                }
+                return await reportFullScreenFailure(
+                    "窗口化跨屏位置未稳定：\(reason)",
+                    identity: identity, preferredElement: activeWindow,
+                    sourceDisplayID: sourceDisplayID,
+                    originalWindowedFrame: originalWindowedFrame, generation: generation
+                )
+            }
+            let movedExactly = frame(of: activeWindow).map {
+                frameMatches($0, moveOutcome.requestedFrame)
+            } ?? false
+
+            recordFullScreenDisplayStage(
+                "enter_requested", identity: identity, window: activeWindow,
+                sourceDisplayID: sourceDisplayID, targetDisplayID: activeTargetDisplayID,
+                generation: generation
+            )
             let enterOutcome = await transitionFullScreen(
                 to: true,
                 identity: identity,
@@ -1443,18 +1618,15 @@ final class WindowEnhancementController {
             }
             activeWindow = fullScreenWindow
 
-            if let targetScreen = screen(withDisplayID: activeTargetDisplayID),
-               let fullScreenFrame = frame(of: activeWindow),
-               axBoolAttribute("AXFullScreen", of: activeWindow) == true,
-               cgBounds(for: targetScreen).insetBy(dx: -Self.geometryTolerance, dy: -Self.geometryTolerance)
-                .contains(CGPoint(x: fullScreenFrame.midX, y: fullScreenFrame.midY)) {
-                let stability = await waitForStableWindowGeometry(
+            if screen(withDisplayID: activeTargetDisplayID) != nil {
+                let stability = await waitForFullScreenDisplayReadiness(
                     identity: identity,
                     preferredElement: activeWindow,
                     expectedFullScreen: true,
                     expectedDisplayID: activeTargetDisplayID,
-                    expectedFrame: nil,
-                    generation: generation
+                    sourceDisplayID: sourceDisplayID,
+                    generation: generation,
+                    stage: "entered"
                 )
                 if shouldRecoverWindowMutation(generation) {
                     return await reportFullScreenFailure(
@@ -1470,13 +1642,16 @@ final class WindowEnhancementController {
                 case .stable:
                     feedback(didRecomputeTarget
                         ? "显示器列表已变化；全屏窗口已移动到另一可用显示器"
-                        : (moveOutcome.exact
+                        : (movedExactly
                             ? "全屏窗口已移动到其他显示器"
                             : "全屏窗口已移动到其他显示器；窗口化过渡位置受 App 限制"))
                     return .committed
                 case .interrupted:
                     return .unresolved
                 case let .failed(reason):
+                    if !didRecomputeTarget, screen(withDisplayID: activeTargetDisplayID) == nil {
+                        break
+                    }
                     return await reportFullScreenFailure(
                         "跨屏全屏结果未稳定：\(reason)",
                         identity: identity,
@@ -1517,8 +1692,26 @@ final class WindowEnhancementController {
                     generation: generation
                 )
             }
-            guard case let .success(windowedAgain) = secondExit,
-                  let currentDisplayID = frame(of: windowedAgain).flatMap(displayID(forAXFrame:)),
+            guard case let .success(windowedAgain) = secondExit else {
+                return await reportFullScreenFailure(
+                    "显示器变化后无法退出全屏",
+                    identity: identity, preferredElement: activeWindow,
+                    sourceDisplayID: sourceDisplayID,
+                    originalWindowedFrame: originalWindowedFrame, generation: generation
+                )
+            }
+            let secondReadiness = await waitForFullScreenDisplayReadiness(
+                identity: identity, preferredElement: windowedAgain,
+                expectedFullScreen: false, expectedDisplayID: sourceDisplayID,
+                placement: .stableWindowed,
+                maximumDuration: WindowFullScreenDisplayReadiness.preparationMaximumDuration,
+                quietDuration: WindowFullScreenDisplayReadiness.preparationQuietDuration,
+                sourceDisplayID: sourceDisplayID, generation: generation, stage: "replacement_exit"
+            )
+            guard isWindowMutationCurrent(generation) else { return .unresolved }
+            guard !shouldRecoverWindowMutation(generation),
+                  case let .stable(settledAgain) = secondReadiness,
+                  let currentDisplayID = frame(of: settledAgain).flatMap(displayID(forAXFrame:)),
                   let replacement = adjacentScreen(from: currentDisplayID, offset: displayOffset),
                   let replacementID = displayID(for: replacement) else {
                 return await reportFullScreenFailure(
@@ -1530,10 +1723,98 @@ final class WindowEnhancementController {
                     generation: generation
                 )
             }
-            activeWindow = windowedAgain
+            activeWindow = settledAgain
             activeTargetDisplayID = replacementID
         }
         return .unresolved
+    }
+
+    private func waitForFullScreenDisplayReadiness(
+        identity: WindowIdentity,
+        preferredElement: AXUIElement,
+        expectedFullScreen: Bool,
+        expectedDisplayID: CGDirectDisplayID,
+        placement: WindowFullScreenDisplayReadiness.PlacementRequirement = .targetContained,
+        maximumDuration: TimeInterval = 8,
+        quietDuration: TimeInterval = 4,
+        sourceDisplayID: CGDirectDisplayID,
+        generation: UInt64,
+        stage: String
+    ) async -> WindowStabilityOutcome {
+        var preferred = preferredElement
+        recordFullScreenDisplayStage(
+            "\(stage)_wait_start", identity: identity, window: preferred,
+            sourceDisplayID: sourceDisplayID, targetDisplayID: expectedDisplayID,
+            generation: generation
+        )
+        let result = await WindowFullScreenDisplayReadiness.wait(
+            expectedFullScreen: expectedFullScreen,
+            expectedDisplayID: expectedDisplayID,
+            placement: placement,
+            maximumDuration: maximumDuration,
+            quietDuration: quietDuration,
+            isCurrent: { self.isWindowMutationCurrent(generation) },
+            shouldRecover: { self.shouldRecoverWindowMutation(generation) },
+            targetBounds: {
+                self.screen(withDisplayID: expectedDisplayID).map { self.cgBounds(for: $0) }
+            },
+            observe: {
+                guard let window = self.resolveExactWindow(identity, preferredElement: preferred),
+                      let fullScreen = self.axBoolAttribute("AXFullScreen", of: window),
+                      let currentFrame = self.frame(of: window) else { return nil }
+                preferred = window
+                return .init(
+                    isFullScreen: fullScreen,
+                    displayID: self.displayID(forAXFrame: currentFrame), frame: currentFrame,
+                    isActionable: fullScreen || self.windowSupports(window, requirement: .move)
+                )
+            }
+        )
+        recordFullScreenDisplayStage(
+            "\(stage)_wait_\(result.rawValue)", identity: identity, window: preferred,
+            sourceDisplayID: sourceDisplayID, targetDisplayID: expectedDisplayID,
+            generation: generation
+        )
+        switch result {
+        case .ready: return .stable(preferred)
+        case .interrupted, .recoveryRequested: return .interrupted
+        case .targetUnavailable: return .failed("目标显示器已断开")
+        case .timedOut: return .failed("窗口位置或全屏状态在等待期间未能稳定")
+        }
+    }
+
+    private func recordFullScreenDisplayStage(
+        _ event: String,
+        identity: WindowIdentity,
+        window: AXUIElement,
+        sourceDisplayID: CGDirectDisplayID,
+        targetDisplayID: CGDirectDisplayID,
+        generation: UInt64
+    ) {
+        var metadata: [String: WindowInteractionDiagnosticValue] = [
+            "targetPID": .integer(Int64(identity.processIdentifier)),
+            "windowID": .integer(Int64(identity.windowNumber ?? 0)),
+            "generation": .integer(Int64(clamping: generation)),
+            "sourceDisplayID": .integer(Int64(sourceDisplayID)),
+            "targetDisplayID": .integer(Int64(targetDisplayID)),
+        ]
+        if let fullScreen = axBoolAttribute("AXFullScreen", of: window) {
+            metadata["fullScreen"] = .flag(fullScreen)
+        }
+        if let currentFrame = frame(of: window),
+           [currentFrame.minX, currentFrame.minY, currentFrame.width, currentFrame.height]
+            .allSatisfy({ $0.isFinite && abs($0) < 1_000_000 }) {
+            metadata["x"] = .integer(Int64(currentFrame.minX.rounded()))
+            metadata["y"] = .integer(Int64(currentFrame.minY.rounded()))
+            metadata["width"] = .integer(Int64(currentFrame.width.rounded()))
+            metadata["height"] = .integer(Int64(currentFrame.height.rounded()))
+            if let displayID = displayID(forAXFrame: currentFrame) {
+                metadata["observedDisplayID"] = .integer(Int64(displayID))
+            }
+        }
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "fullScreenDisplayMove", event: event, metadata: metadata
+        )
     }
 
     private func transitionFullScreen(
@@ -2081,25 +2362,22 @@ final class WindowEnhancementController {
             width: min(currentFrame.width, destination.width),
             height: min(currentFrame.height, destination.height)
         )
-        let sizeResult: GeometryUpdateResult = sizeMatches(currentFrame.size, desiredSize)
-            ? .exact
-            : setSize(desiredSize, for: window)
+        if !sizeMatches(currentFrame.size, desiredSize) {
+            _ = setSize(desiredSize, for: window)
+        }
         guard let effectiveFrame = frame(of: window) else { return nil }
         let targetOrigin = CGPoint(
             x: destination.minX + max(0, min(1, relativeX)) * max(0, destination.width - effectiveFrame.width),
             y: destination.minY + max(0, min(1, relativeY)) * max(0, destination.height - effectiveFrame.height)
         )
-        let positionResult = setPosition(targetOrigin, for: window)
-        guard positionResult != .failed, let finalFrame = frame(of: window) else { return nil }
-        let expandedDestination = destination.insetBy(
-            dx: -Self.geometryTolerance,
-            dy: -Self.geometryTolerance
-        )
-        guard expandedDestination.contains(finalFrame.origin) ||
-                destination.contains(CGPoint(x: finalFrame.midX, y: finalFrame.midY)) else { return nil }
+        // AX may accept the position before its readback catches up. Acceptance
+        // only admits the request to the geometry barrier; it is never success.
+        guard originMatches(effectiveFrame.origin, targetOrigin) ||
+                (isAttributeSettable(kAXPositionAttribute, of: window) &&
+                    writePosition(targetOrigin, to: window)) else { return nil }
         return DisplayMoveOutcome(
-            exact: positionResult == .exact && sizeResult == .exact && expandedDestination.contains(finalFrame),
-            finalFrame: finalFrame
+            requestedFrame: CGRect(origin: targetOrigin, size: desiredSize),
+            finalFrame: frame(of: window) ?? effectiveFrame
         )
     }
 

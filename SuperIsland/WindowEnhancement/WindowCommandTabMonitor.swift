@@ -385,8 +385,12 @@ final class WindowCommandTabMonitor {
             eventTapInstallationFailed()
             return
         }
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            eventTapInstallationFailed()
+            return
+        }
         eventTap = tap
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
@@ -414,7 +418,11 @@ final class WindowCommandTabMonitor {
 
     private func tearDownTap() {
         if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: false) }
-        if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            CFRunLoopSourceInvalidate(runLoopSource)
+        }
+        if let eventTap { CFMachPortInvalidate(eventTap) }
         runLoopSource = nil
         eventTap = nil
     }
@@ -509,7 +517,6 @@ final class WindowCommandTabMonitor {
                         component: "cmdTab", event: "sequenceStart",
                         metadata: ["sequence": .integer(Int64(clamping: eventSequenceID))]
                     )
-                    installNativePointerTapIfNeeded()
                 }
                 let sequenceID = eventSequenceID
                 enqueueEventAction(.syncNativeSelection(sequenceID: sequenceID))
@@ -702,6 +709,11 @@ final class WindowCommandTabMonitor {
             cancel()
             return
         }
+        guard !zilanPointerInteraction.isSuppressed else { return }
+        // Both callers run after the input callback has returned. Creating a
+        // system event tap inside Tab-down can hold up delivery to Dock. Only
+        // install here if the deferred action still belongs to a live session.
+        installNativePointerTapIfNeeded()
         nativeSwitcherSyncTask?.cancel()
         let sequenceID = eventSequenceID
         nativeSwitcherSyncTask = Task { @MainActor [weak self] in
@@ -875,13 +887,22 @@ final class WindowCommandTabMonitor {
             )
             return
         }
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            logger.error("Native Cmd-Tab pointer run-loop source could not be created")
+            WindowInteractionDiagnosticRecorder.shared.record(
+                component: "cmdTab", event: "pointerTapInstall", metadata: ["installed": .flag(false)]
+            )
+            return
+        }
         nativePointerEventTap = tap
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         nativePointerRunLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        let installed = CGEvent.tapIsEnabled(tap: tap)
+        if !installed { removeNativePointerTap(force: true) }
         WindowInteractionDiagnosticRecorder.shared.record(
-            component: "cmdTab", event: "pointerTapInstall", metadata: ["installed": .flag(true)]
+            component: "cmdTab", event: "pointerTapInstall", metadata: ["installed": .flag(installed)]
         )
     }
 
@@ -1008,7 +1029,9 @@ final class WindowCommandTabMonitor {
                 nativePointerRunLoopSource,
                 .commonModes
             )
+            CFRunLoopSourceInvalidate(nativePointerRunLoopSource)
         }
+        if let nativePointerEventTap { CFMachPortInvalidate(nativePointerEventTap) }
         nativePointerRunLoopSource = nil
         nativePointerEventTap = nil
         pendingNativePointerLocation = nil
