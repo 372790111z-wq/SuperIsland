@@ -90,6 +90,97 @@ enum WindowCommandTabSessionReconciliation {
     }
 }
 
+/// Keeps preview updates suspended across a native click and its delayed
+/// dismissal. Both input edges remain owned by Dock; this only owns the pause.
+struct WindowCommandTabNativeClickCoordinator {
+    struct Ticket: Equatable, Sendable {
+        let generation: UInt64
+        let sequenceID: Int
+    }
+
+    private var generation: UInt64 = 0
+    private(set) var pending: Ticket?
+    private(set) var hasReleased = false
+    var blocksPreviewUpdates: Bool { pending != nil }
+
+    mutating func begin(sequenceID: Int) -> Ticket {
+        generation &+= 1
+        let ticket = Ticket(generation: generation, sequenceID: sequenceID)
+        pending = ticket
+        hasReleased = false
+        return ticket
+    }
+
+    func isCurrent(_ ticket: Ticket, sequenceID: Int) -> Bool {
+        pending == ticket && ticket.sequenceID == sequenceID
+    }
+
+    @discardableResult
+    mutating func markReleased(sequenceID: Int) -> Ticket? {
+        guard let ticket = pending, ticket.sequenceID == sequenceID else { return nil }
+        hasReleased = true
+        return ticket
+    }
+
+    func canReconcile(_ ticket: Ticket, sequenceID: Int, buttonPressed: Bool) -> Bool {
+        isCurrent(ticket, sequenceID: sequenceID) && hasReleased && !buttonPressed
+    }
+
+    /// A fresh keyboard action owns selection once the physical click has
+    /// ended. Its caller must request a fresh native selection after resuming.
+    @discardableResult
+    mutating func resumeForKeyboardInput(buttonPressed: Bool) -> Bool {
+        guard blocksPreviewUpdates, !buttonPressed else { return false }
+        invalidate()
+        return true
+    }
+
+    @discardableResult
+    mutating func finish(_ ticket: Ticket) -> Bool {
+        guard pending == ticket, hasReleased else { return false }
+        pending = nil
+        hasReleased = false
+        return true
+    }
+
+    @discardableResult
+    mutating func invalidate() -> Bool {
+        let wasPending = blocksPreviewUpdates
+        generation &+= 1
+        pending = nil
+        hasReleased = false
+        return wasPending
+    }
+}
+
+/// A native click can take several hundred milliseconds to dismiss the strip.
+/// Keep preview publication paused through that bounded settling interval,
+/// without synthesizing input or interpreting the selected application tile.
+@MainActor
+enum WindowCommandTabNativeClickWorkflow {
+    static func run(
+        delays: [UInt64] = [50_000_000, 100_000_000, 150_000_000, 150_000_000],
+        isCurrent: () -> Bool,
+        isReleased: () -> Bool,
+        readVisibility: () -> WindowCommandTabCommitCoordinator.Visibility,
+        sleep: (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
+        onSettled: (WindowCommandTabCommitCoordinator.Visibility) -> Void
+    ) async {
+        for (index, delay) in delays.enumerated() {
+            do { try await sleep(delay) } catch { return }
+            guard !Task.isCancelled, isCurrent(), isReleased() else { return }
+            let visibility = readVisibility()
+            // AX may yield stale evidence after another click, cancellation,
+            // or a new physical press. None may release the previous pause.
+            guard !Task.isCancelled, isCurrent(), isReleased() else { return }
+            if visibility == .absent || index == delays.count - 1 {
+                onSettled(visibility)
+                return
+            }
+        }
+    }
+}
+
 /// Production polling and callback order, injectable without synthesizing
 /// keyboard input or activating a real application in regression tests.
 @MainActor

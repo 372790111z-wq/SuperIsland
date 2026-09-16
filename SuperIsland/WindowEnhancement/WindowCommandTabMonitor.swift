@@ -184,6 +184,9 @@ final class WindowCommandTabMonitor {
     private var nativeWindowCommitTask: Task<Void, Never>?
     private var nativeSessionReconciliationTask: Task<Void, Never>?
     private var nativeSessionReconciliationGeneration: UInt64 = 0
+    private var nativeClick = WindowCommandTabNativeClickCoordinator()
+    private var nativeClickReleaseWatchTask: Task<Void, Never>?
+    private var nativePreviewRefreshPending = false
     private var nativeSelectionPending = false
     private var nativeSwitcherSyncTask: Task<Void, Never>?
     private var nativePointerSyncWorkItem: DispatchWorkItem?
@@ -584,6 +587,17 @@ final class WindowCommandTabMonitor {
             return Unmanaged.passUnretained(event)
         }
         if type == .keyDown {
+            // New keyboard intent supersedes an already released native click.
+            // Do not leave its cancelled readback holding previews indefinitely.
+            if nativeClick.resumeForKeyboardInput(buttonPressed: Self.nativeLeftButtonPressed) {
+                nativeClickReleaseWatchTask?.cancel()
+                nativeClickReleaseWatchTask = nil
+                overlay.setNativeClickSuspended(false)
+                // Clearing the pause alone leaves nativeSelectionPending set.
+                // Every new keyboard intent needs a fresh native selection,
+                // including extension keys that do not normally schedule one.
+                enqueueEventAction(.syncNativeSelection(sequenceID: eventSequenceID))
+            }
             cancelNativeSessionReconciliation()
             abortNativeWindowCommit(reason: "newKeyDown", reconcile: false)
             concreteWindowActivationTask?.cancel()
@@ -810,7 +824,8 @@ final class WindowCommandTabMonitor {
             cancel()
             return
         }
-        guard !zilanPointerInteraction.isSuppressed else { return }
+        guard !zilanPointerInteraction.isSuppressed,
+              !nativeClick.blocksPreviewUpdates else { return }
         // Both callers run after the input callback has returned. Creating a
         // system event tap inside Tab-down can hold up delivery to Dock. Only
         // install here if the deferred action still belongs to a live session.
@@ -831,6 +846,7 @@ final class WindowCommandTabMonitor {
                 guard let self,
                       !Task.isCancelled,
                       self.commandSequenceActive,
+                      !self.nativeClick.blocksPreviewUpdates,
                       self.eventSequenceID == sequenceID else { return }
                 switch WindowCommandTabDiagnostics.measure("nativeSnapshot", sequence: sequenceID, {
                     self.nativeSwitcher.snapshot()
@@ -872,6 +888,7 @@ final class WindowCommandTabMonitor {
     private func applyNativeSwitcherSnapshot(
         _ snapshot: NativeProcessSwitcherBridge.Snapshot
     ) {
+        guard !nativeClick.blocksPreviewUpdates else { return }
         if WindowCommandTabDiagnostics.enabled {
             var metadata = WindowCommandTabDiagnostics.keyStates()
             metadata["sequence"] = .integer(Int64(clamping: eventSequenceID))
@@ -913,8 +930,11 @@ final class WindowCommandTabMonitor {
         if snapshot.isSharedWeChat && didChangeAnchor { hasExplicitWindowSelection = false }
         nativeCommitContext = snapshot.commitContext
         nativeSelectionPending = false
+        let needsResumeRefresh = nativePreviewRefreshPending
+        nativePreviewRefreshPending = false
         if !didChangeApplication,
            !didChangeAnchor,
+           !needsResumeRefresh,
            isPresenting {
             return
         }
@@ -938,6 +958,8 @@ final class WindowCommandTabMonitor {
         isPresenting = true
         if didChangeApplication {
             renderOverlay()
+        } else if needsResumeRefresh {
+            renderOverlay(preservingThumbnails: currentThumbnailResults)
         } else {
             presentOverlay(thumbnails: currentThumbnailResults, for: selectedIndex)
         }
@@ -945,6 +967,7 @@ final class WindowCommandTabMonitor {
 
     private func scheduleNativePointerSync() {
         guard commandSequenceActive,
+              !nativeClick.blocksPreviewUpdates,
               preferences.isEnabled,
               preferences.cmdTabPlusEnabled,
               nativePointerSyncWorkItem == nil else { return }
@@ -953,6 +976,7 @@ final class WindowCommandTabMonitor {
             guard let self else { return }
             self.nativePointerSyncWorkItem = nil
             guard self.commandSequenceActive,
+                  !self.nativeClick.blocksPreviewUpdates,
                   self.eventSequenceID == sequenceID else { return }
             // Dock does not update AXSelected/AXFocused when the pointer merely
             // hovers a native Cmd-Tab tile. Query the actual global pointer and
@@ -1093,9 +1117,10 @@ final class WindowCommandTabMonitor {
         if type == .leftMouseDown {
             cancelNativeSessionReconciliation()
             abortNativeWindowCommit(reason: "newPointerDown", reconcile: false)
-            if !overlay.containsPointer(NSEvent.mouseLocation), commandSequenceActive || isPresenting {
-                hasExplicitWindowSelection = false
-                scheduleNativeSessionReconciliation(reason: "outsidePointerDown")
+            if (nativeClick.blocksPreviewUpdates || !overlay.containsPointer(NSEvent.mouseLocation)),
+               commandSequenceActive || isPresenting {
+                beginNativeClick()
+                return false
             }
         }
         // Consume both halves only for a click that began in our visible
@@ -1117,8 +1142,16 @@ final class WindowCommandTabMonitor {
             return true
         }
         if type == .leftMouseUp, commandSequenceActive || isPresenting {
-            scheduleNativeSessionReconciliation(reason: "outsidePointerUp")
+            if nativeClick.blocksPreviewUpdates {
+                releaseNativeClick(reason: "outsidePointerUp")
+            } else {
+                scheduleNativeSessionReconciliation(reason: "outsidePointerUp")
+            }
         }
+        // A gesture begun on the native strip stays native even when dragged
+        // into our panel. No hover, async publication or new capture may race
+        // Dock while it finishes that click.
+        guard !nativeClick.blocksPreviewUpdates else { return false }
         guard commandSequenceActive else { return false }
         if type == .leftMouseDown, overlay.containsPointer(NSEvent.mouseLocation) {
             guard zilanPointerInteraction.beginCapture() else { return false }
@@ -1145,6 +1178,67 @@ final class WindowCommandTabMonitor {
         }
         scheduleNativePointerSync()
         return nativePointerClickCaptured
+    }
+
+    private static var nativeLeftButtonPressed: Bool {
+        CGEventSource.buttonState(.hidSystemState, button: .left)
+    }
+
+    private func beginNativeClick() {
+        let ticket = nativeClick.begin(sequenceID: eventSequenceID)
+        nativeClickReleaseWatchTask?.cancel()
+        cancelQueuedEventActions()
+        nativeSwitcherSyncTask?.cancel()
+        nativeSwitcherSyncTask = nil
+        nativePointerSyncWorkItem?.cancel()
+        nativePointerSyncWorkItem = nil
+        pendingNativePointerLocation = nil
+        nativeSelectionPending = true
+        hasExplicitWindowSelection = false
+        nativePreviewRefreshPending = true
+        overlay.setNativeClickSuspended(true)
+        recordNativeClick("nativeClickBegin")
+        // Recovery only for the lifetime of this press. A missing mouseUp or
+        // disabled tap must not freeze previews forever, and a held button
+        // must never be released merely because a fixed timeout elapsed.
+        nativeClickReleaseWatchTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 80_000_000) } catch { return }
+                guard let self, !Task.isCancelled,
+                      self.nativeClick.pending == ticket,
+                      self.eventSequenceID == ticket.sequenceID,
+                      !self.nativeClick.hasReleased else { return }
+                if !Self.nativeLeftButtonPressed {
+                    self.releaseNativeClick(reason: "nativeClickPhysicalRelease")
+                    return
+                }
+            }
+        }
+    }
+
+    private func releaseNativeClick(reason: String) {
+        guard nativeClick.markReleased(sequenceID: eventSequenceID) != nil else { return }
+        nativeClickReleaseWatchTask?.cancel()
+        nativeClickReleaseWatchTask = nil
+        recordNativeClick("nativeClickReleased")
+        scheduleNativeSessionReconciliation(reason: reason)
+    }
+
+    private func invalidateNativeClick() {
+        nativeClickReleaseWatchTask?.cancel()
+        nativeClickReleaseWatchTask = nil
+        nativeClick.invalidate()
+        overlay.setNativeClickSuspended(false)
+    }
+
+    private func recordNativeClick(_ event: String) {
+        guard WindowCommandTabDiagnostics.enabled else { return }
+        var metadata = WindowCommandTabDiagnostics.keyStates()
+        metadata["sequence"] = .integer(Int64(clamping: eventSequenceID))
+        metadata["blocked"] = .flag(nativeClick.blocksPreviewUpdates)
+        metadata["released"] = .flag(nativeClick.hasReleased)
+        metadata["leftPressed"] = .flag(Self.nativeLeftButtonPressed)
+        WindowCommandTabDiagnostics.recorder.record(event: event, metadata: metadata)
     }
 
     private func removeNativePointerTap(force: Bool = false) {
@@ -1185,7 +1279,7 @@ final class WindowCommandTabMonitor {
     }
 
     private func moveWindowSelection(reverse: Bool) {
-        guard isPresenting, !nativeSelectionPending,
+        guard !nativeClick.blocksPreviewUpdates, isPresenting, !nativeSelectionPending,
               candidates.indices.contains(selectedIndex),
               !candidates[selectedIndex].windows.isEmpty else { return }
         let windowCount = candidates[selectedIndex].windows.count
@@ -1197,7 +1291,7 @@ final class WindowCommandTabMonitor {
     }
 
     private func selectWindow(index: Int) {
-        guard isPresenting, !nativeSelectionPending,
+        guard !nativeClick.blocksPreviewUpdates, isPresenting, !nativeSelectionPending,
               candidates.indices.contains(selectedIndex),
               candidates[selectedIndex].windows.indices.contains(index) else { return }
         overlay.clearPointerSelection()
@@ -1211,7 +1305,8 @@ final class WindowCommandTabMonitor {
         preservingThumbnails: [WindowThumbnailResult?]? = nil,
         continuingRecovery: Bool = false
     ) {
-        guard isPresenting, candidates.indices.contains(selectedIndex) else { return }
+        guard !nativeClick.blocksPreviewUpdates,
+              isPresenting, candidates.indices.contains(selectedIndex) else { return }
         let renderStartedAt = ProcessInfo.processInfo.systemUptime
         if !continuingRecovery {
             selectedApplicationRefreshTask?.cancel()
@@ -1789,7 +1884,8 @@ final class WindowCommandTabMonitor {
         thumbnails: [WindowThumbnailResult?],
         for presentedIndex: Int
     ) {
-        guard isPresenting,
+        guard !nativeClick.blocksPreviewUpdates,
+              isPresenting,
               selectedIndex == presentedIndex,
               candidates.indices.contains(presentedIndex),
               let nativeSwitcherAnchorFrame else { return }
@@ -1832,7 +1928,8 @@ final class WindowCommandTabMonitor {
             diagnosticSequence: sequence,
             allowsSyntheticHoverSelection: !candidates[presentedIndex].isSharedWeChat,
             onCommitWindow: { [weak self] applicationIndex, windowIndex in
-                guard let self, self.eventSequenceID == sequence else { return }
+                guard let self, self.eventSequenceID == sequence,
+                      !self.nativeClick.blocksPreviewUpdates else { return }
                 self.logger.debug(
                     "Mouse committed Cmd-Tab window appIndex=\(applicationIndex, privacy: .public) windowIndex=\(windowIndex, privacy: .public)"
                 )
@@ -1845,14 +1942,16 @@ final class WindowCommandTabMonitor {
                 ))
             },
             onHoverWindow: { [weak self] applicationIndex, windowIndex in
-                guard self?.eventSequenceID == sequence else { return }
+                guard self?.eventSequenceID == sequence,
+                      self?.nativeClick.blocksPreviewUpdates == false else { return }
                 self?.logger.debug(
                     "Mouse hovered Cmd-Tab window appIndex=\(applicationIndex, privacy: .public) windowIndex=\(windowIndex, privacy: .public)"
                 )
                 self?.selectWindow(applicationIndex: applicationIndex, windowIndex: windowIndex)
             },
             onCloseWindow: { [weak self] applicationIndex, windowIndex in
-                guard let self, self.eventSequenceID == sequence else { return }
+                guard let self, self.eventSequenceID == sequence,
+                      !self.nativeClick.blocksPreviewUpdates else { return }
                 guard actionTargets.indices.contains(applicationIndex),
                       actionTargets[applicationIndex].indices.contains(windowIndex),
                       let target = actionTargets[applicationIndex][windowIndex] else { return }
@@ -1904,7 +2003,7 @@ final class WindowCommandTabMonitor {
     }
 
     private func selectWindow(applicationIndex: Int, windowIndex: Int) {
-        guard isPresenting, !nativeSelectionPending,
+        guard !nativeClick.blocksPreviewUpdates, isPresenting, !nativeSelectionPending,
               selectedIndex == applicationIndex,
               candidates.indices.contains(applicationIndex) else { return }
         guard candidates[applicationIndex].windows.indices.contains(windowIndex) else {
@@ -1921,7 +2020,7 @@ final class WindowCommandTabMonitor {
     }
 
     private func commit(applicationIndex: Int, windowIndex: Int) {
-        guard isPresenting,
+        guard !nativeClick.blocksPreviewUpdates, isPresenting,
               candidates.indices.contains(applicationIndex),
               candidates[applicationIndex].windows.indices.contains(windowIndex),
               candidates[applicationIndex].windows[windowIndex].element != nil else { return }
@@ -1951,6 +2050,7 @@ final class WindowCommandTabMonitor {
     }
 
     private func closeWindow(applicationIndex: Int, windowIndex: Int) {
+        guard !nativeClick.blocksPreviewUpdates else { return }
         guard isPresenting,
               candidates.indices.contains(applicationIndex),
               candidates[applicationIndex].windows.indices.contains(windowIndex) else {
@@ -2431,16 +2531,17 @@ final class WindowCommandTabMonitor {
         nativeSessionReconciliationTask = nil
     }
 
-    /// One deferred read per input/failure edge, never a background poll. It
-    /// distinguishes a closed native strip from a surviving strip whose mouse
-    /// monitoring must continue, including after a missed physical Command-up.
+    /// Input/failure edges schedule a deferred read. A native click keeps
+    /// previews paused through a bounded release readback; ordinary session
+    /// reconciliation retains its single read and existing visibility policy.
     private func scheduleNativeSessionReconciliation(reason: String) {
         let context = nativeCommitContext
         cancelNativeSessionReconciliation()
+        let clickTicket = nativeClick.pending
+        guard clickTicket == nil || nativeClick.hasReleased else { return }
         let generation = nativeSessionReconciliationGeneration
         let sequence = eventSequenceID
         nativeSessionReconciliationTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return }
             guard let self, !Task.isCancelled,
                   self.nativeSessionReconciliationGeneration == generation,
                   self.eventSequenceID == sequence,
@@ -2455,8 +2556,45 @@ final class WindowCommandTabMonitor {
                 self.cancel()
                 return
             }
-            let visibility = WindowCommandTabDiagnostics.measure("reconcileVisibility", sequence: sequence) {
-                self.nativeSwitcher.commitVisibility(context)
+            let isCurrent = {
+                !Task.isCancelled
+                    && self.nativeSessionReconciliationGeneration == generation
+                    && self.eventSequenceID == sequence
+                    && !self.nativeWindowCommit.isPending
+                    && self.preferences.isEnabled && self.preferences.cmdTabPlusEnabled
+                    && !self.zilanPointerInteraction.isSuppressed
+            }
+            let readVisibility = {
+                WindowCommandTabDiagnostics.measure("reconcileVisibility", sequence: sequence) {
+                    self.nativeSwitcher.commitVisibility(context)
+                }
+            }
+            let visibility: WindowCommandTabCommitCoordinator.Visibility
+            if let clickTicket {
+                // Native-only control takes about 260–300ms from mouseUp to
+                // retiring the strip. Do not restore our panel at the first
+                // 50ms visible read and interrupt that native transaction.
+                var settledVisibility: WindowCommandTabCommitCoordinator.Visibility?
+                await WindowCommandTabNativeClickWorkflow.run(
+                    isCurrent: { isCurrent() && self.nativeClick.pending == clickTicket },
+                    isReleased: {
+                        self.nativeClick.canReconcile(
+                            clickTicket, sequenceID: sequence,
+                            buttonPressed: Self.nativeLeftButtonPressed
+                        )
+                    },
+                    readVisibility: readVisibility,
+                    onSettled: { settledVisibility = $0 }
+                )
+                guard isCurrent(), let settledVisibility,
+                      self.nativeClick.finish(clickTicket) else { return }
+                self.overlay.setNativeClickSuspended(false)
+                visibility = settledVisibility
+                self.recordNativeClick("nativeClickSettled")
+            } else {
+                do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return }
+                guard isCurrent(), !self.nativeClick.blocksPreviewUpdates else { return }
+                visibility = readVisibility()
             }
             guard !Task.isCancelled,
                   self.nativeSessionReconciliationGeneration == generation,
@@ -2731,6 +2869,8 @@ final class WindowCommandTabMonitor {
     }
 
     private func cancel() {
+        invalidateNativeClick()
+        nativePreviewRefreshPending = false
         cancelNativeSessionReconciliation()
         concreteWindowActivationTask?.cancel()
         concreteWindowActivationTask = nil
@@ -4859,6 +4999,7 @@ private final class CommandTabOverlayController {
     private let previewPanel: WindowPreviewInteractionPanel
     private let previewContentView: CommandTabPanelContentView<CommandTabPreviewView>
     private var presentationScreen: NSScreen?
+    private var nativeClickSuspended = false
     private var hoveredWindowSelection: CommandTabPreviewTarget?
     private var interactionGeneration: UInt64 = 0
     private var recentCacheExpirationGeneration = 0
@@ -5007,7 +5148,7 @@ private final class CommandTabOverlayController {
         deferAction: Bool = false,
         allowsHoverSelection: Bool = true
     ) -> Bool {
-        guard previewPanel.isVisible else { return false }
+        guard !nativeClickSuspended, previewPanel.isVisible else { return false }
         let panelPoint = previewPanel.convertPoint(fromScreen: screenLocation)
         let point = CGPoint(
             x: panelPoint.x,
@@ -5025,12 +5166,22 @@ private final class CommandTabOverlayController {
         previewPanel.isVisible && previewPanel.frame.contains(point)
     }
 
+    func setNativeClickSuspended(_ suspended: Bool) {
+        guard nativeClickSuspended != suspended else { return }
+        nativeClickSuspended = suspended
+        // Also invalidate AppKit/SwiftUI hover callbacks queued before the
+        // native press. They share the same pause as the CG event-tap route.
+        interactionGeneration &+= 1
+        clearPointerSelection()
+    }
+
     func clearPointerSelection() {
         hoveredWindowSelection = nil
         model.clearPointerSelection()
     }
 
     private func handlePointer(type: NSEvent.EventType, point: CGPoint, deferAction: Bool, allowsHoverSelection: Bool = true) {
+        guard !nativeClickSuspended else { return }
         let action = model.handlePointer(type, at: point)
         if WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: Bundle.main.bundleIdentifier) {
             let now = ProcessInfo.processInfo.systemUptime

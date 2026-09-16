@@ -1,3 +1,9 @@
+## 2026-09-16 - native icon single-click acceptance pending; display behavior separated
+
+The latest user control result is “换屏，但是不需要点两次了”: Cmd-Tab Plus OFF still changes display, but native icons need only one click. Plus is restored ON. Do not revert the accepted fullscreen Chrome movement fix or treat earlier lost-release evidence as the cause of this reproduction. Frozen140527 logs show preview republishing inside the unsuccessful first native click; all captured releases arrived.
+
+Candidate162956 isolates that native click from WE1 preview updates and has367 passing tests/build/Analyze, independent review and package/source verification. The code does not change native display selection. Next: preserve code in Git, replace only WE1 with a recoverable actual140527 backup, verify runtime, then obtain physical single-click/strip-dismissal/reentry results. Candidate tests are not native acceptance; display changes and any uncaptured within-session jumping remain unconfirmed separate behavior.
+
 ## 2026-09-16 - Cmd-Tab real input regression remains open on diagnostic140527
 
 Chrome fullscreen cross-display movement is user-accepted and preserved. Cmd-Tab native strip residual state, self-cycling and display jumping remain unresolved. Diagnostic140527 is installed and logging; its code adds timing/placement evidence only. Await the same physical failure with matching input and geometry records before choosing a behavioral repair. The tap does not subscribe to Tab-up, and a callback returning an event does not prove Dock received it; correlate with the external listen-only trace. Exact112637 source is db6f8dd and its prior installed app is backed up. The stopped Chrome identity draft is outside this task. See the newest PROGRESS entry for verified installation and evidence locations.
