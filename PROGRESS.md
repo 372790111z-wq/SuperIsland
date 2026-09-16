@@ -1,3 +1,9 @@
+## 2026-09-16 - single-allocation candidate171017 installed; native retest pending
+
+Source is preserved in local commit d02443e. Installed build20260916171017 runs from /Applications/SuperIsland-WE1-Debug.app as PID91579. OldPID72071 quit normally before replacement; its complete101-entry actual162956 app backup and the new101-entry installed manifest verified. Rollback: build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-162956-before-171017.app. Native settings readback confirms Accessibility/Screen Recording effective and Cmd-Tab Plus/Dock/MC/display movement ON; settings are closed.
+
+Post-quit inventory has zero72071 taps. New idle91579 has four unique enabled taps (masks32,102,5120,16384), with no duplicate or disabled keyboard/pointer registrations. An independent review confirms the installed process, version, source commit and unchanged fullscreen Chrome controller hash. This verifies startup cleanup, not repeated-session lifetime or native click acceptance. Two bounded listen-only input/CG-geometry probes record the requested three physical single-click/reentry tests; no business app or Dock was restarted. First-click success and same-session display stability remain pending, and prior162956 failure is not relabeled as accepted. No remote push. Evidence: ../../.codex-audit/wins/2026-09-16/cmdtab-native-click-isolation/single-tap-creation/{installation.json,taps-after-old-quit.json,taps-new-idle.json,native-retest/}.
+
 ## 2026-09-16 - single-allocation tap candidate171017 ready
 
 User corrected the full-WE1-off result: single clicks are normal, matching the three captured native strip disappearances. Restored162956 reproduces first-click failure. Paired routing capture identifies three first click pairs present at HID and passed by the CmdTab callback but absent from annotated; second clicks reach Dock. Mission Control interception has no matching notice or visible close panel evidence, so it is not established as the cause.
