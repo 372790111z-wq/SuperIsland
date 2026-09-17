@@ -324,7 +324,31 @@ final class AppState: ObservableObject {
     private var presentationHoldModule: ActiveModule?
     private var lastNotchEntryHapticDate: Date = .distantPast
     private var requiresHoverExitAfterZilanSuppression = false
+    private var windowDragHoverGate = WindowDragHoverGate()
     private let synchronizesRuntimeEnergyState: Bool
+
+    var isWindowDragHoverSuppressed: Bool { windowDragHoverGate.isSuppressed }
+
+    /// Only suppress automatic hover presentation. File drops and explicit
+    /// commands keep their existing input and presentation paths.
+    func setWindowDragging(_ dragging: Bool) {
+        if !dragging, windowDragHoverGate.isDragging {
+            // The snap panel can delay the main island's hover entry callback.
+            // Reconcile the physical release position before removing the gate.
+            windowDragHoverGate.recordHover(isPointerOverIsland)
+        }
+        guard windowDragHoverGate.setDragging(dragging) else { return }
+        cancelHoverActivation()
+        isHovering = false
+        // Ending a drag never replays the hover which happened while held.
+    }
+
+    private var isPointerOverIsland: Bool {
+        let pointer = NSEvent.mouseLocation
+        return NSApp?.windows.contains {
+            $0 is IslandPanel && $0.isVisible && $0.frame.contains(pointer)
+        } ?? false
+    }
 
     init(synchronizesRuntimeEnergyState: Bool = true) {
         self.synchronizesRuntimeEnergyState = synchronizesRuntimeEnergyState
@@ -594,6 +618,18 @@ final class AppState: ObservableObject {
     }
 
     func handleHoverChange(_ hovering: Bool) {
+        // Ignore a late synthetic exit caused by a disappearing snap panel.
+        // The post-drag barrier ends only when the pointer really leaves.
+        if !hovering, windowDragHoverGate.requiresPointerExit, isPointerOverIsland {
+            cancelHoverActivation()
+            isHovering = false
+            return
+        }
+        guard windowDragHoverGate.recordHover(hovering) else {
+            cancelHoverActivation()
+            isHovering = false
+            return
+        }
         guard !isZilanInteractionSuppressed else {
             cancelHoverActivation()
             return
@@ -804,6 +840,7 @@ final class AppState: ObservableObject {
 
     private func scheduleHoverActivation(wasHovering: Bool) {
         guard !isZilanInteractionSuppressed else { return }
+        guard !isWindowDragHoverSuppressed else { return }
         guard !wasHovering else { return }
         guard !isSystemEmojiInteractionActive else { return }
 
@@ -811,8 +848,10 @@ final class AppState: ObservableObject {
 
         let startingState = currentState
         let inputGeneration = islandInputGeneration
+        let hoverGeneration = windowDragHoverGate.generation
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.canHandleIslandInput(generation: inputGeneration),
+                  self.windowDragHoverGate.permitsActivation(generation: hoverGeneration),
                   self.isHovering, self.currentState != .fullExpanded else { return }
 
             if self.shouldHoverExpandNotifications(from: startingState) {
