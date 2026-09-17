@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="SuperIsland 文件快捷删除与隐藏/显示全部窗口的独立交互需求草稿。仅含虚构演示数据，不操作真实文件或窗口。">
+  <meta name="description" content="SuperIsland 文件快捷删除与隐藏/显示全部窗口的独立需求交互参考。仅含虚构演示数据，不操作真实文件或窗口。">
   <link rel="icon" href="data:,">
-  <title>SuperIsland · 快捷功能需求稿 v0.1</title>
+  <title>SuperIsland · 快捷功能交互参考 v0.1</title>
   <style>
 :root { color-scheme: dark; --bg: #101114; --panel: #1b1d22; --raised: #23262d; --soft: #2a2d35; --line: rgba(255,255,255,.095); --text: #f3f4f7; --muted: #a4aab8;
 --blue: #538dff; --green: #73d7aa; --amber: #edc580; --red: #ffa4ac; } * { box-sizing: border-box; } body { margin: 0; padding: 32px 20px; background: var(--bg); color: var(--text); font: 13px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; }
@@ -64,12 +64,12 @@ h1 { font-size: 21px; } .footer { padding: 12px 16px; } } @media (prefers-reduce
   <main class="app">
     <header class="titlebar">
       <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
-      <span class="brand">SuperIsland</span><span class="version">需求草稿 v0.1</span>
+      <span class="brand">SuperIsland</span><span class="version">已确认需求 v0.1</span>
     </header>
     <div class="intro">
       <p class="breadcrumb">设置 / 窗口增强 / 快捷功能</p>
       <h1>小动作，用快捷键完成</h1>
-      <p class="notice"><span class="notice-dot" aria-hidden="true"></span>交互草稿 · 不操作真实文件或窗口</p>
+      <p class="notice"><span class="notice-dot" aria-hidden="true"></span>交互参考 · 不操作真实文件或窗口</p>
     </div>
 
     <div class="workspace">
@@ -112,16 +112,16 @@ h1 { font-size: 21px; } .footer { padding: 12px 16px; } } @media (prefers-reduce
         </div>
 
         <section class="decision" aria-labelledby="scope-heading">
-          <div class="decision-head"><h3 id="scope-heading">第二次“打开全部”，打开哪些？</h3><span class="badge">待确认</span></div>
-          <p>两种范围可对比体验，当前选择不代表已确认。</p>
+          <div class="decision-head"><h3 id="scope-heading">第二次“打开全部”，打开哪些？</h3><span class="badge">本次已确认</span></div>
+          <p>正式实现只恢复本次收起的窗口；另一方案保留作对比参考。</p>
           <fieldset class="choices">
-            <legend class="sr-only">比较窗口恢复范围，尚待确认</legend>
-            <label class="choice"><input type="radio" name="scope" value="current" checked><span><b>只恢复本次收起的窗口</b><span class="recommended">推荐</span><small>原先已最小化的 C 窗口保持原状。</small></span></label>
-            <label class="choice"><input type="radio" name="scope" value="all"><span><b>恢复全部已最小化窗口</b><small>连同原先最小化的 C 窗口一起打开。</small></span></label>
+            <legend class="sr-only">窗口恢复范围对比，已确认采用仅恢复本次收起</legend>
+            <label class="choice"><input type="radio" name="scope" value="current" checked><span><b>只恢复本次收起的窗口</b><span class="recommended">已采用</span><small>原先已最小化的 C 窗口保持原状。</small></span></label>
+            <label class="choice"><input type="radio" name="scope" value="all"><span><b>恢复全部已最小化窗口（未采用）</b><small>连同原先最小化的 C 窗口一起打开。</small></span></label>
           </fieldset>
-          <p class="scope-note">“打开”表示恢复现有窗口，不会重新启动应用或创建窗口。切换方案会重置演示桌面。</p>
+          <p class="scope-note">“打开”表示恢复现有窗口，不会重新启动应用或创建窗口。切换只影响演示并重置桌面，不改变已确认的实现范围。</p>
         </section>
-        <p class="confirmed"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>已确认：文件范围为 Finder / 桌面，删除方式为移到废纸篓；窗口操作改为连续两次切换。</span></p>
+        <p class="confirmed"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>已确认：文件范围为 Finder / 桌面，删除方式为移到废纸篓；窗口操作改为连续两次切换，仅恢复本次收起的一批。</span></p>
       </section>
 
       <section class="demos" aria-label="虚构交互演示">
@@ -172,7 +172,7 @@ h1 { font-size: 21px; } .footer { padding: 12px 16px; } } @media (prefers-reduce
         </section>
       </section>
     </div>
-    <footer class="footer"><span>需求呈现阶段 · 尚未接入真实 App</span><span>所有文件、窗口、废纸篓均为本页演示数据</span></footer>
+    <footer class="footer"><span>已确认需求 · 原生功能尚未安装或实测</span><span>所有文件、窗口、废纸篓均为本页演示数据</span></footer>
   </main>
 
   <script>

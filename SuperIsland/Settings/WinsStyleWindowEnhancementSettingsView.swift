@@ -167,6 +167,8 @@ struct WindowEnhancementSettingsView: View {
 
             SettingSectionLabel(title: "快捷功能")
             SettingGroup {
+                finderFileTrashRow
+                SettingRowDivider()
                 dockDisplayLockRow
                 SettingRowDivider()
                 actionRow(.hideAll)
@@ -244,6 +246,27 @@ struct WindowEnhancementSettingsView: View {
             onPreview: { preview = .action(action) },
             onExit: { resetPreview(ifCurrent: .action(action)) }
         )
+    }
+
+    private var finderFileTrashRow: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(FinderFileShortcut.title)
+                    .font(.system(size: 13))
+                Text("Finder／桌面选中文件移到废纸篓，可恢复")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            ShortcutRecorderButton(targetID: FinderFileShortcut.id, preferences: preferences)
+            Toggle(FinderFileShortcut.title, isOn: $preferences.fileTrashEnabled)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 58)
+        .help("仅在 Finder 或桌面选中文件时移到废纸篓；正在重命名时不执行。快捷键与开关独立。")
+        .dataAnnotationID("window-enhancement-file-trash")
     }
 
     private var dockDisplayLockRow: some View {
@@ -493,9 +516,16 @@ private struct PreviewActionRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(action.title)
-                .font(.system(size: 13))
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(action.title)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                if action == .hideAll {
+                    Text("第一次收起全部，第二次恢复刚才收起的窗口")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
             Spacer(minLength: 24)
             ShortcutRecorderButton(targetID: action.shortcutID, preferences: preferences)
             Toggle("", isOn: $isOn)
@@ -503,7 +533,7 @@ private struct PreviewActionRow: View {
                 .toggleStyle(.switch)
         }
         .padding(.horizontal, 16)
-        .frame(height: 50)
+        .frame(height: action == .hideAll ? 58 : 50)
         .background(Color.white.opacity((hovered || focused) ? 0.025 : 0))
         .contentShape(Rectangle())
         .focusable()

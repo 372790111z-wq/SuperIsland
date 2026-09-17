@@ -164,13 +164,19 @@ enum WindowQuickAction: String, CaseIterable, Identifiable, Hashable {
         case .closeWindow: "关闭窗口"
         case .quitApp: "退出程序"
         case .dockDisplayLock: "Dock 固定到显示器"
-        case .hideAll: "隐藏所有窗口"
+        case .hideAll: "隐藏/显示所有窗口"
         case .hideOthers: "隐藏其他窗口"
         case .nextDisplay: "移动到下个显示器"
         case .previousDisplay: "移动到上个显示器"
         case .centerWindow: "窗口居中"
         }
     }
+}
+
+/// Finder file operations remain separate from window actions and their IDs.
+enum FinderFileShortcut {
+    static let id = "file.moveToTrash"
+    static let title = "快捷删除文件"
 }
 
 struct WindowEnhancementFeedbackEvent: Equatable, Identifiable {
@@ -197,6 +203,7 @@ final class WindowEnhancementPreferences: ObservableObject {
         static let missionControl = "windowEnhancement.missionControl"
         static let dockReverse = "windowEnhancement.dockReverse"
         static let cmdTabPlus = "windowEnhancement.cmdTabPlus"
+        static let fileTrash = "windowEnhancement.fileTrash"
         static let reserveStageManagerSpace = "windowEnhancement.reserveStageManagerSpace"
         static let windowSpacing = "windowEnhancement.windowSpacing"
         static let accent = "windowEnhancement.accent"
@@ -218,6 +225,7 @@ final class WindowEnhancementPreferences: ObservableObject {
     @Published var missionControlEnabled: Bool { didSet { defaults.set(missionControlEnabled, forKey: Key.missionControl) } }
     @Published var dockReverseEnabled: Bool { didSet { defaults.set(dockReverseEnabled, forKey: Key.dockReverse) } }
     @Published var cmdTabPlusEnabled: Bool { didSet { defaults.set(cmdTabPlusEnabled, forKey: Key.cmdTabPlus) } }
+    @Published var fileTrashEnabled: Bool { didSet { defaults.set(fileTrashEnabled, forKey: Key.fileTrash) } }
     @Published var reserveStageManagerSpace: Bool { didSet { defaults.set(reserveStageManagerSpace, forKey: Key.reserveStageManagerSpace) } }
     @Published var windowSpacingEnabled: Bool { didSet { defaults.set(windowSpacingEnabled, forKey: Key.windowSpacing) } }
     @Published var accentName: String { didSet { defaults.set(accentName, forKey: Key.accent) } }
@@ -230,7 +238,7 @@ final class WindowEnhancementPreferences: ObservableObject {
     /// configuration stream.
     @Published private(set) var feedbackEvent: WindowEnhancementFeedbackEvent?
 
-    private init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         defaults.register(defaults: [
             Key.enabled: true,
@@ -241,6 +249,7 @@ final class WindowEnhancementPreferences: ObservableObject {
             Key.missionControl: false,
             Key.dockReverse: false,
             Key.cmdTabPlus: false,
+            Key.fileTrash: false,
             // Do not shrink every layout by default. Users who actively use
             // Stage Manager can opt in from Advanced settings.
             Key.reserveStageManagerSpace: false,
@@ -255,6 +264,7 @@ final class WindowEnhancementPreferences: ObservableObject {
         missionControlEnabled = defaults.bool(forKey: Key.missionControl)
         dockReverseEnabled = defaults.bool(forKey: Key.dockReverse)
         cmdTabPlusEnabled = defaults.bool(forKey: Key.cmdTabPlus)
+        fileTrashEnabled = defaults.bool(forKey: Key.fileTrash)
         reserveStageManagerSpace = defaults.bool(forKey: Key.reserveStageManagerSpace)
         windowSpacingEnabled = defaults.bool(forKey: Key.windowSpacing)
         accentName = defaults.string(forKey: Key.accent) ?? "blue"
@@ -301,6 +311,7 @@ final class WindowEnhancementPreferences: ObservableObject {
             changePublisher($missionControlEnabled),
             changePublisher($dockReverseEnabled),
             changePublisher($cmdTabPlusEnabled),
+            changePublisher($fileTrashEnabled),
             changePublisher($reserveStageManagerSpace),
             changePublisher($windowSpacingEnabled),
             changePublisher($accentName),
@@ -372,7 +383,7 @@ final class WindowEnhancementPreferences: ObservableObject {
         }
         shortcuts[id] = shortcut
         persistShortcuts()
-        if let shortcut, let warning = shortcutSafetyWarning(for: shortcut) {
+        if let shortcut, let warning = shortcutSafetyWarning(for: id) {
             publishFeedback("已设置快捷键 \(shortcut.formattedDisplay)。注意：\(warning)")
         } else {
             publishFeedback(shortcut == nil ? "已清除快捷键" : "已设置快捷键 \(shortcut?.formattedDisplay ?? "")")
@@ -385,6 +396,9 @@ final class WindowEnhancementPreferences: ObservableObject {
     /// this next to the recorder without changing the existing conflict and
     /// registration rollback behavior.
     func shortcutSafetyWarning(for id: String) -> String? {
+        // The file shortcut is active only while Finder is frontmost. It does
+        // not replace this chord inside every other application.
+        guard id != FinderFileShortcut.id else { return nil }
         guard let shortcut = shortcuts[id] else { return nil }
         return shortcutSafetyWarning(for: shortcut)
     }
@@ -507,6 +521,7 @@ final class WindowEnhancementPreferences: ObservableObject {
     }
 
     private func displayName(for id: String) -> String {
+        if id == FinderFileShortcut.id { return FinderFileShortcut.title }
         if let layout = WindowLayout.allCases.first(where: { $0.shortcutID == id }) { return layout.title }
         if let action = WindowQuickAction.allCases.first(where: { $0.shortcutID == id }) { return action.title }
         return id

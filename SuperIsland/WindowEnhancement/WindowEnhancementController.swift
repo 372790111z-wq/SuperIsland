@@ -114,6 +114,9 @@ final class WindowEnhancementController {
     private let hotKeys = WindowHotKeyRegistry()
     private let feedbackPresenter = WindowEnhancementFeedbackPresenter()
     private let minimizationSessions = WindowMinimizationSessionController()
+    private lazy var fileShortcutController = FinderFileShortcutController(preferences: preferences) { [weak self] message in
+        self?.feedback(message)
+    }
     private lazy var dragInteractionMonitor = WindowDragInteractionMonitor(controller: self)
     private let dockInteractionMonitor = WindowDockInteractionMonitor()
     private let commandTabMonitor = WindowCommandTabMonitor()
@@ -187,6 +190,7 @@ final class WindowEnhancementController {
         }
         hideFeedbackWhenWindowMutationFinishes = false
         hotKeys.install()
+        fileShortcutController.start()
         reconfigureHotKeys()
         dragInteractionMonitor.start()
         dockInteractionMonitor.start()
@@ -217,6 +221,7 @@ final class WindowEnhancementController {
         preferencesCancellable?.cancel()
         preferencesCancellable = nil
         hotKeys.uninstall()
+        fileShortcutController.stop()
         dragInteractionMonitor.stop()
         dockInteractionMonitor.stop()
         commandTabMonitor.stop()
@@ -247,6 +252,7 @@ final class WindowEnhancementController {
         reconfigureWorkItem?.cancel()
         reconfigureWorkItem = nil
         hotKeys.uninstall()
+        fileShortcutController.stop()
         dragInteractionMonitor.stop()
         dockInteractionMonitor.stop()
         commandTabMonitor.stop()
@@ -273,6 +279,7 @@ final class WindowEnhancementController {
 
     func refreshSystemIntegrations() {
         reconfigureHotKeys()
+        fileShortcutController.refresh()
         commandTabMonitor.updateEnabledState()
     }
 
@@ -513,7 +520,7 @@ final class WindowEnhancementController {
         var failedRegistrations: [(target: String, shortcut: WindowShortcut)] = []
         var successfulRegistrations: [(target: String, shortcut: WindowShortcut)] = []
         if preferences.isEnabled {
-            for (target, shortcut) in shortcutSnapshot {
+            for (target, shortcut) in shortcutSnapshot where target != FinderFileShortcut.id {
                 guard shouldRegisterShortcut(target) else {
                     preferences.finishShortcutRegistration(shortcut, for: target)
                     continue
@@ -525,7 +532,7 @@ final class WindowEnhancementController {
                 }
             }
         } else {
-            for (target, shortcut) in shortcutSnapshot {
+            for (target, shortcut) in shortcutSnapshot where target != FinderFileShortcut.id {
                 preferences.finishShortcutRegistration(shortcut, for: target)
             }
         }
@@ -645,9 +652,9 @@ final class WindowEnhancementController {
         switch outcome {
         case let .minimized(_, succeeded, failed):
             if failed > 0 {
-                feedback("已隐藏 \(succeeded) 个窗口，\(failed) 个窗口不允许最小化；再次触发可恢复")
+                feedback("已收起 \(succeeded) 个窗口，\(failed) 个窗口不允许最小化；再按一次打开本批窗口")
             } else {
-                feedback("已隐藏 \(succeeded) 个窗口；再次触发可恢复")
+                feedback("已收起 \(succeeded) 个窗口；再按一次打开本批窗口")
             }
         case let .restored(_, succeeded, failed, missing):
             let unresolved = failed + missing
@@ -657,9 +664,9 @@ final class WindowEnhancementController {
                 feedback("已恢复 \(succeeded) 个窗口")
             }
         case let .nothingToMinimize(outcomeMode):
-            feedback(outcomeMode == .others ? "没有其他可隐藏窗口" : "没有可隐藏窗口")
+            feedback(outcomeMode == .others ? "没有其他可收起窗口" : "没有可收起窗口")
         case .nothingToRestore:
-            feedback("没有由 SuperIsland 隐藏的窗口可恢复")
+            feedback("没有由 SuperIsland 收起的窗口可恢复")
         case .missingFocusedWindow:
             feedback("当前 App 没有可保留的窗口")
         }
@@ -3339,6 +3346,9 @@ final class WindowEnhancementController {
     }
 
     private func shouldRegisterShortcut(_ target: String) -> Bool {
+        // File actions have a Finder-only registry; never intercept the chord
+        // globally through the window action registry.
+        if target == FinderFileShortcut.id { return false }
         if let action = WindowQuickAction.allCases.first(where: { $0.shortcutID == target }),
            !preferences.isActionEnabled(action) {
             return false
@@ -3387,11 +3397,15 @@ private final class WindowHotKeyRegistry {
     private var references: [UInt32: EventHotKeyRef] = [:]
     private var targets: [UInt32: String] = [:]
     private var nextID: UInt32 = 1
+    private var visibilityPressGate = WindowVisibilityPressGate()
     var onTrigger: ((String) -> Void)?
 
     func install() {
         guard eventHandler == nil else { return }
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        var eventTypes = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
+        ]
         InstallEventHandler(
             GetApplicationEventTarget(),
             { _, event, userData in
@@ -3412,11 +3426,21 @@ private final class WindowHotKeyRegistry {
                 }
                 let registry = Unmanaged<WindowHotKeyRegistry>.fromOpaque(userData).takeUnretainedValue()
                 guard let target = registry.targets[hotKeyID.id] else { return OSStatus(eventNotHandledErr) }
-                DispatchQueue.main.async { registry.onTrigger?(target) }
+                let id = hotKeyID.id
+                if GetEventKind(event) == UInt32(kEventHotKeyReleased) {
+                    registry.visibilityPressGate.release(id)
+                    return noErr
+                }
+                if target == WindowQuickAction.hideAll.shortcutID,
+                   !registry.visibilityPressGate.press(id) { return noErr }
+                DispatchQueue.main.async {
+                    guard registry.targets[id] == target else { return }
+                    registry.onTrigger?(target)
+                }
                 return noErr
             },
-            1,
-            &eventType,
+            eventTypes.count,
+            &eventTypes,
             Unmanaged.passUnretained(self).toOpaque(),
             &eventHandler
         )
@@ -3447,6 +3471,7 @@ private final class WindowHotKeyRegistry {
         references.values.forEach { UnregisterEventHotKey($0) }
         references.removeAll()
         targets.removeAll()
+        visibilityPressGate.reset()
     }
 
     func uninstall() {
