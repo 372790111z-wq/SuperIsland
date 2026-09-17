@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SuperIsland 文件快捷删除与隐藏/显示全部窗口的独立交互需求草稿。仅含虚构演示数据，不操作真实文件或窗口。">
+  <link rel="icon" href="data:,">
+  <title>SuperIsland · 快捷功能需求稿 v0.1</title>
+  <style>
+:root { color-scheme: dark; --bg: #101114; --panel: #1b1d22; --raised: #23262d; --soft: #2a2d35; --line: rgba(255,255,255,.095); --text: #f3f4f7; --muted: #a4aab8;
+--blue: #538dff; --green: #73d7aa; --amber: #edc580; --red: #ffa4ac; } * { box-sizing: border-box; } body { margin: 0; padding: 32px 20px; background: var(--bg); color: var(--text); font: 13px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; }
+button, input, select { font: inherit; } button, select { color: inherit; } button { cursor: pointer; } button:disabled { cursor: default; opacity: .42; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid #88b2ff; outline-offset: 3px; } input[type="checkbox"], input[type="radio"] { accent-color: var(--blue); width: 16px; height: 16px; flex: 0 0 auto; margin: 0; } h1, h2, h3, p { margin: 0; } svg { flex-shrink: 0; }
+.icon { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; } .app { max-width: 1160px; margin: 0 auto; border: 1px solid var(--line); border-radius: 17px; background: var(--panel); box-shadow: 0 24px 75px #0005; overflow: hidden; } .titlebar { display: flex; align-items: center; gap: 14px; padding: 15px 21px; border-bottom: 1px solid var(--line); } .traffic { display: flex; gap: 7px; }
+.traffic i { width: 11px; height: 11px; border-radius: 50%; background: #ff615a; } .traffic i:nth-child(2) { background: #ffc044; } .traffic i:nth-child(3) { background: #31c950; } .brand { font-weight: 600; letter-spacing: .02em; }
+.version { margin-left: auto; color: var(--muted); font-size: 11px; } .intro { padding: 24px 26px 20px; } .breadcrumb { color: var(--muted); font-size: 11px; margin-bottom: 5px; } h1 { font-size: 23px; font-weight: 650; letter-spacing: -.03em; }
+.notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: #bccbdf; font-size: 12px; } .notice-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--blue); } .workspace { display: grid; grid-template-columns: minmax(0, .96fr) minmax(0, 1.12fr); border-top: 1px solid var(--line); } .settings { padding: 23px 24px; border-right: 1px solid var(--line); min-width: 0; }
+.demos { padding: 23px 24px; background: #17191e; display: grid; gap: 22px; min-width: 0; } .section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; } .section-head h2 { font-size: 13px; font-weight: 600; } .eyebrow { color: var(--muted); font-size: 11px; }
+.setting-group { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; } .setting-row { padding: 16px; } .setting-row + .setting-row { border-top: 1px solid var(--line); } .setting-title { display: flex; align-items: center; gap: 10px; }
+.setting-title h3 { font-size: 13px; font-weight: 550; flex: 1; min-width: 0; } .setting-icon { display: grid; place-items: center; width: 29px; height: 29px; background: #37455f; color: #b8d0ff; border-radius: 8px; } .setting-icon.window { background: #3a4055; color: #c7c9ff; } .description { color: var(--muted); font-size: 11px; margin: 9px 0 12px; }
+.switch { position: relative; width: 33px; height: 20px; padding: 0; border-radius: 20px; border: 1px solid #646978; background: #555a66; flex: 0 0 auto; } .switch::after { position: absolute; top: 2px; left: 2px; content: ""; width: 14px; height: 14px; border-radius: 50%; background: white; box-shadow: 0 1px 2px #0005; transition: transform .15s; } .switch[aria-checked="true"] { border-color: var(--blue); background: var(--blue); } .switch[aria-checked="true"]::after { transform: translateX(13px); }
+.binding { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; } .binding-label { margin-right: auto; font-size: 11px; color: var(--muted); } .key-button { min-width: 104px; min-height: 31px; background: #181a20; border: 1px solid #4b505d; border-radius: 6px; font-size: 12px; padding: 4px 12px; } .key-button[aria-pressed="true"] { border-color: var(--blue); background: #233552; color: #c2d6ff; }
+.clear { display: grid; place-items: center; width: 29px; height: 29px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); } .clear:hover:not(:disabled) { background: #ffffff0b; color: white; } .micro { font-size: 10px; color: var(--muted); margin-top: 9px; } .status { font-size: 11px; color: var(--muted); margin-top: 10px; min-height: 18px; overflow-wrap: anywhere; }
+.status[data-tone="success"] { color: var(--green); } .status[data-tone="warn"] { color: var(--amber); } .status[data-tone="error"] { color: var(--red); } .how { padding: 14px 2px 21px; font-size: 11px; color: var(--muted); }
+.how p + p { margin-top: 8px; } .text-button { border: 0; background: none; padding: 0; color: #9ec1ff; font-size: 11px; text-align: left; } .text-button:hover { text-decoration: underline; } kbd { font-family: inherit; color: #d5dae4; font-size: 10px; padding: 1px 4px; border-radius: 4px; background: #ffffff0a; border: 1px solid var(--line); }
+.decision { border-top: 1px solid var(--line); padding-top: 20px; } .decision-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; flex-wrap: wrap; } .decision h3 { font-size: 12px; font-weight: 600; } .badge { display: inline-block; font-size: 10px; padding: 2px 7px; border-radius: 5px; color: var(--amber); background: #edc58010; border: 1px solid #edc58027; }
+.decision > p { font-size: 11px; color: var(--muted); } .choices { display: grid; gap: 8px; margin-top: 13px; border: 0; padding: 0; min-width: 0; } .choice { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; } .choice input { margin-top: 3px; }
+.choice:has(input:checked) { background: #538dff0c; border-color: #538dff6b; } .choice b { font-size: 12px; font-weight: 550; } .choice small { display: block; color: var(--muted); font-size: 10px; margin-top: 2px; } .recommended { font-size: 10px; color: #9ec1ff; font-weight: 400; margin-left: 5px; }
+.scope-note { margin-top: 11px; font-size: 10px; color: var(--muted); } .confirmed { display: flex; gap: 7px; margin-top: 25px; color: var(--muted); font-size: 10px; } .confirmed svg { width: 14px; height: 14px; color: var(--green); margin-top: 1px; } .demo { min-width: 0; }
+.demo .section-head { margin-bottom: 10px; } .demo .section-head h2 { font-size: 12px; } .reset { border: 0; background: transparent; color: var(--muted); font-size: 10px; padding: 3px 0 3px 8px; } .reset:hover { color: white; }
+.surface { border: 1px solid var(--line); border-radius: 11px; overflow: hidden; background: #202329; } .finder-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: #292c34; } .finder-toolbar label { font-size: 10px; color: #c2c7d2; } select { border: 1px solid #555b68; border-radius: 5px; background: #22252d; font-size: 11px; padding: 3px 22px 3px 7px; max-width: 100%; }
+.rename-toggle { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; } .rename-toggle input { width: 13px; height: 13px; } .file-heading { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); padding: 9px 12px 3px; font-size: 10px; } .file-list { min-height: 132px; padding: 3px 7px 7px; }
+.file { display: grid; grid-template-columns: 17px 21px minmax(0,1fr) auto; gap: 8px; align-items: center; min-height: 39px; border-radius: 6px; padding: 6px 7px; font-size: 11px; cursor: pointer; } .file:has(input:checked) { background: #2b4770; } .file .icon { color: #a8caff; width: 17px; height: 19px; } .file-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-size { font-size: 10px; color: #b1b8c6; } .rename-label { border: 1px solid #79aaff; padding: 1px 4px; border-radius: 3px; } .empty { color: var(--muted); font-size: 11px; padding: 42px 10px; text-align: center; } .trash { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 9px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; background: #1c1f25; }
+.trash .icon { width: 14px; height: 14px; } .trash span:nth-child(2) { margin-right: auto; } .trash-names { width: 100%; color: #bac2d0; overflow-wrap: anywhere; } .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
+.button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 31px; padding: 6px 11px; border: 1px solid #565d6c; border-radius: 7px; background: #2b2f38; font-size: 11px; } .button:hover:not(:disabled) { background: #363c47; } .button.primary { background: #417ce5; border-color: #548bee; } .button.primary:hover { background: #4f88ee; }
+.button .icon { width: 14px; height: 14px; } .action-hint { font-size: 10px; color: var(--muted); } .feedback { min-height: 33px; margin-top: 9px; font-size: 11px; color: var(--muted); line-height: 1.5; } .feedback[data-tone="success"] { color: var(--green); }
+.feedback[data-tone="warn"] { color: var(--amber); } .desktop { position: relative; height: 185px; background: radial-gradient(ellipse at 86% 80%,#32466a 0,transparent 64%), linear-gradient(128deg,#263753,#222635 70%); overflow: hidden; } .desktop-menu { height: 20px; padding: 2px 10px; font-size: 9px; color: #bcc9de; background: #1420337a; display: flex; justify-content: space-between; } .demo-window { position: absolute; width: 47%; height: 104px; border: 1px solid #737e9188; border-radius: 7px; background: #e8ebf1; color: #4d5563; box-shadow: 0 5px 16px #0003; overflow: hidden; transition: transform .25s ease, opacity .2s; }
+.demo-window[data-window="a"] { left: 6%; top: 33px; } .demo-window[data-window="b"] { left: 38%; top: 56px; } .demo-window[data-window="c"] { left: 24%; top: 43px; } .demo-window.is-minimized { transform: translate(90px,105px) scale(.12); opacity: 0; }
+.mini-title { height: 22px; background: #d1d6e0; display: flex; align-items: center; gap: 5px; padding: 0 7px; font-size: 9px; white-space: nowrap; } .mini-dot { width: 5px; height: 5px; border-radius: 50%; background: #8995a8; } .mini-title b { margin-left: 4px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; } .skeleton { padding: 13px; }
+.skeleton i { display: block; height: 4px; margin-bottom: 8px; background: #bac3d1; width: 80%; border-radius: 2px; } .skeleton i:nth-child(2) { width: 58%; } .skeleton i:nth-child(3) { width: 70%; } .desktop-label { position: absolute; bottom: 9px; left: 10px; right: 10px; text-align: center; color: #c4d0e4; font-size: 10px; }
+.window-states { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); background: #202329; border-top: 1px solid var(--line); } .window-state { padding: 8px 7px; font-size: 10px; text-align: center; min-width: 0; } .window-state + .window-state { border-left: 1px solid var(--line); } .window-state span { display: block; margin-top: 1px; color: var(--muted); font-size: 9px; }
+.window-state span[data-open="true"] { color: var(--green); } .step-tag { font-size: 10px; color: #b7ccef; background: #538dff10; padding: 2px 6px; border-radius: 4px; } .footer { padding: 13px 24px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 7px; color: var(--muted); font-size: 10px; border-top: 1px solid var(--line); } .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+[hidden] { display: none !important; } @media (max-width: 900px) { body { padding: 18px 12px; } .workspace { grid-template-columns: minmax(0,1fr); }
+.settings { border-right: 0; border-bottom: 1px solid var(--line); } .decision { padding-top: 15px; } .choices { grid-template-columns: repeat(2,minmax(0,1fr)); } .confirmed { margin-top: 16px; }
+.demos { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; } .file-size { display: none; } .file { grid-template-columns: 17px 21px minmax(0,1fr); } }
+@media (max-width: 620px) { body { padding: 10px; } .intro { padding: 20px 17px 16px; } .settings, .demos { padding: 18px 16px; }
+.demos, .choices { grid-template-columns: minmax(0,1fr); } .titlebar { padding: 13px 16px; gap: 10px; } .file-size { display: block; } .file { grid-template-columns: 17px 21px minmax(0,1fr) auto; }
+h1 { font-size: 21px; } .footer { padding: 12px 16px; } } @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+</style>
+</head>
+<body>
+  <svg aria-hidden="true" width="0" height="0" style="position:absolute;overflow:hidden">
+    <defs>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></symbol>
+      <symbol id="i-window" viewBox="0 0 24 24"><rect x="3" y="5" width="15" height="13" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v12M3 9h15"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M13 3H5v18h14V9zM13 3v6h6M8 13h8M8 17h6"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="m9 5 10 7-10 7z"/></symbol>
+    </defs>
+  </svg>
+
+  <main class="app">
+    <header class="titlebar">
+      <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+      <span class="brand">SuperIsland</span><span class="version">需求草稿 v0.1</span>
+    </header>
+    <div class="intro">
+      <p class="breadcrumb">设置 / 窗口增强 / 快捷功能</p>
+      <h1>小动作，用快捷键完成</h1>
+      <p class="notice"><span class="notice-dot" aria-hidden="true"></span>交互草稿 · 不操作真实文件或窗口</p>
+    </div>
+
+    <div class="workspace">
+      <section class="settings" aria-labelledby="settings-heading">
+        <div class="section-head"><h2 id="settings-heading">快捷功能</h2><span class="eyebrow">沿用现有设置入口</span></div>
+        <div class="setting-group">
+          <section class="setting-row" aria-labelledby="file-setting-title">
+            <div class="setting-title">
+              <span class="setting-icon" aria-hidden="true"><svg class="icon"><use href="#i-trash"/></svg></span>
+              <h3 id="file-setting-title">快捷删除文件</h3>
+              <button type="button" class="switch" id="file-enabled" role="switch" aria-checked="false" aria-label="启用快捷删除文件"></button>
+            </div>
+            <p class="description">将 Finder 或桌面选中的文件移到废纸篓，可恢复。</p>
+            <div class="binding">
+              <span class="binding-label">快捷键</span>
+              <button type="button" class="key-button" id="record-file" aria-pressed="false" aria-label="录入文件删除快捷键" aria-describedby="record-help file-setting-status">点击录入</button>
+              <button type="button" class="clear" id="clear-file" aria-label="清除文件删除快捷键" disabled><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+            </div>
+            <p class="status" id="file-setting-status" role="status">未设置快捷键 · 功能关闭</p>
+          </section>
+          <section class="setting-row" aria-labelledby="window-setting-title">
+            <div class="setting-title">
+              <span class="setting-icon window" aria-hidden="true"><svg class="icon"><use href="#i-window"/></svg></span>
+              <h3 id="window-setting-title">隐藏/显示所有窗口</h3>
+              <button type="button" class="switch" id="window-enabled" role="switch" aria-checked="true" aria-label="启用隐藏或显示所有窗口"></button>
+            </div>
+            <p class="description">第一次按“收起全部”，第二次按“打开全部”。</p>
+            <div class="binding">
+              <span class="binding-label">快捷键</span>
+              <button type="button" class="key-button" id="record-window" aria-pressed="false" aria-label="录入隐藏或显示所有窗口快捷键" aria-describedby="record-help window-setting-status">⌘ D</button>
+              <button type="button" class="clear" id="clear-window" aria-label="清除隐藏或显示所有窗口快捷键"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+            </div>
+            <p class="status" id="window-setting-status" role="status">沿用现有绑定 ⌘ D · 演示开启</p>
+          </section>
+        </div>
+        <div class="how" id="record-help">
+          <p>点击录入后按组合键，至少含一个修饰键。<kbd>Esc</kbd> 取消，单按 <kbd>Delete</kbd> 清除。设置快捷键不会自动开启功能。</p>
+          <p>也可 <button type="button" class="text-button" id="sample-binding">填入演示键 ⌃ ⇧ D</button>，再开启右上方开关。右侧用“模拟触发”体验，无需按真实快捷键。</p>
+          <p>绑定只保存在本页，刷新后重置。仅检查这两项演示绑定的冲突。</p>
+        </div>
+
+        <section class="decision" aria-labelledby="scope-heading">
+          <div class="decision-head"><h3 id="scope-heading">第二次“打开全部”，打开哪些？</h3><span class="badge">待确认</span></div>
+          <p>两种范围可对比体验，当前选择不代表已确认。</p>
+          <fieldset class="choices">
+            <legend class="sr-only">比较窗口恢复范围，尚待确认</legend>
+            <label class="choice"><input type="radio" name="scope" value="current" checked><span><b>只恢复本次收起的窗口</b><span class="recommended">推荐</span><small>原先已最小化的 C 窗口保持原状。</small></span></label>
+            <label class="choice"><input type="radio" name="scope" value="all"><span><b>恢复全部已最小化窗口</b><small>连同原先最小化的 C 窗口一起打开。</small></span></label>
+          </fieldset>
+          <p class="scope-note">“打开”表示恢复现有窗口，不会重新启动应用或创建窗口。切换方案会重置演示桌面。</p>
+        </section>
+        <p class="confirmed"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>已确认：文件范围为 Finder / 桌面，删除方式为移到废纸篓；窗口操作改为连续两次切换。</span></p>
+      </section>
+
+      <section class="demos" aria-label="虚构交互演示">
+        <section class="demo" aria-labelledby="finder-heading">
+          <div class="section-head"><h2 id="finder-heading">01 · 文件演示</h2><button type="button" class="reset" id="reset-files">重置文件</button></div>
+          <div class="surface">
+            <div class="finder-toolbar">
+              <label for="file-context">当前前台</label>
+              <select id="file-context"><option value="finder">Finder</option><option value="desktop">桌面</option><option value="other">其他应用</option></select>
+              <label class="rename-toggle"><input type="checkbox" id="renaming">正在重命名</label>
+            </div>
+            <div class="file-heading"><span id="folder-label">演示文件夹 · 全部为虚构文件</span><button type="button" class="text-button" id="deselect-all">取消选择</button></div>
+            <div class="file-list" id="file-list" aria-label="选择演示文件"></div>
+            <div class="trash">
+              <svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg><span id="trash-count">演示废纸篓 · 0 项</span>
+              <button type="button" class="text-button" id="undo-delete" disabled>撤销上次删除</button>
+              <span class="trash-names" id="trash-names" hidden></span>
+            </div>
+          </div>
+          <div class="actions">
+            <button type="button" class="button primary" id="trigger-file"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>模拟触发删除</button>
+            <span class="action-hint" id="file-trigger-hint">先设置快捷键并开启功能</span>
+          </div>
+          <p class="feedback" id="file-feedback" role="status" aria-live="polite">试选一项或多项文件，再模拟触发。也可切换前台与重命名状态。</p>
+        </section>
+
+        <section class="demo" aria-labelledby="windows-heading">
+          <div class="section-head"><h2 id="windows-heading">02 · 窗口演示</h2><button type="button" class="reset" id="reset-windows">重置桌面</button></div>
+          <div class="surface">
+            <div class="desktop" aria-label="模拟桌面，窗口状态见下方文字">
+              <div class="desktop-menu" aria-hidden="true"><span>演示桌面</span><span>SuperIsland</span></div>
+              <div class="demo-window" data-window="a" aria-hidden="true"><div class="mini-title"><i class="mini-dot"></i><i class="mini-dot"></i><b>A · Finder</b></div><div class="skeleton"><i></i><i></i><i></i></div></div>
+              <div class="demo-window" data-window="b" aria-hidden="true"><div class="mini-title"><i class="mini-dot"></i><i class="mini-dot"></i><b>B · 备忘录</b></div><div class="skeleton"><i></i><i></i><i></i></div></div>
+              <div class="demo-window is-minimized" data-window="c" aria-hidden="true"><div class="mini-title"><i class="mini-dot"></i><i class="mini-dot"></i><b>C · 浏览器</b></div><div class="skeleton"><i></i><i></i><i></i></div></div>
+              <p class="desktop-label" id="desktop-label">A、B 已打开；C 原先已最小化</p>
+            </div>
+            <div class="window-states" aria-live="polite">
+              <div class="window-state">A · Finder<span id="state-a" data-open="true">已打开</span></div>
+              <div class="window-state">B · 备忘录<span id="state-b" data-open="true">已打开</span></div>
+              <div class="window-state">C · 浏览器<span id="state-c" data-open="false">原先已最小化</span></div>
+            </div>
+          </div>
+          <div class="actions">
+            <button type="button" class="button primary" id="trigger-window"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>模拟触发</button>
+            <span class="step-tag" id="window-next-action">下一次：收起全部</span>
+          </div>
+          <p class="feedback" id="window-feedback" role="status" aria-live="polite">连续点击两次：先收起 A、B，再恢复 A、B；C 保持最小化。</p>
+        </section>
+      </section>
+    </div>
+    <footer class="footer"><span>需求呈现阶段 · 尚未接入真实 App</span><span>所有文件、窗口、废纸篓均为本页演示数据</span></footer>
+  </main>
+
+  <script>
+'use strict'; const $ = id => document.getElementById(id);
+const state = { bindings: { file: null, window: { code: 'KeyD', label: 'D', meta: true, ctrl: false, alt: false, shift: false } },
+enabled: { file: false, window: true }, recording: null,
+files: [], trash: [], history: [], openWindows: new Set(['a', 'b']), hiddenThisTime: new Set(), collapsed: false, scope: 'current'
+}; const names = { file: '快捷删除文件', window: '隐藏/显示所有窗口' };
+const initialFiles = [ { id: 'plan', name: '计划草稿.md', size: '4 KB', selected: true },
+{ id: 'image', name: '示意图片.png', size: '128 KB', selected: true }, { id: 'list', name: '物品清单.txt', size: '2 KB', selected: false }
+]; const modifierKeys = new Set(['Meta', 'Control', 'Alt', 'Shift', 'CapsLock']);
+const labels = { Backspace: 'Backspace', Delete: 'Delete', ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓', Space: 'Space', Enter: 'Return', Tab: 'Tab', Minus: '−', Equal: '=' }; function setMessage(id, text, tone = '') {
+$(id).textContent = text; $(id).dataset.tone = tone;
+} function shortcutText(binding) {
+if (!binding) return '点击录入'; return [binding.ctrl && '⌃', binding.alt && '⌥', binding.shift && '⇧', binding.meta && '⌘', binding.label].filter(Boolean).join(' ');
+} function sameShortcut(a, b) {
+return !!a && !!b && ['code','meta','ctrl','alt','shift'].every(key => a[key] === b[key]); }
+function updateBindingControls() { for (const key of ['file', 'window']) {
+const active = state.recording === key; $('record-' + key).textContent = active ? '按下组合键…' : shortcutText(state.bindings[key]);
+$('record-' + key).setAttribute('aria-pressed', String(active)); $('clear-' + key).disabled = !state.bindings[key] && !active;
+$(key + '-enabled').setAttribute('aria-checked', String(state.enabled[key])); }
+$('file-trigger-hint').textContent = !state.bindings.file ? '先设置快捷键并开启功能' : !state.enabled.file ? '快捷键已设置 · 功能关闭' : shortcutText(state.bindings.file) + ' · 仅演示'; }
+function bindingStatus(key, message, tone = '') { const standard = (state.bindings[key] ? '已设置 ' + shortcutText(state.bindings[key]) : '未设置快捷键') + ' · 功能' + (state.enabled[key] ? '开启' : '关闭');
+setMessage(key + '-setting-status', message || standard, tone); }
+function stopRecording(message) { const previous = state.recording;
+state.recording = null; updateBindingControls();
+if (previous) bindingStatus(previous, message); }
+function record(key) { if (state.recording === key) { stopRecording('已取消录入，原绑定保留。'); return; }
+if (state.recording) stopRecording('已取消录入，原绑定保留。'); state.recording = key;
+updateBindingControls(); bindingStatus(key, '正在录入：按组合键；Esc 取消，Delete 清除。');
+} function clearBinding(key) {
+if (state.recording) stopRecording(); state.bindings[key] = null;
+updateBindingControls(); bindingStatus(key, '已清除快捷键，开关状态保持不变。');
+} function saveBinding(key, binding) {
+const other = key === 'file' ? 'window' : 'file'; if (sameShortcut(binding, state.bindings[other])) {
+bindingStatus(key, '快捷键冲突：' + shortcutText(binding) + ' 已绑定“' + names[other] + '”。请换一个组合键。', 'error'); return false;
+} state.bindings[key] = binding;
+state.recording = null; updateBindingControls();
+bindingStatus(key, '已设置 ' + shortcutText(binding) + '，功能' + (state.enabled[key] ? '保持开启。' : '仍关闭，请按需开启。'), 'success'); return true;
+} function handleRecordingKey(event) {
+if (!state.recording || event.isComposing) return; event.preventDefault();
+event.stopPropagation(); const key = state.recording;
+if (event.key === 'Escape') { stopRecording('已取消录入，原绑定保留。'); return; } if (modifierKeys.has(event.key)) return;
+const modified = event.metaKey || event.ctrlKey || event.altKey || event.shiftKey; if ((event.key === 'Backspace' || event.key === 'Delete') && !modified) { clearBinding(key); return; }
+if (!modified) { bindingStatus(key, '请至少加一个修饰键：⌘、⌃、⌥ 或 ⇧。', 'warn'); return; } if (!event.code || event.key === 'Unidentified' || event.key === 'Dead') { bindingStatus(key, '未识别这个按键，请换一个组合键。', 'warn'); return; }
+const label = labels[event.code] || (/^Key[A-Z]$/.test(event.code) ? event.code.slice(3) : /^Digit\d$/.test(event.code) ? event.code.slice(5) : event.key.toUpperCase()); saveBinding(key, { code: event.code, label, meta: event.metaKey, ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey });
+} function checkReady(key, feedbackID) {
+if (state.recording) { setMessage(feedbackID, '请先完成或取消快捷键录入。', 'warn'); return false; } if (!state.enabled[key]) { setMessage(feedbackID, '功能尚未开启。开启左侧开关后再模拟触发，现有设置不会改变。', 'warn'); return false; }
+if (!state.bindings[key]) { setMessage(feedbackID, '尚未设置快捷键。请先在左侧录入，或为文件功能填入演示键。', 'warn'); return false; } return true;
+} function renderFiles() {
+const list = $('file-list'); list.replaceChildren();
+if (!state.files.length) { const empty = document.createElement('p');
+empty.className = 'empty'; empty.textContent = '演示文件夹已空，可撤销删除或重置文件。';
+list.append(empty); }
+state.files.forEach((file, index) => { const label = document.createElement('label');
+label.className = 'file'; const input = document.createElement('input');
+input.type = 'checkbox'; input.checked = file.selected; input.setAttribute('aria-label', '选择演示文件 ' + file.name);
+input.addEventListener('change', () => { file.selected = input.checked; updateSelection(); }); const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+svg.setAttribute('class', 'icon'); svg.setAttribute('aria-hidden', 'true'); const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+use.setAttribute('href', '#i-file'); svg.append(use); const title = document.createElement('span'); title.className = 'file-name'; title.textContent = file.name;
+if ($('renaming').checked && index === 0) { title.classList.add('rename-label'); title.title = '模拟名称编辑状态'; } const size = document.createElement('span'); size.className = 'file-size'; size.textContent = file.size;
+label.append(input, svg, title, size); list.append(label); });
+$('trash-count').textContent = '演示废纸篓 · ' + state.trash.length + ' 项'; $('trash-names').textContent = state.trash.map(file => file.name).join('、');
+$('trash-names').hidden = !state.trash.length; $('undo-delete').disabled = !state.history.length;
+updateSelection(); }
+function updateSelection() { $('deselect-all').disabled = !state.files.some(file => file.selected);
+} function resetFiles() {
+state.files = initialFiles.map(file => ({ ...file })); state.trash = []; state.history = []; $('file-context').value = 'finder'; $('renaming').checked = false;
+$('folder-label').textContent = '演示文件夹 · 全部为虚构文件'; renderFiles();
+setMessage('file-feedback', '已重置虚构文件；快捷键和功能开关保持原样。'); }
+function triggerFile() { if (!checkReady('file', 'file-feedback')) return;
+if ($('file-context').value === 'other') { setMessage('file-feedback', '当前不是 Finder 或桌面，不执行文件删除。', 'warn'); return; } if ($('renaming').checked) { setMessage('file-feedback', '正在编辑文件名称，不触发快捷删除；演示文件保持原样。', 'warn'); return; }
+const selected = state.files.filter(file => file.selected); if (!selected.length) { setMessage('file-feedback', '没有选中文件，本次不执行。请先勾选一项或多项。', 'warn'); return; }
+state.history.push(selected.map(file => ({ ...file }))); state.trash.push(...selected.map(file => ({ ...file, selected: false })));
+state.files = state.files.filter(file => !file.selected); renderFiles();
+setMessage('file-feedback', '已将 ' + selected.length + ' 个虚构文件移到演示废纸篓。可撤销本次删除。', 'success'); }
+function undoDelete() { const last = state.history.pop();
+if (!last) return; const restoredIDs = new Set(last.map(file => file.id));
+state.trash = state.trash.filter(file => !restoredIDs.has(file.id)); state.files.push(...last.map(file => ({ ...file, selected: false })));
+state.files.sort((a,b) => initialFiles.findIndex(file => file.id === a.id) - initialFiles.findIndex(file => file.id === b.id)); renderFiles();
+setMessage('file-feedback', '已恢复上次删除的 ' + last.length + ' 个虚构文件，回到原演示文件夹。', 'success'); }
+function renderWindows() { for (const key of ['a','b','c']) {
+const open = state.openWindows.has(key); document.querySelector('[data-window="' + key + '"]').classList.toggle('is-minimized', !open);
+$('state-' + key).textContent = open ? '已打开' : state.hiddenThisTime.has(key) ? '本次已收起' : key === 'c' ? '原先已最小化' : '已最小化'; $('state-' + key).dataset.open = String(open);
+} $('desktop-label').textContent = state.openWindows.size ? '当前显示 ' + [...state.openWindows].map(key => key.toUpperCase()).join('、') + ' 窗口' : '窗口已收起，桌面腾出来了';
+$('window-next-action').textContent = '下一次：' + (state.collapsed ? '打开全部' : '收起全部'); }
+function resetWindows(message) { state.openWindows = new Set(['a','b']); state.hiddenThisTime = new Set(); state.collapsed = false;
+renderWindows(); setMessage('window-feedback', message || (state.scope === 'current' ? '连续点击两次：先收起 A、B，再恢复 A、B；C 保持最小化。' : '连续点击两次：先收起 A、B，再恢复 A、B、C；包含原先最小化的 C。'));
+} function triggerWindow() {
+if (!checkReady('window', 'window-feedback')) return; if (!state.collapsed) {
+state.hiddenThisTime = new Set(state.openWindows); const count = state.openWindows.size;
+state.openWindows.clear(); state.collapsed = true; renderWindows();
+setMessage('window-feedback', '收起全部：本次收起 ' + count + ' 扇演示窗口。再按一次“打开全部”。', 'success'); } else {
+state.openWindows = new Set(state.scope === 'all' ? ['a','b','c'] : state.hiddenThisTime); state.hiddenThisTime.clear(); state.collapsed = false;
+renderWindows(); setMessage('window-feedback', state.scope === 'current' ? '打开全部：已恢复本次收起的 A、B；原先已最小化的 C 保持原状。' : '打开全部：已恢复 A、B、C，包括原先已最小化的 C。', 'success');
+} }
+for (const key of ['file','window']) { $('record-' + key).addEventListener('click', () => record(key));
+$('clear-' + key).addEventListener('click', () => clearBinding(key)); $(key + '-enabled').addEventListener('click', () => {
+if (state.recording) stopRecording(); state.enabled[key] = !state.enabled[key]; updateBindingControls(); bindingStatus(key);
+}); }
+document.addEventListener('keydown', handleRecordingKey, true); window.addEventListener('blur', () => { if (state.recording) stopRecording('页面已失去焦点，取消本次录入，原绑定保留。'); });
+$('sample-binding').addEventListener('click', () => { if (state.recording) stopRecording();
+saveBinding('file', { code: 'KeyD', label: 'D', meta: false, ctrl: true, alt: false, shift: true }); });
+$('trigger-file').addEventListener('click', triggerFile); $('undo-delete').addEventListener('click', undoDelete);
+$('reset-files').addEventListener('click', resetFiles); $('deselect-all').addEventListener('click', () => { state.files.forEach(file => file.selected = false); renderFiles(); setMessage('file-feedback', '已取消全部选择，可测试“未选中文件”的情况。'); });
+$('file-context').addEventListener('change', () => { const context = $('file-context').value;
+$('folder-label').textContent = context === 'desktop' ? '演示桌面 · 全部为虚构文件' : context === 'other' ? '演示选区保留 · 当前不在 Finder' : '演示文件夹 · 全部为虚构文件'; setMessage('file-feedback', context === 'other' ? '已模拟其他应用在前台，点击“模拟触发删除”可检查不执行状态。' : '当前模拟前台为' + (context === 'desktop' ? '桌面。' : ' Finder。'));
+}); $('renaming').addEventListener('change', () => { renderFiles(); setMessage('file-feedback', $('renaming').checked ? '已进入模拟重命名状态；快捷删除应暂停。' : '已结束模拟重命名，可以再次测试删除。'); });
+$('trigger-window').addEventListener('click', triggerWindow); $('reset-windows').addEventListener('click', () => resetWindows('已恢复初始桌面：A、B 打开，C 原先已最小化。'));
+document.querySelectorAll('input[name="scope"]').forEach(radio => radio.addEventListener('change', () => { state.scope = radio.value; resetWindows(); })); state.files = initialFiles.map(file => ({ ...file })); renderFiles(); updateBindingControls(); renderWindows();
+</script>
+</body>
+</html>
