@@ -29,7 +29,7 @@
 
 本机日志位于 `build/FileShortcutsValidation/`：`build-command.json`、`build-incremental.log`、`analyze-command.json`、`analyze.log`、`logic-tests.log`；无宿主测试包及源文件哈希在 `LogicTests/`。这些是本地构建证据，不是安装/实机验收记录。
 
-## 当前生效状态与待验收
+## 实现阶段结束时的状态与待验收
 
 当前仍运行 `/Applications/SuperIsland-WE1-Debug.app`，版本 `20260916171017`；本次没有替换、重启或修改其权限。没有操作真实文件、窗口、鼠标或前台应用。旧 371 项 hosted XCTest 本轮未运行，不能借用旧结果作为新版本验收。
 
@@ -42,3 +42,17 @@
 5. 回归稳定版本已确认的 Cmd-Tab 首次点击/退出、Dock 预览、调度中心关闭与 Chrome 全屏移屏。
 
 代码、构建和逻辑测试完成不等于新功能已经在当前运行 App 生效。
+
+## 2026-09-17 安装记录
+
+用户随后明确要求“安装”。已从代码提交 `73ec0ad` 的当前 DerivedData 产物打包，使用与旧版相同的 `SuperIsland WE1 Debug Local Code Signing` 证书和稳定 designated requirement。
+
+- 已安装并启动：`/Applications/SuperIsland-WE1-Debug.app`，构建号 `20260917182138`，PID `38125`。
+- 原稳定版 `20260916171017` 已备份至 `build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-171017-before-182138.app`；101 项文件/符号链接及模式与原安装版一致。
+- 旧 PID `91579` 经 WE1 正常退出处理完成，未强制结束；旧进程事件 tap 已归零。
+- 候选暂存与安装目录的 101 项清单一致，签名严格验证通过；运行进程确实加载安装目录内的新 `SuperIsland.debug.dylib`。
+- 原始源载荷指纹：`f0823affcd051b4e377bd7a24a0f3fee2d277592c7aae0454eca89aa864d7b75`。未更换签名身份、bundle ID、用户配置或隐私授权。
+- 安装器没有开启文件功能或填写快捷键；只读回读时该功能开关已为开启状态，保持用户当前设置。
+- 安装元数据、清单、运行载荷及事件 tap 证据保存在 `build/FileShortcutsValidation/installation.json` 等文件中。
+
+本次仅完成安装和启动核验，未代替用户操作文件、鼠标或进行全局快捷键测试。上方各项实机验收仍待完成。
