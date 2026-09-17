@@ -79,6 +79,9 @@ final class WindowDragInteractionMonitor {
     private var islandExpansionGeneration: UInt64 = 0
     private var pendingIslandExpansion: DispatchWorkItem?
     private var isApplyingLinkedResize = false
+    private var isSuppressingMainIslandHover = false
+    private var releaseRecoveryTimer: Timer?
+    private var releaseRecovery = WindowDragReleaseRecovery()
 
     private enum MonitoredMouseEvent: Sendable {
         case down
@@ -167,10 +170,7 @@ final class WindowDragInteractionMonitor {
 
     func stop() {
         removeMonitor()
-        cancelPendingIslandExpansion()
-        dragSequenceGeneration &+= 1
-        preview.hide()
-        dragState = nil
+        cancelDrag()
     }
 
     func updateEnabledState() {
@@ -236,9 +236,7 @@ final class WindowDragInteractionMonitor {
     }
 
     private func beginDrag(at mouseLocation: CGPoint) {
-        cancelPendingIslandExpansion()
-        dragSequenceGeneration &+= 1
-        preview.hide()
+        cancelDrag()
         guard AXIsProcessTrusted() else {
             controller?.reportAccessibilityRequirement()
             dragState = nil
@@ -282,6 +280,7 @@ final class WindowDragInteractionMonitor {
         )
         if sizeDelta >= Self.resizeDetectionTolerance {
             state.isResizingWindow = true
+            setMainIslandHoverSuppressed(false)
             cancelPendingIslandExpansion()
             state.islandPhase = .inactive
             state.islandDisplayID = nil
@@ -315,6 +314,10 @@ final class WindowDragInteractionMonitor {
             dragState = state
             return
         }
+
+        // Mouse movement alone also includes file drags and text selection.
+        // Begin only after this exact window has actually moved.
+        setMainIslandHoverSuppressed(true)
 
         if preferences.aeroShakeEnabled {
             detectShake(mouseLocation: mouseLocation, state: &state)
@@ -351,6 +354,7 @@ final class WindowDragInteractionMonitor {
     }
 
     private func endDrag(at releaseLocation: CGPoint) {
+        defer { setMainIslandHoverSuppressed(false) }
         guard let state = dragState else { return }
         // The island expands asynchronously and intentionally clears the old
         // candidate. A user can therefore release over a card without another
@@ -380,6 +384,36 @@ final class WindowDragInteractionMonitor {
         dragSequenceGeneration &+= 1
         dragState = nil
         preview.hide()
+        setMainIslandHoverSuppressed(false)
+    }
+
+    private func setMainIslandHoverSuppressed(_ suppressed: Bool) {
+        guard isSuppressingMainIslandHover != suppressed else { return }
+        isSuppressingMainIslandHover = suppressed
+        releaseRecoveryTimer?.invalidate()
+        releaseRecoveryTimer = nil
+        releaseRecovery.reset()
+        AppState.shared.setWindowDragging(suppressed)
+        guard suppressed else { return }
+
+        let generation = dragSequenceGeneration
+        // A global AppKit monitor can miss a release delivered to our own app.
+        // Recover only after the physical button stays released; long drags
+        // must never expire. The grace period lets a queued mouseUp commit first.
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isSuppressingMainIslandHover,
+                      self.dragSequenceGeneration == generation else { return }
+                if self.releaseRecovery.shouldCancel(
+                    buttonIsDown: NSEvent.pressedMouseButtons & 1 != 0,
+                    now: ProcessInfo.processInfo.systemUptime
+                ) {
+                    self.cancelDrag()
+                }
+            }
+        }
+        releaseRecoveryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func updateLinkedResize(currentPrimaryFrame: CGRect, state: inout DragState) {
@@ -708,10 +742,7 @@ final class WindowDragInteractionMonitor {
             state.shakeDirections.append(direction)
         }
         guard state.shakeDirections.count >= 5 else { return }
-        cancelPendingIslandExpansion()
-        dragSequenceGeneration &+= 1
-        preview.hide()
-        dragState = nil
+        cancelDrag()
         controller?.performAeroShake()
     }
 

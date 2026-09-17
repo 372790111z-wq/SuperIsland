@@ -87,7 +87,6 @@ struct IslandContainerView: View {
         }
         .onReceive(hoverValidationTimer) { _ in
             guard contentMode == .production else { return }
-            guard appState.isHovering || appState.currentState != .compact else { return }
             validateHoverState()
         }
         .onReceive(windowEnhancementPreferences.$feedbackEvent.compactMap { $0 }) { event in
@@ -591,7 +590,7 @@ struct IslandContainerView: View {
     // MARK: - Hover
 
     private func setIslandSurfaceHover(_ hovering: Bool) {
-        guard isHoveringIslandSurface != hovering else { return }
+        guard isHoveringIslandSurface != hovering || appState.isWindowDragHoverSuppressed else { return }
         isHoveringIslandSurface = hovering
         syncHoverState()
     }
@@ -608,10 +607,10 @@ struct IslandContainerView: View {
 
     private func setCycleButtonHover(_ hovering: Bool, forward: Bool) {
         if forward {
-            guard isHoveringNextButton != hovering else { return }
+            guard isHoveringNextButton != hovering || appState.isWindowDragHoverSuppressed else { return }
             isHoveringNextButton = hovering
         } else {
-            guard isHoveringPreviousButton != hovering else { return }
+            guard isHoveringPreviousButton != hovering || appState.isWindowDragHoverSuppressed else { return }
             isHoveringPreviousButton = hovering
         }
         syncHoverState()
@@ -624,9 +623,12 @@ struct IslandContainerView: View {
     }
 
     private func validateHoverState() {
-        guard appState.isHovering else { return }
-        let islandPanels = NSApp.windows.compactMap { $0 as? IslandPanel }
-        guard !islandPanels.isEmpty else { return }
+        // AppState intentionally clears its public hover while dragging. Still
+        // reconcile the view's local flags so a missed exit cannot leave the
+        // post-drag hover gate waiting forever (including a removed display).
+        guard appState.isHovering || appState.isWindowDragHoverSuppressed ||
+                isHoveringIslandSurface || isHoveringPreviousButton || isHoveringNextButton else { return }
+        let islandPanels = NSApp.windows.compactMap { $0 as? IslandPanel }.filter(\.isVisible)
 
         let pointerLocation = NSEvent.mouseLocation
         // Multi-display: hover is valid if the pointer is over ANY island.
