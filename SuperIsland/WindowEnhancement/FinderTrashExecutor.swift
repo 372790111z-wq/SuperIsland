@@ -37,6 +37,7 @@ struct FinderTrashFocusNode: Equatable {
     var subrole: String? = nil
     var editable: Bool? = nil
     var modal: Bool? = nil
+    var selectedChildrenCount: Int? = nil
 }
 
 enum FinderTrashFocusPolicy {
@@ -52,7 +53,8 @@ enum FinderTrashFocusPolicy {
         "AXGroup", "AXSplitGroup", "AXWindow", "AXApplication"
     ]
 
-    static func selectionAttributes(for role: String?) -> [String] {
+    static func selectionAttributes(for role: String?, isFocused: Bool = false) -> [String] {
+        if role == "AXGroup", isFocused { return ["AXSelectedChildren"] }
         guard let role, contentRoles.contains(role) else { return [] }
         return role == "AXOutline" || role == "AXTable"
             ? ["AXSelectedChildren", "AXSelectedRows"] : ["AXSelectedChildren"]
@@ -61,10 +63,17 @@ enum FinderTrashFocusPolicy {
     /// The path must be complete, from the focused content/item to the exact
     /// Finder application root. A text editor nested in a file list is unsafe.
     static func allows(_ path: [FinderTrashFocusNode], reachesFinderRoot: Bool) -> Bool {
+        // Finder exposes selected desktop icons through a focused group, not
+        // through a list or the individual image. Only this exact root path,
+        // with a readable nonempty selection, can qualify as desktop content.
+        let isSelectedDesktopGroup = path.count == 3 &&
+            path.map(\.role) == ["AXGroup", "AXScrollArea", "AXApplication"] &&
+            path.allSatisfy { $0.modal == false } &&
+            path[0].selectedChildrenCount.map { $0 > 0 && $0 <= FinderTrashSelectionPolicy.maximumItems } == true
         guard reachesFinderRoot, !path.isEmpty, path.count <= maximumDepth,
               path.last?.role == "AXApplication",
               let firstRole = path.first?.role,
-              contentRoles.contains(firstRole) || itemRoles.contains(firstRole),
+              contentRoles.contains(firstRole) || itemRoles.contains(firstRole) || isSelectedDesktopGroup,
               path.contains(where: { $0.role.map(contentRoles.contains) == true }) else {
             return false
         }
@@ -76,6 +85,9 @@ enum FinderTrashFocusPolicy {
             if role == "AXWindow" {
                 guard node.subrole == "AXStandardWindow", node.modal == false else { return false }
             } else if let subrole = node.subrole, !subrole.isEmpty, subrole != "AXUnknown" {
+                // Finder's native file collection uses this exact role pair.
+                // Other named subroles still cannot authorize a file command.
+                if role == "AXList", subrole == "AXCollectionList" { continue }
                 // Unknown special-purpose controls cannot authorize deletion.
                 return false
             }
@@ -340,9 +352,13 @@ final class FinderTrashExecutor {
                 subrole: FinderTrashAttributePolicy.string(values[1]),
                 editable: FinderTrashAttributePolicy.boolean(values[2]),
                 modal: FinderTrashAttributePolicy.boolean(values[3])))
-            for name in FinderTrashFocusPolicy.selectionAttributes(for: nodes.last?.role) {
+            for name in FinderTrashFocusPolicy.selectionAttributes(for: nodes.last?.role,
+                                                                   isFocused: nodes.count == 1) {
                 let selection = try selectedElements(name, of: current, expectedPID: expectedPID,
                                                      deadline: deadline, isCurrent: isCurrent)
+                if name == "AXSelectedChildren" {
+                    nodes[nodes.count - 1].selectedChildrenCount = selection?.count
+                }
                 selections.append(SelectionEvidence(pathIndex: nodes.count - 1,
                                                      attribute: name, elements: selection))
             }
