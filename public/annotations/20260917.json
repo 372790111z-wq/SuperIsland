@@ -1,0 +1,310 @@
+{
+  "version": "20260917",
+  "generatedAt": "2026-09-17",
+  "subproject": "/Users/muyz/Projects/new super island/worktrees/we1-file-shortcuts",
+  "taskType": "A",
+  "requirements": [
+    {
+      "id": "TR1",
+      "title": "Textream语音跟读Teleprompter融合",
+      "taskType": "A",
+      "prdPath": "docs/product-package/01-Textream语音跟读Teleprompter融合PRD-TR1.md",
+      "fullPrdContent": "# Textream 语音跟读 Teleprompter 融合 PRD-TR1\n\n## 基本信息\n\n- 子项目：SuperIsland\n- 归属：Productivity / Teleprompter\n- 任务类型：A 新需求\n- 标注版本：20260607\n- 需求来源：将 f/textream 的语音跟读能力融合到 SuperIsland 现有 Teleprompter 模块\n- 授权说明：本需求会参考并迁移 f/textream 的 MIT 许可能力，后续 PR 描述中保留 Textream attribution\n\n## 本次范围\n\n本次只做 MVP 融合：保留 SuperIsland 现有 notch/island 窗口系统和 Teleprompter 入口，在现有 Teleprompter 模块中新增 Classic 定速滚动与 Word Tracking 语音跟读两种模式。暂不纳入 PPTX notes 导入、Director Mode、远程浏览器控制、外接屏/Sidecar 输出、Textream 独立主窗口、Textream URL scheme 和 Textream 文件格式。\n\n## 功能点 1：启用 Teleprompter 时完成语音权限预授权\n\n### 1. 业务目的\n\n让用户在打开 Teleprompter 能力时提前完成语音跟读所需的权限准备，避免开始朗读后才被权限弹窗打断。该功能解决的是 Word Tracking 首次使用体验断裂的问题：用户启用模块后，系统应立即引导其完成麦克风与 Speech Recognition 授权，后续播放时直接进入倒计时或朗读状态。\n\n### 2. 使用者\n\n使用者是开启 SuperIsland Teleprompter 的 Mac 用户，尤其是直播、演示、录课、访谈和播客场景中需要跟读脚本的人。适用角色包括普通使用者、演示者、主播和内容创作者。不适用角色是未启用 Teleprompter 模块、只使用 Battery/Now Playing/Calendar 等其他模块的用户。\n\n### 3. 触发\n\n触发页面是 Settings 的 Productivity 分组。触发元素是 Teleprompter 开关，计划标注 `data-annotation-id=\"teleprompter-module-toggle\"`。用户将 Teleprompter 开关从关闭切换为开启时，系统立即检查并请求麦克风权限与 Speech Recognition 权限。若用户重新打开应用且权限已经授权，开启动作不再重复弹出系统授权。\n\n### 4. 流程\n\n1. 用户进入 Settings -> Modules/Productivity。\n2. 用户打开 Teleprompter 开关。\n3. 系统保存 Teleprompter enabled 状态。\n4. 系统检查麦克风授权状态。\n5. 麦克风状态为未决定时，系统激活 SuperIsland 并立即发出麦克风授权请求；已拒绝或受限时引导用户打开系统设置。\n6. Speech Recognition 状态为未决定时，系统激活 SuperIsland 并立即发出系统授权请求，不依赖用户再点击应用内授权按钮；已拒绝或受限时引导用户打开系统设置。\n7. 系统根据 macOS 实际返回的授权状态刷新权限行；如果系统按队列依次呈现弹窗，界面不得把后一个权限请求隐藏到手动按钮之后。\n8. 用户在 Teleprompter 已开启后切换到 Word Tracking 模式时，系统再次按当前状态触发缺失权限请求。\n9. 授权完成后，用户可继续编辑脚本、选择模式并播放。\n\n### 5. 规则\n\n- 启用 Teleprompter 时必须触发语音跟读权限检查，不等到点击播放。\n- 选择 Word Tracking 模式时必须触发缺失权限检查，不等到点击播放。\n- 麦克风和 Speech Recognition 都是 Word Tracking 必需权限。\n- Classic 模式不依赖麦克风，但本次 MVP 的启用动作仍按 Teleprompter 模块整体能力进行预授权。\n- 已授权权限不得重复打扰用户。\n- 权限状态为未决定时必须尝试弹系统授权；权限状态为已拒绝或受限时不得假装会再次弹窗，必须展示打开系统设置的路径。\n- 麦克风授权和 Speech Recognition 授权需要在启用、启动或进入设置页的自动路径中主动发起；macOS 可按系统弹窗队列依次呈现，但应用不得要求用户额外点击授权按钮才发起第二个请求。\n- 用户拒绝权限时，Teleprompter 模块仍可保持开启，但 Word Tracking 播放必须显示不可用状态或错误提示。\n- 权限文案要使用 SuperIsland 品牌，不沿用 Textream 品牌。\n- 如果系统权限状态无法同步获取，界面需要在应用重新激活或再次进入设置时刷新状态。\n\n### 6. 边界\n\n- 空脚本：权限流程仍可完成，但播放按钮不能开始朗读。\n- 权限被拒绝：保留 Teleprompter 开启状态，Word Tracking 不启动，用户可改用 Classic 模式。\n- 权限受限：展示受限状态并引导系统设置。\n- 权限已被用户处理过：macOS 不会重复弹系统授权，界面必须说明当前状态并提供系统设置入口。\n- 用户关闭 Teleprompter：停止正在进行的语音识别和播放状态。\n- 网络异常：本功能不依赖网络，网络异常不影响权限和本地识别流程。\n- 多次快速切换开关：不得创建重复授权流程或重复识别会话。\n\n### 7. 数据\n\n- 前端 state 字段：`teleprompterEnabled`、`microphonePermissionStatus`、`speechRecognitionPermissionStatus`、`teleprompterPermissionError`、`permissionRequestInFlight`。\n- 持久化字段：Teleprompter enabled 状态沿用现有模块开关存储。\n- 系统能力：macOS 麦克风授权、macOS Speech Recognition 授权。\n- 接口：本阶段不新增网络接口；只使用本机系统授权能力。\n\n### 8. 验收\n\n- [ ] 用户开启 Teleprompter 时会立即触发麦克风与 Speech Recognition 权限检查。\n- [ ] 用户选择 Word Tracking 模式时会立即触发缺失的麦克风与 Speech Recognition 权限检查。\n- [ ] 首次未决定权限会弹系统授权；已拒绝权限会打开或引导系统设置，不再误导用户等待弹窗。\n- [ ] 用户已授权时不会再次弹授权提示。\n- [ ] 用户拒绝权限后，Word Tracking 播放不可用且有清晰提示。\n- [ ] 用户拒绝权限后，Classic 模式仍可用于定速滚动。\n- [ ] 权限文案中不出现 Textream 品牌。\n- [ ] 关闭 Teleprompter 会停止正在进行的语音识别。\n\n## 功能点 2：Teleprompter 支持 Classic 与 Word Tracking 模式\n\n### 1. 业务目的\n\n让 SuperIsland Teleprompter 同时支持无需麦克风的定速滚动和基于语音识别的跟读高亮，覆盖不同演示场景。Classic 适合无需逐字跟踪、只想稳定滚动脚本的用户；Word Tracking 适合希望文字跟着朗读进度移动并突出当前内容的用户。点击开始后，系统必须把口播稿模块真实呈现出来，用户不应只触发后台播放状态却仍停留在其他 tab、Home 或 compact 不可见状态。\n\n### 2. 使用者\n\n使用者是已启用 Teleprompter 的 Mac 用户。适用角色包括演示者、主播、主持人、采访者、播客录制者和临时需要读稿的用户。不适用角色是没有脚本内容、未启用 Teleprompter 或只需要系统状态展示的用户。\n\n### 3. 触发\n\n触发页面是 Teleprompter 的脚本编辑窗口与 Settings 的 Productivity 分组。触发元素包括脚本编辑入口 `data-annotation-id=\"teleprompter-edit-script-button\"`、样式设置控件 `data-annotation-id=\"teleprompter-style-controls\"`、语音语言控件 `data-annotation-id=\"teleprompter-speech-locale-control\"`、模式选择控件 `data-annotation-id=\"teleprompter-listening-mode-control\"`、播放/暂停控件 `data-annotation-id=\"teleprompter-play-control\"`。用户选择模式、语音语言或样式后，该配置用于下一次播放。\n\n### 4. 流程\n\n1. 用户打开 Teleprompter 脚本编辑窗口。\n2. 用户输入或粘贴脚本文本。\n3. 用户选择 Classic 或 Word Tracking。\n4. 用户设置字号、对齐、滚动速度；Word Tracking 模式下可选择语音识别语言。\n5. 用户保存脚本并回到 island。\n6. 用户点击播放。\n7. 系统先将 island 聚焦并呈现到 Teleprompter 模块，再执行现有倒计时。\n8. 如果 island 当前是 compact 或其他模块，系统自动打开 expanded Teleprompter 视图并保持可见。\n9. 如果 island 当前是 full expanded，系统自动选择 Teleprompter tab，不停留在 Home 或其他模块 tab。\n10. Classic 模式按设置速度定速滚动。\n11. Word Tracking 模式启动语音识别并根据朗读进度推进高亮。\n12. 用户点击暂停时，当前模式对应的滚动或识别同时暂停。\n13. 用户点击重置时，脚本进度回到开头。\n\n### 5. 规则\n\n- 模式选择必须持久化，下一次打开仍使用上次选择。\n- Classic 模式沿用现有定速滚动和滚轮校准能力。\n- Word Tracking 模式必须依赖脚本文本、麦克风权限和 Speech Recognition 权限。\n- 播放前脚本为空时不能启动任何模式。\n- 切换模式时不清空脚本。\n- 播放中切换模式时，需要先停止当前播放/识别，再按新模式等待用户重新播放。\n- 现有倒计时体验保留，两种模式都从倒计时结束后进入播放。\n- 点击播放后，island 必须默认展示 Teleprompter 模块，不能停留在其他模块、Home、不可见 compact 状态或仅后台更新状态。\n- 点击播放触发呈现时，需要取消会导致 Teleprompter 立即收起的自动 dismiss 逻辑，保证用户能看到倒计时、脚本和播放状态。\n- full expanded 状态下点击播放，必须选择 Teleprompter tab；非 full expanded 状态下点击播放，必须打开 expanded Teleprompter 视图。\n- 字号、对齐、滚动速度和语音语言必须可在脚本编辑体验中直接调整并持久化。\n- 在 Teleprompter 字幕稿展示区域内，双指纵向滚动必须调整字幕稿位置，不得触发 island 模块切换或 full expanded tab 切换。\n- 触控板手势一旦在本次 gesture 内被判定为纵向滚动，就必须整段锁定为纵向，不得因为后续向下回滚、惯性滚动或横向噪声残留而切换模块/tab。\n- 外层 island 或 full expanded 的双指横向滑动必须保持原有顺滑切换手感；只要横向明确占优且未被纵向轴锁定，就应快速触发模块/tab 切换，不得因为轻微纵向抖动变钝。\n- 同一次双指横向滑动只能触发一次模块/tab 切换，切换步长固定为相邻一个模块或 tab；手势结束后的惯性滚动不得继续触发连跳。\n- full expanded 横向滑动切换顺序必须与左侧可见 tab 顺序一致；Notifications 已作为右侧独立铃铛按钮呈现时，不得在 Weather 与 Teleprompter 之间作为隐藏中间 tab 被滑动选中。\n\n### 6. 边界\n\n- 空数据：脚本为空时 compact 状态显示无脚本，播放不可用。\n- 数量限制：MVP 不引入多页脚本，单次只读取当前脚本文本。\n- 重复：重复点击播放不会创建多个滚动计时器或多个语音识别任务。\n- 权限：Word Tracking 权限不足时不能启动识别；Classic 不受影响。\n- 网络异常：两种模式都不依赖外部网络。\n- 长文本：长脚本需要保持滚动和高亮流畅，不应撑破 island 布局。\n- 手势冲突：字幕稿区域的纵向滚动优先级高于外层 island/tab 切换手势；只有明确横向占优且未被纵向轴锁定的触控板手势才可切换模块。\n- 横向手感：外层 island/tab 切换不能为了保护纵向滚动而把横向判定门槛调得过高；轻微斜向手势仍应在横向占优时顺滑切换。\n- 横向步进：一次双指左右滑动只允许从当前 tab 切到前一个或后一个 tab，不得因为触控板惯性或连续 scrollWheel 事件一次跳过多个 tab。\n- 隐藏 tab：full expanded 中被移到右侧独立控制区的 Notifications 不参与左侧 tab 的横向滑动循环；用户从 Weather 横向切到 Teleprompter 时不得先进入 Notifications。\n- 方向反转：用户先向上滚动再向下滚动时仍属于同一纵向滚动意图，外层 tab 切换不得利用纵向 delta 抵消后的横向残留触发。\n- 呈现冲突：如果其他模块刚触发 HUD 或 auto-dismiss，点击 Teleprompter 播放后以 Teleprompter 播放呈现优先，避免开始后看不到口播稿。\n\n### 7. 数据\n\n- 前端 state 字段：`scriptText`、`listeningMode`、`isPlaying`、`countdownValue`、`resetToken`、`scrollSpeed`、`fontSize`、`textAlignmentIndex`、`speechLocale`、`recognizedCharCount`、`teleprompterError`、`currentState`、`activeModule`、`fullExpandedSelectedTab`。\n- 持久化字段：脚本文本、滚动速度、字体大小、文本对齐、模式选择、语音识别语言。\n- 系统能力：Word Tracking 使用本机 Speech Recognition 和麦克风输入。\n- 接口：不新增后端接口；不启用 Textream 的远程 HTTP/WebSocket 服务。\n\n### 8. 验收\n\n- [ ] 用户可在 Teleprompter 设置或脚本编辑体验中选择 Classic / Word Tracking。\n- [ ] 用户可在脚本编辑体验中调整字号、对齐、滚动速度和 Word Tracking 语音语言。\n- [ ] 用户点击播放后，island 默认展示并呈现 Teleprompter 模块，用户能看到倒计时、脚本和播放控件。\n- [ ] 用户在其他模块、Home 或 compact 状态点击开始后，会自动切到可见的 Teleprompter 视图。\n- [ ] 用户在字幕稿区域双指向上/向下滑动时，字幕稿滚动，不切换到其他模块或 tab。\n- [ ] 用户在字幕稿区域双指向上后再向下滑动，仍只滚动字幕稿，不切换 tab。\n- [ ] 用户在外层 island 或 full expanded 区域双指左右滑动时，仍能顺滑切换模块或 tab。\n- [ ] 用户在外层 island 或 full expanded 区域双指左右滑动一次时，只切换到相邻一个模块或 tab。\n- [ ] 用户在 full expanded 从 Weather 横向切换到 Teleprompter 时，会按左侧可见顺序直接进入 Teleprompter，不会先进入右侧 Notifications。\n- [ ] Classic 模式保持现有定速滚动、暂停、重置、滚轮校准能力。\n- [ ] Word Tracking 模式能在权限完整时启动语音识别。\n- [ ] 切换模式不会清空脚本文本。\n- [ ] 播放中不会出现重复计时器或重复语音识别任务。\n- [ ] 本次 MVP 不出现 PPTX、Director Mode、远程浏览器或外接屏入口。\n\n## 功能点 3：Word Tracking 在 island 内展示单词级跟读高亮\n\n### 1. 业务目的\n\n让用户朗读时能在 SuperIsland 的 Teleprompter 中看到当前进度，降低读稿走神和丢句风险。该功能的目标不是创建独立提词器应用，而是在 SuperIsland 现有 island 展示区域内，把脚本拆成词流并根据语音识别进度高亮已读/当前内容。识别反馈必须足够灵敏：用户正常朗读后应尽快看到听音状态、最近识别文本和进度变化，而不是长时间停留在等待状态。\n\n### 2. 使用者\n\n使用者是选择 Word Tracking 模式并准备朗读脚本的 Teleprompter 用户。适用角色包括演讲者、主播、采访者、主持人和录制者。不适用角色是使用 Classic 模式的用户、未授权语音权限的用户和未输入脚本的用户。\n\n### 3. 触发\n\n触发页面是 SuperIsland 的 compact、expanded 和 full expanded Teleprompter 展示区域。触发元素是 Teleprompter 展示面 `data-annotation-id=\"teleprompter-word-tracking-surface\"`、语音状态/错误提示 `data-annotation-id=\"teleprompter-speech-status\"`、播放/暂停控件 `data-annotation-id=\"teleprompter-play-control\"`。当用户在 Word Tracking 模式点击播放且倒计时完成后，词流开始根据朗读进度更新。\n\n### 4. 流程\n\n1. 用户准备好脚本并选择 Word Tracking。\n2. 用户点击播放。\n3. 系统执行倒计时。\n4. 倒计时结束后，系统启动语音识别。\n5. 系统将用户输入的脚本原始排版作为 Word Tracking 展示来源，保留换行、空行和段落结构。\n6. 系统将脚本转换为适合口播识别的匹配文本，并保持识别进度与原始展示位置可对齐。\n7. 用户朗读时，系统根据 partial result、最近识别文本和脚本匹配结果计算已读字符进度。\n8. 系统在状态区呈现正在听音、音量输入、最近听到的短文本和当前识别进度。\n9. island 中已读文字和未读文字形成视觉区分。\n10. 当前内容保持在可读区域内；同一视觉行内只更新高亮，识别进入下一视觉行时才按行滚动。\n11. 用户暂停时，语音识别停止或挂起，显示停留在当前进度。\n12. 用户重置时，进度和高亮回到脚本开头。\n\n### 5. 规则\n\n- 词流需要支持英文、数字、标点和常见 CJK 文本的合理拆分。\n- 语音识别结果只能推动进度前进，不能因为一次低置信结果大幅跳错。\n- 识别匹配需要优先使用 partial result，允许短语级、字符级和 CJK 文本的容错匹配，避免正常朗读时因为标点、空格、轻微错字或分词差异而完全不推进。\n- 识别诊断需要区分“系统转写文本”和“稿件匹配结果”：如果系统转写内容与用户实际说话明显不一致，状态区应暴露最近转写；如果转写正确但稿件未推进，状态区应暴露匹配弱或未命中。\n- 匹配算法需要以当前位置附近窗口为主，避免远处相似短语抢占进度；大跨度跳转必须有更强确认，小跨度推进可以更灵敏。\n- 如果麦克风已经有输入但脚本进度未推进，状态区必须展示最近听到的文本和输入状态，帮助用户判断是音量、语言选择还是脚本匹配问题。\n- 正常朗读时进度更新应尽量跟随最近一次有效 partial result，不需要等待最终识别结果。\n- 已读、当前、未读状态必须清晰，但不能破坏 SuperIsland 现有深色 island 视觉。\n- Word Tracking 展示必须保留用户在脚本编辑框中输入的换行、空行和段落结构；用户一行一句输入时，island 中也应按一行一句展示，不得压平成单段。\n- CJK 文本展示不得为了识别而在每个字之间插入额外空格；识别匹配可以内部折叠空白，但展示层必须回到原始脚本位置。\n- 识别匹配的空白折叠不得降低朗读跟随效果；识别进度映射回原始展示文本后，高亮、行锚点和完成状态都必须保持正确。\n- CJK 句子不得把整行当成一个已完成单词处理；当用户只读到句首短片段时，高亮只能推进到该片段附近，不得因前缀匹配或长上下文提示把完整句子提前标为已读。\n- 语音识别上下文提示不得向系统注入中文长句或整行脚本；可以提供当前位置附近 2-6 字短片段辅助识别，但不得诱导系统在用户只读句首时自动补全后文并造成跳行。\n- 当系统一次返回过长的 CJK 转写候选时，Word Tracking 应截断为小步推进，而不是完全拒绝或一次吃完整句；用户应看到进度稳定移动且不超前整行。\n- CJK 当前高亮必须表示“刚读到的最后一个字或片段”，不得把识别边界后的下一个未读字提前标成当前高亮，避免用户看到同一内容先被预高亮、读到后又再次高亮。\n- Word Tracking 自动滚动必须按当前识别词所在的视觉行推进；同一行内识别到更多文字时不得持续上滚，只能更新高亮状态。\n- 识别进入下一视觉行后，系统才允许滚动到新的行锚点；滚动后未识别内容必须继续保留在可视区域内，不能把后续稿件全部隐藏到上方或下方。\n- 识别异常时必须停止推进并展示错误提示。\n- 识别已产出转写但高亮未推进时，状态区应展示最近听到的短文本，帮助用户判断是语言、脚本匹配还是麦克风问题。\n- 点击重置必须清除语音识别进度、音频状态和滚动位置。\n- Word Tracking 不使用 Textream 独立 notch overlay，必须渲染在 SuperIsland 现有 Teleprompter 展示中。\n\n### 6. 边界\n\n- 空数据：无脚本时不展示词流，仍显示添加脚本提示。\n- 数量限制：长文本需要自动滚动，不能让 compact 或 expanded 布局溢出。\n- 重复：重复播放不能重复安装音频输入监听或重复创建识别任务。\n- 权限：权限不足时不启动词流推进，只显示不可用状态。\n- 网络异常：语音跟读依赖本地系统能力，不因网络断开失败。\n- 识别超时：系统需要恢复或重启识别会话，用户不应看到播放状态假死。\n- 低音量或输入设备异常：需要在状态区显示等待声音或输入过低，不应让用户误以为已经识别但没有匹配。\n- 系统转写不准：状态区展示最近转写文本，用户可据此调整语言、输入设备或系统语音识别设置。\n- 稿件匹配不准：状态区展示弱匹配/未命中状态，进度不得大幅乱跳。\n- 语言选择不匹配：状态区保留最近听到的文本和错误/弱匹配状态，用户可回到语言控件调整。\n- 换行与空行：脚本中包含多行、空行或段落分隔时，Word Tracking 仍需按用户输入的排版展示；识别层不得因为这些空白导致匹配明显变慢、错位或提前滚动。\n- 中英文混排：英文单词、数字、标点、中文连续句子和换行混用时，高亮位置必须与显示文本一致，不得出现识别文本推进但岛上跳到错误行的情况。\n\n### 7. 数据\n\n- 前端 state 字段：`words`、`wordTrackingDisplayText`、`speechMatchingText`、`recognizedCharCount`、`totalCharCount`、`audioLevels`、`inputLevel`、`lastSpokenText`、`matchConfidenceLabel`、`isListening`、`speechError`、`recognitionProgressText`、`wordTrackingResetToken`。\n- 持久化字段：模式选择、脚本文本和视觉设置；识别进度不持久化。\n- 系统能力：macOS Speech Recognition partial results、麦克风音频输入。\n- 接口：本阶段不新增远程浏览器接口，不暴露 Director Mode 协议。\n\n### 8. 验收\n\n- [ ] Word Tracking 模式下，用户朗读后 island 内文字能随进度高亮。\n- [ ] Word Tracking 模式下，脚本编辑框中一行一句、空行或段落分隔的输入会在 island 中保留原样展示，不被压平成单段。\n- [ ] Word Tracking 模式下，保留换行后正常朗读仍能稳定推进识别，高亮位置与原始展示文本一致，不提前跳行。\n- [ ] Word Tracking 模式下，中文连续文本不会被展示成字间强制空格，朗读识别仍可逐步高亮。\n- [ ] Word Tracking 模式下，用户读到“红灯”等中文句首短词时，只高亮已读片段附近，不会提前高亮完整句子或跳到下一行。\n- [ ] Word Tracking 模式下，中文识别不会因为防超前策略完全停住；系统返回较长中文 partial result 时，进度按小步稳定推进。\n- [ ] Word Tracking 模式下，中文当前高亮不指向下一个未读字；用户读到哪里，高亮只落在已读边界内，不出现先预高亮再二次高亮。\n- [ ] Word Tracking 模式下，同一视觉行内识别进度增加时只更新高亮，不触发连续上滚。\n- [ ] Word Tracking 模式下，识别进入下一视觉行时才滚动，且滚动后未识别文字仍可见。\n- [ ] Word Tracking 模式下，用户正常朗读后能快速看到听音状态、最近听到文本和识别进度变化。\n- [ ] 麦克风有声音但脚本不匹配时，状态区能呈现最近听到文本，而不是只显示等待。\n- [ ] 系统转写不准时，状态区能展示最近转写内容，便于用户判断不是滚动逻辑问题。\n- [ ] 转写正确但稿件未推进时，状态区能展示弱匹配/未命中，且文本进度不乱跳。\n- [ ] 暂停后高亮停在当前进度，重置后回到开头。\n- [ ] 识别失败或权限不足时有可见错误状态。\n- [ ] compact、expanded、full expanded 不出现文字重叠或布局溢出。\n- [ ] Textream 的独立 overlay/window 不进入 SuperIsland。\n- [ ] 长文本滚动时，播放控件仍可点击。\n\n### 9. UI 视觉\n\nWord Tracking 的高亮应延续 SuperIsland 现有深色半透明 island 风格。已读文字使用更高不透明度，未读文字使用较低不透明度，当前朗读附近内容保持在视觉中心或易读区域。不得引入大面积新色块、营销式卡片或独立提词器窗口；控件尺寸、图标重量、间距应贴近现有 Teleprompter 控件。\n\n## 附录：不进入本次 MVP 的能力\n\n- PPTX presenter notes 导入\n- `.textream` 文件保存与打开\n- Director Mode 远程编辑\n- BrowserServer 远程浏览器展示\n- 外接屏/Sidecar/镜像模式\n- Textream 独立 App 主窗口\n- Textream URL scheme 和 macOS Service 入口\n\n## 附录：计划标注 ID\n\n- `teleprompter-module-toggle`：Settings 中 Teleprompter 模块开关\n- `teleprompter-edit-script-button`：Settings 中 Edit Script 按钮\n- `teleprompter-style-controls`：脚本编辑窗口中的字号、对齐和速度控件\n- `teleprompter-speech-locale-control`：Word Tracking 的语音识别语言控件\n- `teleprompter-listening-mode-control`：Classic / Word Tracking 模式选择控件\n- `teleprompter-play-control`：island 中播放/暂停控件\n- `teleprompter-word-tracking-surface`：Word Tracking 词流展示区域\n- `teleprompter-speech-status`：语音权限、识别状态或错误提示\n",
+      "annotations": [
+        {
+          "id": "teleprompter-module-toggle",
+          "selector": "[data-annotation-id=\"teleprompter-module-toggle\"]",
+          "target": "Settings Productivity Teleprompter toggle",
+          "sections": [
+            "功能点 1：启用 Teleprompter 时完成语音权限预授权",
+            "触发：用户将 Teleprompter 开关从关闭切换为开启时，系统立即检查并请求麦克风权限与 Speech Recognition 权限。",
+            "规则：启用 Teleprompter 时必须触发语音跟读权限检查，不等到点击播放。",
+            {
+              "heading": "权限主动请求",
+              "content": "规则：启用 Teleprompter、重新启动且 Teleprompter 已启用、进入设置页或选择 Word Tracking 时，需要按当前状态主动发起麦克风与 Speech Recognition 授权；未决定状态应尝试弹系统授权，已拒绝或受限状态应明确引导系统设置，不误导用户等待重复弹窗。"
+            }
+          ]
+        },
+        {
+          "id": "teleprompter-edit-script-button",
+          "selector": "[data-annotation-id=\"teleprompter-edit-script-button\"]",
+          "target": "Settings and island Edit Script actions",
+          "sections": [
+            "功能点 2：Teleprompter 支持 Classic 与 Word Tracking 模式",
+            "触发：脚本编辑入口 data-annotation-id=teleprompter-edit-script-button。",
+            "流程：用户打开 Teleprompter 脚本编辑窗口，输入或粘贴脚本文本。",
+            "规则：脚本编辑框中的换行、空行和段落结构是 Word Tracking 展示来源，保存后 island 不得压平成单段。"
+          ]
+        },
+        {
+          "id": "teleprompter-style-controls",
+          "selector": "[data-annotation-id=\"teleprompter-style-controls\"]",
+          "target": "Teleprompter script editor style controls",
+          "sections": [
+            {
+              "heading": "功能点 2：Teleprompter 支持 Classic 与 Word Tracking 模式",
+              "content": "触发：样式设置控件 data-annotation-id=\"teleprompter-style-controls\"。规则：字号、对齐和滚动速度必须可在脚本编辑体验中直接调整并持久化。"
+            },
+            {
+              "heading": "验收",
+              "content": "用户可在脚本编辑体验中调整字号、对齐和滚动速度。"
+            }
+          ]
+        },
+        {
+          "id": "teleprompter-speech-locale-control",
+          "selector": "[data-annotation-id=\"teleprompter-speech-locale-control\"]",
+          "target": "Teleprompter Word Tracking speech language picker",
+          "sections": [
+            {
+              "heading": "功能点 2：Teleprompter 支持 Classic 与 Word Tracking 模式",
+              "content": "触发：语音语言控件 data-annotation-id=\"teleprompter-speech-locale-control\"。规则：Word Tracking 模式下可选择语音识别语言，并将 speechLocale 持久化。"
+            },
+            {
+              "heading": "验收",
+              "content": "用户可在脚本编辑体验中调整 Word Tracking 语音语言，避免朗读语言与识别 locale 不匹配。"
+            }
+          ]
+        },
+        {
+          "id": "teleprompter-listening-mode-control",
+          "selector": "[data-annotation-id=\"teleprompter-listening-mode-control\"]",
+          "target": "Classic / Word Tracking segmented controls",
+          "sections": [
+            "功能点 2：Teleprompter 支持 Classic 与 Word Tracking 模式",
+            "规则：模式选择必须持久化，下一次打开仍使用上次选择。",
+            "验收：用户可在 Teleprompter 设置或脚本编辑体验中选择 Classic / Word Tracking。",
+            {
+              "heading": "Word Tracking 权限触发",
+              "content": "规则：用户切换到 Word Tracking 模式时必须立即检查并请求缺失权限，不等到点击播放；Classic 模式保留可用，不因权限缺失被阻断。"
+            }
+          ]
+        },
+        {
+          "id": "teleprompter-play-control",
+          "selector": "[data-annotation-id=\"teleprompter-play-control\"]",
+          "target": "island play and pause controls",
+          "sections": [
+            "功能点 2：Teleprompter 支持 Classic 与 Word Tracking 模式",
+            "流程：用户点击播放，系统先执行现有倒计时；Classic 按设置速度滚动，Word Tracking 启动语音识别。",
+            "规则：现有倒计时体验保留，两种模式都从倒计时结束后进入播放。",
+            {
+              "heading": "开始后呈现",
+              "content": "规则：点击播放后，island 必须默认展示并呈现 Teleprompter 模块；如果当前是 compact 或其他模块，自动打开 expanded Teleprompter；如果当前是 full expanded，自动选择 Teleprompter tab，并取消会导致立即收起的自动 dismiss。"
+            }
+          ]
+        },
+        {
+          "id": "teleprompter-word-tracking-surface",
+          "selector": "[data-annotation-id=\"teleprompter-word-tracking-surface\"]",
+          "target": "Word Tracking highlighted text surface",
+          "sections": [
+            "功能点 3：Word Tracking 在 island 内展示单词级跟读高亮",
+            "流程：用户朗读时，系统根据识别结果计算已读字符进度；同一视觉行内只更新高亮，进入下一视觉行时才滚动到新的行锚点。",
+            "UI 视觉：高亮延续 SuperIsland 现有深色半透明 island 风格。",
+            {
+              "heading": "Word Tracking 输入格式保留",
+              "content": "规则：Word Tracking 展示必须保留脚本编辑框中的换行、空行和段落结构；一行一句输入时，island 中也按一行一句展示，不压平成单段。识别层可以折叠空白以保持口播匹配稳定，但识别进度映射回原始展示文本后，高亮、行锚点和完成状态必须正确，不能提前跳行或降低跟读灵敏度。"
+            },
+            {
+              "heading": "CJK 跟读防超前",
+              "content": "规则：CJK 句子不得把整行当成一个已完成单词处理；用户只读到句首短片段时，高亮只能推进到该片段附近。语音识别可以使用当前位置附近 2-6 字短片段作为 contextual hints，但不得注入中文长句；系统一次返回过长 CJK 转写候选时按小步推进，避免完全停住或一次吃完整句。"
+            },
+            {
+              "heading": "CJK 当前高亮边界",
+              "content": "规则：CJK 当前高亮必须表示刚读到的最后一个字或片段，不得把识别边界后的下一个未读字提前标成当前高亮，避免同一内容先被预高亮、读到后又再次高亮。"
+            },
+            {
+              "heading": "Full Expanded 横向切换顺序",
+              "content": "规则：full expanded 横向滑动切换顺序必须与左侧可见 tab 顺序一致；Notifications 已作为右侧独立铃铛按钮呈现时，不参与左侧 tab 横向滑动循环，用户从 Weather 切到 Teleprompter 时不得先进入 Notifications。"
+            },
+            {
+              "heading": "手势冲突",
+              "content": "规则：在 Teleprompter 字幕稿展示区域内，双指纵向滚动必须调整字幕稿位置，不得触发 island 模块切换或 full expanded tab 切换；外层区域只有明确横向占优且未被纵向轴锁定的触控板手势才可顺滑切换模块，且同一次横向滑动只能切到相邻一个模块或 tab。"
+            },
+            {
+              "heading": "跟读推进灵敏度",
+              "content": "规则：词流推进需要支持短语级、字符级和 CJK 文本的容错匹配，避免因为标点、空格、轻微错字或分词差异导致正常朗读完全不推进；进度只能前进，不能因低置信结果大幅跳错。同一视觉行内识别更多文字时只更新高亮，进入下一视觉行后才滚动。"
+            },
+            {
+              "heading": "纵向手势轴锁定",
+              "content": "规则：在字幕稿区域内，触控板手势一旦判定为纵向滚动，就整段锁定为纵向；即使用户先向上再向下、发生惯性滚动或横向噪声残留，也不得触发 island 模块切换或 full expanded tab 切换，同时外层横向滑动不应因轻微纵向抖动变钝，也不得因惯性事件连跳。"
+            },
+            {
+              "heading": "Word Tracking 行锚定滚动",
+              "content": "规则：自动滚动必须按当前识别词所在的视觉行推进；同一行内不连续上滚，进入下一行才滚动到新的行锚点，且滚动后未识别文字仍需保留在可视区域内。"
+            }
+          ]
+        },
+        {
+          "id": "teleprompter-speech-status",
+          "selector": "[data-annotation-id=\"teleprompter-speech-status\"]",
+          "target": "Teleprompter permission and speech status",
+          "sections": [
+            "功能点 1：启用 Teleprompter 时完成语音权限预授权",
+            "功能点 3：Word Tracking 在 island 内展示单词级跟读高亮",
+            "验收：识别失败或权限不足时有可见错误状态。",
+            {
+              "heading": "识别灵敏度与反馈",
+              "content": "规则：Word Tracking 必须优先使用 partial result 快速反馈；正常朗读后状态区应呈现正在听音、音量输入、最近听到的短文本和当前识别进度。麦克风有输入但脚本未匹配时，也要展示最近听到文本，帮助用户判断语言、音量或脚本匹配问题。"
+            },
+            {
+              "heading": "识别诊断状态",
+              "content": "规则：状态区需要区分系统转写与稿件匹配。系统转写不准时展示最近转写内容；转写正确但稿件未推进时展示弱匹配/未命中；大跨度跳转必须有更强确认，小跨度推进保持灵敏。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TR2",
+      "title": "SuperIsland全App中文化",
+      "taskType": "A",
+      "prdPath": "docs/product-package/02-SuperIsland全App中文化PRD-TR2.md",
+      "fullPrdContent": "# SuperIsland 全 App 中文化 PRD-TR2\n\n## 基本信息\n\n- 子项目：SuperIsland\n- 归属：全 App / 本地化 / 用户可见文案\n- 任务类型：A 新需求\n- 标注版本：20260607\n- 需求来源：用户要求“整个 app 中文化”，在当前合体版基础上，把 SuperIsland 的用户可见英文界面统一改为中文。\n- 关联基础：本需求基于 `feature/chinese-localization-combined`，该分支已包含 Teleprompter / Word Tracking 与全屏隐藏改动。\n\n## 本次范围\n\n本次中文化覆盖 SuperIsland 主 App 中用户会直接看到的英文文案，包括 onboarding、菜单、Settings、模块配置、模块空状态、权限提示、更新弹窗、Teleprompter、Shelf、Calendar、Weather、Battery、Notifications、System HUD、Extension 设置面板与内置扩展展示文案。\n\n本次不翻译代码标识符、文件名、bundle id、UserDefaults key、API 字段、日志内部标签、第三方品牌名和开发者调试专用字符串。SuperIsland、Codex、Claude、WhatsApp、Linear、Last.fm、AI 等品牌或通用专名保留英文。\n\n## 功能点 1：核心 App 用户界面中文化\n\n### 1. 业务目的\n\n让中文用户打开 SuperIsland 后，不需要理解英文就能完成主要使用流程。核心目标是降低首次使用、日常切换模块、查看状态和调整设置时的理解成本，让应用从“功能可用”变成“中文环境下自然可用”。该功能解决的是当前界面大量英文散落在菜单、按钮、空状态、设置项、权限说明和模块标题中的问题。\n\n### 2. 使用者\n\n使用者是以中文为主要操作语言的 SuperIsland 用户，包括初次安装用户、日常使用动态岛模块的用户、需要调整 Settings 的用户，以及只偶尔进入某个模块配置的轻量用户。不适用角色是直接阅读源码、调试日志、扩展开发脚本或 GitHub PR diff 的开发者场景，这些场景保留技术标识和英文日志更有利于维护。\n\n### 3. 触发\n\n触发页面覆盖用户可见的主 App 界面：onboarding 引导页、菜单栏菜单、全展开 island、compact/expanded 模块视图、Settings 页面、更新弹窗、权限状态提示和模块空状态。计划标注元素包括 `data-annotation-id=\"app-localization-onboarding\"`、`data-annotation-id=\"app-localization-main-ui\"`、`data-annotation-id=\"app-localization-settings-ui\"`、`data-annotation-id=\"app-localization-module-ui\"`、`data-annotation-id=\"app-localization-dialogs\"`。用户启动应用、打开设置、切换模块、进入弹窗或看到空状态时，界面应呈现中文。\n\n### 4. 流程\n\n1. 用户首次启动 SuperIsland，onboarding 标题、说明、按钮和权限状态以中文展示。\n2. 用户打开菜单栏菜单，菜单项以中文展示，品牌名 SuperIsland 保持英文。\n3. 用户打开 Settings，左侧导航、分组标题、说明、按钮、权限状态和模块名称以中文展示。\n4. 用户切换到任意 island 模块，模块标题、空状态、操作按钮、状态说明和工具提示以中文展示。\n5. 用户看到更新弹窗、错误提示或权限提示时，提示信息以中文解释当前状态和下一步动作。\n6. 用户使用 Extension 设置页时，通用管理文案中文化；第三方扩展名称、服务名称和必要的登录协议名保持原文。\n7. 用户重新启动应用后，中文文案保持一致，不依赖运行时网络或额外配置。\n\n### 5. 规则\n\n- 只翻译用户可见文案，不改业务逻辑、状态流转、权限请求顺序、模块启用规则和手势逻辑。\n- SuperIsland 品牌名保留英文，不翻译成“超级岛”。\n- Codex、Claude、WhatsApp、Linear、Last.fm、AI、Node.js、Python 等品牌、产品名或技术名保留英文。\n- UserDefaults key、notification name、bundle identifier、extension id、API 字段、文件路径、data-annotation-id 和日志内部机器可读字段不得翻译。\n- 用户可见错误信息需要中文化，并尽量保留能帮助排查的技术名，例如 “Node.js 未安装” 可以保留 Node.js。\n- 短按钮优先使用短中文，避免撑破现有 macOS 控件宽度。\n- 同一概念在全 App 内必须使用同一中文词，例如 Settings 统一为“设置”，Notifications 统一为“通知”，Battery 统一为“电池”。\n- 动态数值、日期、百分比、温度、倒计时和快捷键占位符必须保留原有变量插值，不得写死。\n- 中文化不得改变菜单快捷键和系统按钮语义。\n- 代码中已有英文注释和开发者日志可保留，除非该日志直接展示给用户。\n\n### 6. 边界\n\n- 空状态：没有通知、没有日程、没有 shelf 项目、没有 home 模块等空状态需要中文展示。\n- 数量限制：包含数字的文案要保持数字动态展示，例如事件数量、保存天数、版本号和百分比。\n- 重复：同一英文文案如果在多个文件出现，应统一中文译法，避免一处叫“提词器”、另一处叫“字幕”。\n- 权限：麦克风、语音识别、辅助功能、日历、自动启动等权限说明必须中文化，但不改变系统权限触发逻辑。\n- 网络异常：更新检查、扩展登录或外部服务失败时，错误提示中文化并保留必要服务名。\n- 布局：长中文说明不能和按钮、图标、状态文字重叠；必要时使用更短译文或现有换行布局。\n- 第三方内容：来自外部服务的原始标题、歌曲名、会议名、天气城市名和用户数据不翻译。\n\n### 7. 数据\n\n- 前端 state 字段：沿用现有 SwiftUI / AppKit 状态，不新增本地化状态字段。\n- 持久化字段：不新增 UserDefaults key；已有设置项含义和存储值保持不变。\n- 接口：不新增网络接口；不修改扩展通信协议字段。\n- 资源：本阶段优先替换 Swift/JS 中现有用户可见字符串；如果后续需要正式多语言包，可再迁移到 `Localizable.strings`。\n\n### 8. 验收\n\n- [ ] 首次启动 onboarding 的标题、说明、按钮和权限状态为中文。\n- [ ] 菜单栏菜单项为中文，SuperIsland 品牌名保留英文。\n- [ ] Settings 页面主要导航、分组、说明、按钮、状态和模块名称为中文。\n- [ ] 全展开 island 的模块标题、空状态、操作按钮和工具提示为中文。\n- [ ] 更新弹窗、权限提示和用户可见错误提示为中文。\n- [ ] 中文文案没有挤压、截断或重叠到影响使用。\n- [ ] 中文化后应用行为与中文化前一致，尤其不影响 Teleprompter、手势切换和全屏隐藏。\n\n## 功能点 2：Settings 与权限管理文案中文化\n\n### 1. 业务目的\n\n让用户在设置中能准确理解每个开关、权限、调试项和模块配置的作用，减少因为英文说明造成的误操作。该功能重点解决 Settings 页面信息密度高、英文说明多、权限状态和模块说明难以快速判断的问题。\n\n### 2. 使用者\n\n使用者是需要调整 SuperIsland 设置的中文用户，包括启用或关闭模块的人、排查权限问题的人、管理扩展登录的人和需要修改外观行为的人。不适用角色是扩展开发者查看原始 manifest、终端日志或调试接口字段的场景，这些信息允许保持英文技术名。\n\n### 3. 触发\n\n触发页面是 Settings 主窗口及其子页面，包括 General、Appearance、Modules、Extensions、Advanced 与各模块详情。计划标注元素包括 `data-annotation-id=\"app-localization-settings-ui\"`、`data-annotation-id=\"app-localization-permission-ui\"`、`data-annotation-id=\"app-localization-extension-ui\"`。用户打开设置、进入模块详情、查看权限状态、管理扩展或点击检查更新时触发。\n\n### 4. 流程\n\n1. 用户打开 Settings，导航与标题以中文展示。\n2. 用户进入 General，启动项、菜单栏图标、全屏隐藏、动画速度和交互权限说明以中文展示。\n3. 用户进入 Appearance，尺寸、动画、重置和外观相关说明以中文展示。\n4. 用户进入 Modules，模块分组、模块名称、模块说明、启用开关和详情按钮以中文展示。\n5. 用户进入 Productivity / Teleprompter，提词器设置、语音跟读权限、编辑稿件入口和状态提示以中文展示。\n6. 用户进入 Extensions，筛选器、详情、设置、日志、登录、断开连接等管理动作以中文展示。\n7. 用户进入 Advanced，显示器、能耗诊断、调试、重置和关于信息以中文展示。\n\n### 5. 规则\n\n- Settings 中的英文分类名必须有稳定中文译法：General 为“通用”，Appearance 为“外观”，Modules 为“模块”，Extensions 为“扩展”，Advanced 为“高级”。\n- 权限类按钮统一使用“授权”“打开设置”“已授权”“需要授权”等表达，避免同一状态多种叫法。\n- 危险或不可逆操作文案要清楚，例如重置设置、退出登录、断开连接、清空记录等。\n- Extension 的展示名称保留 manifest 或服务原名，管理动作中文化。\n- Recent Logs 这类用户可见面板标题中文化，但日志内容本身可保持原始输出。\n- 如果中文化后按钮过长，优先缩短译文，不改控件结构。\n- 设置项说明要保留原本的信息密度，不为了变短删掉关键条件。\n\n### 6. 边界\n\n- 权限未决定、已授权、被拒绝、受限、未知状态都需要有中文状态或说明。\n- 扩展登录中二维码、轮询、过期、刷新、断开连接等状态需要中文管理文案。\n- 更新检查失败、版本不可用、网络错误需要中文提示，但保留版本号和错误原因。\n- “Reset All Settings” 一类操作不得因为中文化削弱风险提示。\n- 设置窗口窄宽度下，中文说明不得覆盖按钮或图标。\n- 对已有系统权限弹窗文案无法控制的部分，不在 App 内伪造系统弹窗，只中文化应用自身说明。\n\n### 7. 数据\n\n- 前端 state 字段：沿用现有设置模型和权限状态枚举。\n- 持久化字段：不修改现有设置存储值；中文只影响展示层。\n- 接口：扩展配置 schema、登录协议和本地服务端口字段保持原样。\n- 本地资源：中文化字符串落在现有 Swift/JS 源码中；后续多语言化再独立抽取。\n\n### 8. 验收\n\n- [ ] Settings 五个主分区名称和页面标题为中文。\n- [ ] General、Appearance、Modules、Extensions、Advanced 的主要设置项和说明为中文。\n- [ ] 权限状态和授权动作有清晰中文提示。\n- [ ] 扩展设置管理动作中文化，扩展名称和服务品牌保留原文。\n- [ ] 危险操作仍能明确表达风险和后果。\n- [ ] 中文化不改变任何设置项的保存值或开关行为。\n\n## 功能点 3：模块视图与 Teleprompter 术语统一中文化\n\n### 1. 业务目的\n\n让 island 内各模块在中文环境下读起来一致，特别是已经融合的 Teleprompter / Word Tracking 功能，避免用户看到“Teleprompter、Classic、Word Tracking、Script”等混杂术语而难以判断功能差异。该功能解决模块视图、编辑窗口、状态栏和按钮之间中文术语不一致的问题。\n\n### 2. 使用者\n\n使用者是通过 island 查看模块内容、切换模块或使用提词器的中文用户。重点使用者包括用提词器录课、直播、演讲、视频拍摄的用户，以及日常查看天气、日历、电池、通知、媒体和 Shelf 的用户。不适用角色是必须对照原始 Textream / SuperIsland 代码命名进行开发的维护者。\n\n### 3. 触发\n\n触发页面包括 compact island、expanded island、full expanded island、Teleprompter 稿件编辑窗口以及各模块详情。计划标注元素包括 `data-annotation-id=\"app-localization-module-ui\"`、`data-annotation-id=\"app-localization-teleprompter-ui\"`、`data-annotation-id=\"app-localization-empty-states\"`。用户切换模块、编辑稿件、开始提词器、查看空状态或查看模块内操作按钮时触发。\n\n### 4. 流程\n\n1. 用户打开 island 模块，模块标题和空状态用中文展示。\n2. 用户切到 Teleprompter，模块名显示为“提词器”。\n3. 用户打开稿件编辑窗口，标题、按钮、字号、对齐、速度、语言和模式选择为中文。\n4. 用户选择模式，“Classic” 显示为“匀速滚动”，“Word Tracking” 显示为“语音跟读”。\n5. 用户开始播放，状态栏和错误提示用中文说明正在听音、权限缺失、未匹配或已暂停。\n6. 用户查看 Weather、Calendar、Battery、Notifications、Shelf、System HUD 等模块，常见状态和动作中文化。\n7. 用户切换回设置页，同一模块在设置和 island 中使用一致中文名。\n\n### 5. 规则\n\n- Teleprompter 在用户界面统一译为“提词器”。\n- Script 在提词器语境下统一译为“稿件”或“口播稿”，按钮优先用“编辑稿件”。\n- Classic 在模式选择中译为“匀速滚动”。\n- Word Tracking 在模式选择中译为“语音跟读”。\n- Speech Recognition 在权限或说明中译为“语音识别”。\n- Listening、Heard、Matched、Ready、No script、Add script 等提词器状态必须中文化。\n- 中文化只改展示文案，不改变语音识别 locale、匹配算法、分词策略、行锚定滚动和高亮推进逻辑。\n- Weather、Calendar、Battery、Notifications、Shelf 等模块名称使用自然中文，但第三方数据内容不翻译。\n- 图标按钮如果只有 tooltip/help label，则 tooltip 中文化；图标本身保持。\n\n### 6. 边界\n\n- 提词器识别准确性：中文化不得修改识别 hint、locale id、匹配阈值或文本归一化逻辑，除非该修改明确属于识别 bug 修复。\n- 高亮跳动：中文化不得改动 Word Tracking 的进度推进、行锚定和滚动规则。\n- 格式保留：中文化不得影响稿件换行、空行、对齐和字号设置。\n- 长状态文本：提词器底部状态区域空间有限，中文状态必须短而清楚。\n- 混合语言稿件：用户稿件本身保持原文，不被自动翻译。\n- 模块空状态：没有数据时用中文说明；有用户数据时只翻译 UI 标签，不改用户内容。\n\n### 7. 数据\n\n- 前端 state 字段：沿用现有 `TeleprompterState`、模块状态、权限状态和扩展状态。\n- 持久化字段：提词器模式、语言、速度、字号、对齐和稿件内容保存逻辑不变。\n- 接口：语音识别、日历、天气、媒体、通知和扩展接口不变。\n- 展示映射：新增或调整的只是英文 UI 文案到中文文案的展示映射。\n\n### 8. 验收\n\n- [ ] Teleprompter 在用户界面统一显示为“提词器”。\n- [ ] Classic 显示为“匀速滚动”，Word Tracking 显示为“语音跟读”。\n- [ ] 稿件编辑窗口的标题、按钮、控制项和说明为中文。\n- [ ] 语音跟读状态提示为中文，且不影响识别准确性、高亮推进和行锚定滚动。\n- [ ] Weather、Calendar、Battery、Notifications、Shelf、System HUD 等模块常见标题、按钮和空状态为中文。\n- [ ] 用户输入内容、第三方内容和品牌名保持原样。\n\n## 功能点 4：中文化打包与回归验证\n\n### 1. 业务目的\n\n确保中文化不是只停留在源码修改，而是能形成用户可安装、可运行、包含 Teleprompter 与全屏隐藏能力的最新版安装包。该功能解决“改完代码但用户启动的仍是旧版本”“安装包缺少某个分支功能”“权限或签名异常导致无法使用”的交付风险。\n\n### 2. 使用者\n\n使用者是需要在本机或另一台 Mac 安装合体版 SuperIsland 的用户，以及后续要把该版本继续提交到自己仓库分支的维护者。不适用角色是只看源码、不安装运行的开发者审查场景。\n\n### 3. 触发\n\n触发动作是中文化代码完成后执行构建、打包、安装或分发。计划标注元素为 `data-annotation-id=\"app-localization-package\"`。用户要求“重新打包”“放桌面”“给另一台电脑装”或需要验证当前运行版本时触发。\n\n### 4. 流程\n\n1. 中文化代码完成后，确认当前分支仍包含 Teleprompter 与 fullscreen hide 两组提交。\n2. 执行 Xcode 构建或项目既有构建命令。\n3. 检查构建产物是否包含最新版 app 名称、bundle id 和必要 entitlements。\n4. 生成可安装压缩包或 dmg，并放到用户指定位置。\n5. 清理或提示旧安装包和旧 app 的风险，避免 Spotlight 或权限列表中出现多个 SuperIsland 干扰判断。\n6. 用户安装后启动应用，验证中文界面、提词器、全屏隐藏和权限提示。\n\n### 5. 规则\n\n- 打包必须基于当前合体分支，不能只包含 full screen 或只包含 Teleprompter。\n- 打包前必须检查 git branch 与最近提交，避免从旧分支构建。\n- 打包文件名应能表达日期或功能组合，便于用户区分版本。\n- 打包不应删除用户正在使用的 app，除非用户明确要求清理。\n- 安装包用于本机或另一台电脑测试时，需要保留必要权限说明，避免误判为功能失效。\n- 中文化不得修改签名、权限 entitlement、bundle id 和隐私说明，除非构建必须。\n\n### 6. 边界\n\n- 另一台电脑首次安装时，需要重新授权麦克风、语音识别、辅助功能等系统权限。\n- 如果机器上存在多个 SuperIsland app，Spotlight 和系统权限列表可能显示旧包名或旧构建，需要明确清理或选择正确 app。\n- 如果构建失败，需要先判断是签名、依赖、Xcode scheme 还是沙盒权限问题，再给出下一步。\n- 如果只做源码中文化但未打包，用户本机正在运行的 app 不会自动更新。\n- 如果 macOS 缓存旧权限项，可能需要退出 app、替换 app、重新启动或在系统设置中确认权限对象。\n\n### 7. 数据\n\n- 构建输入：当前 Git 分支源码、Xcode project/scheme、Info.plist、entitlements。\n- 构建输出：`.app` 和用户指定的安装包文件。\n- 持久化数据：不迁移用户设置，不清空已有 Teleprompter 稿件和模块配置。\n- 接口：不新增接口；只验证安装产物与运行权限。\n\n### 8. 验收\n\n- [ ] 构建前确认当前分支包含 Teleprompter 与 full screen hide 两组功能。\n- [ ] 构建成功并生成可安装产物。\n- [ ] 安装后 App 用户可见界面为中文。\n- [ ] 安装后 Teleprompter / 语音跟读仍可使用。\n- [ ] 安装后浏览器或播放器全屏时隐藏逻辑仍可使用。\n- [ ] 用户能明确区分新安装包与旧安装包，避免启动错版本。\n\n## 术语表\n\n- SuperIsland：保留英文\n- Settings：设置\n- General：通用\n- Appearance：外观\n- Modules：模块\n- Extensions：扩展\n- Advanced：高级\n- Teleprompter：提词器\n- Script：稿件 / 口播稿\n- Edit Script：编辑稿件\n- Classic：匀速滚动\n- Word Tracking：语音跟读\n- Speech Recognition：语音识别\n- Notifications：通知\n- Battery：电池\n- Calendar：日历\n- Weather：天气\n- Shelf：暂存架\n- Now Playing：正在播放\n- Home：首页\n- Fullscreen：全屏\n\n## 附录：计划标注 ID\n\n- `app-localization-onboarding`：首次启动 onboarding 引导文案\n- `app-localization-main-ui`：菜单栏、主 island、全展开基础界面文案\n- `app-localization-settings-ui`：Settings 主窗口与设置项文案\n- `app-localization-permission-ui`：权限状态、授权按钮、系统设置引导文案\n- `app-localization-extension-ui`：扩展管理、登录、日志、断开连接等文案\n- `app-localization-module-ui`：模块标题、空状态、操作按钮和工具提示\n- `app-localization-teleprompter-ui`：提词器、稿件编辑、模式选择、语音跟读状态文案\n- `app-localization-dialogs`：更新弹窗、错误弹窗、确认弹窗文案\n- `app-localization-empty-states`：无通知、无日程、无项目、无模块等空状态\n- `app-localization-package`：构建打包与安装验证\n",
+      "annotations": [
+        {
+          "id": "app-localization-onboarding",
+          "selector": "[data-annotation-id=\"app-localization-onboarding\"]",
+          "target": "Onboarding user-visible copy",
+          "sections": [
+            "功能点 1：核心 App 用户界面中文化",
+            "触发：首次启动 SuperIsland，onboarding 标题、说明、按钮和权限状态以中文展示。",
+            "验收：首次启动 onboarding 的标题、说明、按钮和权限状态为中文。"
+          ]
+        },
+        {
+          "id": "app-localization-main-ui",
+          "selector": "[data-annotation-id=\"app-localization-main-ui\"]",
+          "target": "Menu bar and main island user-visible copy",
+          "sections": [
+            "功能点 1：核心 App 用户界面中文化",
+            "流程：用户打开菜单栏菜单或 island 模块时，菜单项、模块标题、空状态、操作按钮和状态说明以中文展示。",
+            "规则：SuperIsland 品牌名保留英文；只翻译用户可见文案，不改业务逻辑。"
+          ]
+        },
+        {
+          "id": "app-localization-settings-ui",
+          "selector": "[data-annotation-id=\"app-localization-settings-ui\"]",
+          "target": "Settings navigation and setting rows",
+          "sections": [
+            "功能点 2：Settings 与权限管理文案中文化",
+            "流程：用户打开 Settings，导航、标题、设置项、说明、按钮和模块配置以中文展示。",
+            "规则：General、Appearance、Modules、Extensions、Advanced 分别译为通用、外观、模块、扩展、高级。"
+          ]
+        },
+        {
+          "id": "app-localization-permission-ui",
+          "selector": "[data-annotation-id=\"app-localization-permission-ui\"]",
+          "target": "Permission status and authorization actions",
+          "sections": [
+            "功能点 2：Settings 与权限管理文案中文化",
+            "规则：权限类按钮统一使用授权、打开设置、已授权、需要授权等表达。",
+            "边界：权限未决定、已授权、被拒绝、受限、未知状态都需要中文状态或说明。"
+          ]
+        },
+        {
+          "id": "app-localization-extension-ui",
+          "selector": "[data-annotation-id=\"app-localization-extension-ui\"]",
+          "target": "Extension management visible copy",
+          "sections": [
+            "功能点 2：Settings 与权限管理文案中文化",
+            "规则：Extension 的展示名称保留 manifest 或服务原名，管理动作中文化。",
+            "边界：Recent Logs 面板标题中文化，日志内容本身可保持原始输出。"
+          ]
+        },
+        {
+          "id": "app-localization-module-ui",
+          "selector": "[data-annotation-id=\"app-localization-module-ui\"]",
+          "target": "Module titles empty states and controls",
+          "sections": [
+            "功能点 3：模块视图与 Teleprompter 术语统一中文化",
+            "流程：用户切换模块时，模块标题、空状态、操作按钮和工具提示用中文展示。",
+            "验收：Weather、Calendar、Battery、Notifications、Shelf、System HUD 等模块常见标题、按钮和空状态为中文。"
+          ]
+        },
+        {
+          "id": "app-localization-teleprompter-ui",
+          "selector": "[data-annotation-id=\"app-localization-teleprompter-ui\"]",
+          "target": "Teleprompter and Word Tracking visible copy",
+          "sections": [
+            "功能点 3：模块视图与 Teleprompter 术语统一中文化",
+            "规则：Teleprompter 译为提词器，Classic 译为匀速滚动，Word Tracking 译为语音跟读。",
+            "边界：中文化不得修改语音识别 locale、匹配算法、行锚定滚动和高亮推进逻辑。"
+          ]
+        },
+        {
+          "id": "app-localization-dialogs",
+          "selector": "[data-annotation-id=\"app-localization-dialogs\"]",
+          "target": "Update error and confirmation dialogs",
+          "sections": [
+            "功能点 1：核心 App 用户界面中文化",
+            "流程：用户看到更新弹窗、错误提示或权限提示时，提示信息以中文解释当前状态和下一步动作。",
+            "验收：更新弹窗、权限提示和用户可见错误提示为中文。"
+          ]
+        },
+        {
+          "id": "app-localization-empty-states",
+          "selector": "[data-annotation-id=\"app-localization-empty-states\"]",
+          "target": "Common empty states",
+          "sections": [
+            "功能点 1：核心 App 用户界面中文化",
+            "边界：没有通知、没有日程、没有 shelf 项目、没有 home 模块等空状态需要中文展示。",
+            "验收：模块空状态中文化，且不翻译用户或第三方原始内容。"
+          ]
+        },
+        {
+          "id": "app-localization-package",
+          "selector": "[data-annotation-id=\"app-localization-package\"]",
+          "target": "Build package and install validation",
+          "sections": [
+            "功能点 4：中文化打包与回归验证",
+            "规则：打包必须基于当前合体分支，不能只包含 full screen 或只包含 Teleprompter。",
+            "验收：构建成功并生成可安装产物，安装后中文界面、提词器和全屏隐藏均可用。"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "WE1",
+      "title": "SuperIsland窗口增强集成：文件快捷删除与隐藏/显示所有窗口",
+      "taskType": "A",
+      "prdPath": "docs/product-package/03-SuperIsland窗口增强集成PRD-WE1.md",
+      "fullPrdContent": "# SuperIsland 窗口增强集成 PRD-WE1\n\n## 基本信息\n\n- 子项目：SuperIsland\n- 任务类型：A 新需求\n- 当前分支：`feature/we1-file-shortcuts-20260917`；原始功能分支为 `feature/window-enhancement-settings`\n- 需求来源：已确认的 `prototype/superisland-window-enhancement-v0.1.html`；2026-09-17 增补交互参考为 `prototype/we1-file-shortcuts-v0.1.html`\n- 当前 Gate：用户已明确“可以，实现吧”，授权文件快捷删除及按推荐范围恢复本次收起的窗口，同步 PRD 后进入 Swift 实现\n- 本轮状态：源码实现阶段；尚未安装、未操作真实文件、未完成设置界面或实机验收。构建与测试结果由本轮实施记录另行记录\n- 实施原则：保留 SuperIsland 深色独立设置窗口；窗口增强页的结构、悬停演示、布局卡、Dock 预览和 Cmd-Tab Plus 以本机 WINS 3.5 录屏为交互基准，不复制授权、试用、购买或激活内容\n\n## 本次范围\n\n本需求把窗口管理能力作为 SuperIsland 原生模块接入，包括设置与持久化、窗口布局快捷键、窗口移动与隐藏、边缘分屏、悬浮分屏岛、Dock 窗口预览与反转、调度中心增强、Cmd-Tab Plus、权限与降级。2026-09-17 增补 Finder／桌面文件快捷删除，以及隐藏/显示所有窗口的交替操作，具体规则见功能点 5、6。所有能力最终均需连接真实 macOS 窗口与辅助功能 API；HTML 演示结果不能作为代码完成证据。\n\n明确不包含：试用、授权、购买、激活、支付、云端账户、远程配置和公开发布。\n\n## 功能点 1：窗口增强设置与持久化\n\n### 1. 业务目的\n\n在 SuperIsland 现有设置窗口中提供统一、可理解的窗口增强配置入口，让用户能分别控制功能开关、快捷键、布局和高级行为。\n\n### 2. 使用者\n\n使用 macOS、允许 SuperIsland 管理窗口，并希望通过拖动、Dock、快捷键或调度中心提升窗口操作效率的用户。\n\n### 3. 触发\n\n用户打开 SuperIsland 设置并选择“窗口增强”。\n\n### 4. 流程\n\n1. 设置侧栏新增“窗口增强”，保留通用、模块、外观、扩展、高级和退出。\n2. 用户分别启用核心能力、调度中心能力和快捷功能。\n3. 用户为每个动作或布局录入快捷键。\n4. 用户打开“高级…”设置调度空间、窗口间距、强调色和排除 App。\n5. 设置变更立即写入本地持久化，并在下次启动恢复。\n6. 鼠标移入或键盘聚焦核心功能、调度中心、快捷功能和布局时，左侧演示区即时切换对应效果。\n\n### 5. 规则\n\n- 总开关关闭时，所有窗口增强监听和快捷键停止响应，但保留子项配置。\n- 子开关只影响对应能力，不得联动修改其他功能。\n- 快捷键录入与功能开关独立；录入快捷键不得自动启用功能。\n- 快捷键冲突时不得静默覆盖，必须显示冲突并保留旧值。\n- 设置页面使用 SuperIsland 现有深色组件与尺寸，不嵌入 macOS 系统设置。\n- Aero Shake、隐藏/显示所有窗口和隐藏其他窗口只出现在设置项、悬停演示与真实快捷操作中，不提供自创的中央“窗口动作”选择面板。\n\n### 6. 边界\n\n- 辅助功能未授权时允许浏览和编辑设置，但执行窗口操作时明确提示授权。\n- 屏幕录制仅用于窗口缩略图；拒绝后降级为窗口标题，不影响基础布局与移动。\n- 排除 App 后，该 App 不响应窗口快捷键、分屏和预览。\n\n### 7. 数据\n\n- 使用 `UserDefaults` / `@AppStorage` 持久化总开关、子开关、快捷键、布局快捷键、高级设置和排除 App bundle id。\n- 不保存窗口内容、缩略图或用户文档。\n\n### 8. 验收\n\n- [ ] 设置侧栏存在“窗口增强”，外壳与现有设置一致。\n- [ ] 所有开关、快捷键和高级项可修改并在重启后恢复。\n- [ ] 高级页不出现授权、试用、购买或激活。\n- [ ] 原有 15 个窗口功能/快捷功能入口均有对应的移入或键盘聚焦演示，移出后回到总览；新增文件快捷删除行说明支持范围，不在设置页执行真实文件演示。\n- [ ] 权限缺失时不伪装执行成功。\n\n## 功能点 2：窗口布局与快捷操作\n\n### 1. 业务目的\n\n让用户通过快捷键或拖动快速完成常用窗口布局、跨屏移动、居中和隐藏操作。\n\n### 2. 使用者\n\n频繁整理多个应用窗口或使用多显示器的用户。\n\n### 3. 触发\n\n用户触发已配置快捷键、拖动窗口进入边缘热区，或在悬浮分屏岛先选择分屏方案、再命中方案内的目标区域。\n\n### 4. 流程\n\n1. 系统读取当前前台 App 的可操作窗口。\n2. 排除不可操作、全屏、系统层级或被用户排除的 App。\n3. 根据目标屏幕的可用区域计算窗口 frame。\n4. 执行移动和缩放，并给出成功或失败反馈。\n\n### 5. 规则\n\n- 设置页按 WINS 提供 10 个单窗口快捷键位置：左半屏、右半屏、最大化、左/中/右三分之一、上半屏、下半屏、左侧三分之二和右侧三分之二；每个位置可独立设置快捷键。\n- 悬浮分屏岛只显示 4 个组合方案：左右二分、上下二分、左主右双、四宫格。方案是一级选择，方案内部区域是二级命中；不得把四宫格拆成四个一级按钮，其他方案同理。\n- 四个四分之一区域是组合方案的内部目标，不在设置页重复生成四张快捷键卡。\n- 窗口快捷功能包括 Dock 锁定屏幕、隐藏/显示所有窗口、隐藏其他窗口、移动到下个显示器、移动到上个显示器、窗口居中；同一区域另增独立的“快捷删除文件”，它不属于窗口动作枚举。\n- 不支持缩放的窗口不得强制写入错误尺寸；移动可行时只移动并提示限制。\n- 多显示器按系统排列顺序循环，断开显示器后重新计算目标。\n\n### 6. 边界\n\n- 没有可操作窗口时显示“没有可管理的窗口”，不执行空操作。\n- 系统窗口、桌面元素、菜单栏、Dock 与 SuperIsland 自身窗口默认排除。\n- 窗口最小尺寸、应用约束和屏幕安全区优先于目标布局。\n\n### 7. 数据\n\n- 输入：前台应用、AX 窗口、当前显示器、目标布局和用户设置。\n- 输出：窗口位置与尺寸变更；不上传任何数据。\n\n### 8. 验收\n\n- [ ] 设置页只显示 10 个快捷键位置，不出现四张独立四分之一快捷键卡。\n- [ ] 分屏岛只显示 4 个组合方案；在每个方案内部移动指针可分别选中其子区域，四宫格的四个区域落在正确象限。\n- [ ] 6 项快捷功能只影响目标窗口或目标窗口集合。\n- [ ] 不可缩放、无窗口、权限缺失和屏幕断开均有明确反馈。\n- [ ] 排除 App 不响应上述操作。\n\n## 功能点 3：窗口切换、Dock 与调度中心增强\n\n### 1. 业务目的\n\n把应用级切换继续细化到窗口级，并在 Dock 与窗口鸟瞰场景中提供可预测的预览、关闭、退出和反转操作。\n\n### 2. 使用者\n\n同时打开多个应用和多个窗口、需要快速定位具体窗口的用户。\n\n### 3. 触发\n\n用户使用 Cmd-Tab Plus、移入 Dock 图标、再次点击当前 App 的 Dock 图标，或进入 SuperIsland 的调度中心增强界面。\n\n### 4. 流程\n\n1. 读取运行中的普通应用与其可见窗口。\n2. 有屏幕录制权限时显示本地缩略图；否则显示应用图标、窗口标题和数量。\n3. 用户选择窗口后激活并前置。\n4. 关闭窗口仅关闭选中窗口；退出程序必须二次确认并退出整个 App。\n\n### 5. 规则\n\n- Dock 窗口预览锚定对应 Dock 图标，不显示与该 App 无关的窗口。\n- Dock 有屏幕录制权限时显示真实窗口缩略图，卡片为“App 名称—缩略图—窗口标题”结构；单窗口保持紧凑，多窗口横向排列。\n- Dock 反转只在再次点击当前前台 App 时触发，不改变其他 App。\n- 关闭窗口与退出程序必须是两个不同动作和快捷键。\n- Cmd-Tab Plus 使用接近屏幕宽度的底部毛玻璃图标带；选中图标放大，具体窗口缩略图浮在该图标正上方，并随选择移动。\n\n2026-09-11 用户确认的双微信规则：\n\n- Dock 保持按安装路径隔离：主微信只显示主微信窗口，双开微信只显示双开微信窗口。\n- Cmd-Tab 选到任意一个微信图标时，在现有窗口预览中展示两套已知微信安装的窗口；每张卡片标注“主微信”或“双开微信”，不新增实例选择步骤。共享是展示规则，不声称识别出了原生同名图标的唯一进程。\n- 仅明确选择具体窗口后，才按该卡片真实进程和窗口身份激活或关闭。未选窗时松开 Command 维持系统原生切换；不得把共享列表首卡作为默认关闭或退出目标。切换图标、窗口关闭或失效时清理旧选择。\n- 仅覆盖已确认的主微信与 WeChat-Work2 安装；其他同名应用、未知安装或强身份冲突不自动合并。原生切换器状态无法确认时，不执行延迟跨应用激活。\n- 无操作对象的备用预览按各自安装展示并标为“应用预览”，不可激活或关闭；不把截图表面数量当成真实窗口数量。主微信透明截图问题仍单独保留。\n\n### 6. 边界\n\n- 受保护 App、无窗口 App、最小化窗口和跨空间窗口分别保留真实状态。\n- 未保存内容是否可恢复由目标 App 决定；SuperIsland 不宣称可恢复。\n- 系统不允许的 Mission Control 深度控制需以原生 PoC 结果为准，不用私有 API伪造完成。\n\n### 7. 数据\n\n- 只在本机短暂读取应用、窗口标题、frame、状态和可选缩略图。\n- 不持久化缩略图，不上传窗口信息。\n\n### 8. 验收\n\n- [ ] Dock 单窗口、多窗口和标题降级态均可用。\n- [ ] Cmd-Tab Plus 能选择具体窗口并正确激活。\n- [ ] 两个微信 Cmd-Tab 入口均展示两套窗口且归属正确，Dock 仍分别展示。\n- [ ] 从任一微信入口选另一套窗口后，松 Command 或点击均提交该真实窗口；无明确选择不改变原生行为，不误关共享首卡。\n- [ ] 快速切图标、Esc、新一轮 Cmd-Tab、窗口退出或新鼠标点击后，不出现迟到激活或旧选择转移。\n- [ ] 关闭窗口不会退出整个 App；退出程序有二次确认。\n- [ ] 无法覆盖的系统级能力明确标记为受限或 PoC 未通过。\n\n## 功能点 4：高级选项与权限边界\n\n### 1. 业务目的\n\n允许用户控制窗口布局细节并排除不应被管理的 App，同时清晰解释权限用途。\n\n### 2. 使用者\n\n需要定制台前调度、窗口间距、强调色或应用排除规则的用户。\n\n### 3. 触发\n\n用户在窗口增强设置页点击“高级…”。\n\n### 4. 流程\n\n1. 用户设置“预留台前调度空间”和“分屏窗口间距”。\n2. 用户选择强调色。\n3. 用户通过系统应用选择器添加或移除排除 App。\n4. 用户查看当前 SuperIsland 版本或检查更新，点击“完成”返回。\n\n### 5. 规则\n\n- 强调色只改变窗口增强的热区、布局岛和选中反馈，不改变整个 App 主题。\n- 排除 App 使用 bundle id 作为稳定标识，并显示真实 App 图标和名称。\n- 本页不包含授权、试用、购买、激活或支付入口。\n\n### 6. 边界\n\n- 已卸载 App 仍可保留 bundle id，但显示“应用不可用”并允许移除。\n- 系统应用选择器取消时不写入任何数据。\n\n### 7. 数据\n\n- 持久化台前调度、间距、强调色标识和排除 App bundle id 列表。\n\n### 8. 验收\n\n- [ ] 高级项修改后立即生效并持久化。\n- [ ] 排除 App 可添加和移除。\n- [ ] 页面不存在商业化授权入口。\n- [ ] “完成”返回窗口增强主设置页。\n\n## 功能点 5：Finder／桌面文件快捷删除（2026-09-17 增补）\n\n### 1. 业务目的\n\n让用户用自定义快捷键，将 Finder 或桌面选中的文件移到废纸篓，并保留系统的恢复途径。\n\n### 2. 使用者\n\n使用 Finder 或桌面管理文件，且已授予 SuperIsland 辅助功能权限的用户。\n\n### 3. 触发\n\n在“设置 → 窗口增强 → 快捷功能”设置“快捷删除文件”的组合键并单独开启功能；Finder／桌面处于前台且有文件选区时按该组合键。\n\n设置入口标识：`data-annotation-id=window-enhancement-file-trash`。本项目使用 SwiftUI 辅助功能标识承载该映射，不新增网页业务入口。\n\n### 4. 流程\n\n1. 首次使用默认关闭、没有预设快捷键。用户录入、修改或清除快捷键不会改变开关。\n2. 录入沿用现有至少一个修饰键、Esc 取消、单按 Delete 清除和可见清除按钮；与其他已配置功能冲突时保留原绑定并提示冲突。\n3. 执行前复核窗口增强总开关、文件功能开关、绑定、辅助功能权限、Finder 前台状态及排除列表。\n4. 排除名称编辑、其他文本输入、模态对话框或无法确定安全文件选区的情形。\n5. 调用 Finder 自身明确且已启用的“移到废纸篓”菜单命令。其他应用前台、无选择或命令不可用时不执行，并反馈原因。\n6. 菜单命令请求成功与文件实际移动分开：未观测到结果时只反馈已请求 Finder 执行，不虚报删除数量或完成状态。恢复通过 Finder／废纸篓的原生能力完成。\n\n### 5. 规则\n\n- 文件动作使用独立 ID `file.moveToTrash`，不加入 `WindowQuickAction`，不绑定当前前台窗口的关闭操作。\n- 与现有功能共用快捷键存储、内部冲突校验、注册预检、清除及注册失败回退；本项只在 Finder 场景生效，不显示“覆盖其他 App 原生快捷键”的笼统警告。\n- 总开关或本项开关关闭时停止执行但保留绑定；Finder 被排除时不执行。\n- 仅在 Finder 前台且功能可用时注册文件快捷键；切走立即注销，回到 Finder 后按最新配置重新注册，其他应用保留该组合键的原行为。\n- 一次物理按下最多执行一次；按住产生的重复事件不重复删除，确认按键释放后才允许下一次触发。\n- 按键周期、Finder 前台会话或绑定变化后，旧周期排队的迟到回调失效；睡眠、会话退出、停止功能时取消旧操作。按键尚未释放时切回 Finder，不自动补做删除。\n- 一次处理 Finder 当前选区，遵守系统菜单对文件、目录、位置与权限的限制。\n- 只请求移到废纸篓，不调用永久删除或清空废纸篓，不自动确认任何永久删除弹窗。\n\n### 6. 边界\n\n- 仅支持 Finder 和由 Finder 管理的桌面，不扩展到第三方文件管理器、网页文件或应用内部附件。\n- 正在重命名、文本输入或对话框无法排除时不执行；不模拟裸 Delete、不猜坐标，不读取私有文件数据补猜选区。\n- 只使用已有辅助功能权限；不新增 AppleEvents／自动化授权界面、屏幕录制要求、网络访问或额外依赖。\n- 受权限、卷类型或 Finder 状态影响无法移到废纸篓时，保留原文件并交由系统原生界面处理；SuperIsland 不代替用户接受不可恢复删除。\n\n### 7. 数据\n\n- `windowEnhancement.fileTrash` 持久化独立开关，默认 `false`；`windowEnhancement.shortcuts[\"file.moveToTrash\"]` 存储组合键，默认缺省。\n- `fileTrashEnabled` 进入既有 `configurationChanges`，运行时反馈不进入该配置流，避免反馈引起快捷键与窗口监听重建。\n- 不保存选区路径、文件内容、删除历史或文件名日志；HTML 文件、废纸篓与撤销均为虚构数据，不代表 App 增加独立文件管理或撤销界面。\n\n### 8. 验收\n\n- [ ] 设置入口、录入、清除、冲突提示、默认值及重启持久化正确；开关与绑定独立。\n- [ ] Finder／桌面选中的可丢弃测试文件移到废纸篓，未选择的文件保留，可用系统能力恢复。\n- [ ] 其他应用前台、没有文件选择、正在重命名、文本输入、模态对话框、Finder 被排除、总开关关闭时不执行。\n- [ ] 长按组合键只请求一次删除；释放后可再次触发；切走／切回 Finder、更新配置或恢复会话后，不执行旧按键周期的迟到回调。\n- [ ] 没有权限或找不到明确菜单动作时反馈失败，不模拟按键或点击补救，不确认永久删除。\n- [ ] 未安装、未实测阶段不得勾选原生行为通过；测试只在用户允许屏幕和鼠标操作后开展。\n\n## 功能点 6：隐藏/显示所有窗口（2026-09-17 增补）\n\n### 1. 业务目的\n\n用同一个快捷键临时腾出桌面，再恢复刚才收起的一批窗口，保留用户原先最小化的状态。\n\n### 2. 使用者\n\n需要临时查看桌面或收起多个应用窗口的用户。\n\n### 3. 触发\n\n用户按已绑定的 `action.hideAll` 快捷键；设置项名称由“隐藏所有窗口”改为“隐藏/显示所有窗口”。\n\n标注映射复用窗口增强设置入口 `data-annotation-id=window-enhancement-settings`；不为标注增加独立业务入口。\n\n### 4. 流程\n\n1. 初次触发按既有可管理窗口规则收起当前窗口，并记住本次成功收起的窗口身份。\n2. 第二次触发恢复本次记住且仍存在、仍可操作的窗口；全部恢复或确认窗口已不存在后结束会话，暂时恢复失败的窗口保留待下一次重试。\n3. 原先已最小化的窗口保持不变；后续继续按键时重新开始下一轮收起／恢复。\n\n### 5. 规则\n\n- 采用已确认的“仅恢复本次收起”范围，不提供“恢复全部已最小化窗口”的业务设置。\n- 保留 `hideAll` 枚举值、`action.hideAll` 快捷键 ID、已有用户绑定及开关，不另建重复动作或迁移成新 ID。\n- 沿用已有收起会话与窗口身份记录，不用全局“显示所有应用”替代精确恢复；不改动已验收的 Cmd-Tab、Dock、调度中心和全屏移屏策略。\n- 设置说明明确“第一次收起全部，第二次恢复刚才收起的窗口”。\n- `action.hideAll` 一次按下只切换一次，长按不反复收起／恢复；以 Carbon 按键释放事件解除本次按下限制，其他窗口布局和快捷键保留原有重复响应行为。\n- 继续与“隐藏其他窗口”及 Aero Shake 共用一批可恢复会话：已有会话时，任一收起入口先恢复同一批，不叠加新的收起批次。\n\n### 6. 边界\n\n- 仍服从原有可管理窗口、应用排除、系统窗口及权限限制；不能操作的窗口不宣称已收起。\n- 原先最小化、未参与本次收起、之后新建的窗口不加入恢复集合；已关闭或身份失效的窗口不重新打开。\n- “打开全部”只表示恢复本次现有窗口，不启动应用、不创建窗口，不把原先最小化的窗口一起展开。\n- 临时 AX 拒绝恢复时保留该窗口的会话所有权，下一次触发或停止清理可重试；短暂枚举缺失不直接丢弃，按既有多次观察规则确认失效。成功恢复、已被用户恢复或确认应用退出的窗口从待恢复集合移出。\n\n### 7. 数据\n\n- 继续使用 `action.hideAll` 的既有持久化快捷键及动作开关；本次会话只保留运行期的窗口身份，不持久化窗口内容或截图。\n- HTML 中“全部已最小化窗口”仅保留为未采用的方案对比，不代表正式可配置选项。\n\n### 8. 验收\n\n- [ ] A、B 打开、C 预先最小化时，第一次收起 A、B；第二次恢复 A、B，C 仍最小化。\n- [ ] 可连续多轮操作；关闭其中一扇或出现新窗口后，不重新创建已关闭窗口、不恢复未参与的窗口。\n- [ ] 长按“隐藏/显示所有窗口”只切换一次；其他快捷键的原有行为不变；与隐藏其他窗口／Aero Shake 交替使用时先恢复已有批次，恢复失败可重试。\n- [ ] 原有快捷键及开关保留；设置标题、说明与实际行为一致。\n- [ ] Cmd-Tab／Dock 预览、调度中心关闭及 Chrome 全屏跨显示器移动不回退。\n- [ ] 本轮尚未安装或实测，以上原生验收保持未完成。\n\n## 实施顺序\n\n1. 设置模型、侧栏入口、设置主页面与高级页面。\n2. AX 窗口查询、10 种布局、居中、跨屏、隐藏与权限降级。\n3. 全局快捷键注册、冲突校验和持久化。\n4. 边缘分屏与悬浮分屏岛。\n5. Dock 预览、Dock 反转与 Cmd-Tab Plus。\n6. 调度中心增强 PoC；只把 PoC 通过的系统能力标记为完成。\n7. 构建、真实 App 启动、辅助功能/屏幕录制权限与多显示器验收。\n\n## 非目标\n\n- 不修改现有提词器、通知、媒体、天气、日历或扩展业务。\n- 不修改 bundle id、签名、权限 entitlement 或发布配置，除非实现所需且另行确认。\n- 本轮允许本地 Git 提交保存；不推送、不创建 PR、不安装或替换当前运行中的 App。\n",
+      "annotations": [
+        {
+          "id": "window-enhancement-file-trash",
+          "selector": "[data-annotation-id=\"window-enhancement-file-trash\"]",
+          "target": "设置 → 窗口增强 → 快捷功能 → 快捷删除文件",
+          "sections": [
+            "功能点 5：Finder／桌面文件快捷删除（2026-09-17 增补）",
+            "1. 业务目的\n\n让用户用自定义快捷键，将 Finder 或桌面选中的文件移到废纸篓，并保留系统的恢复途径。",
+            "2. 使用者\n\n使用 Finder 或桌面管理文件，且已授予 SuperIsland 辅助功能权限的用户。",
+            "3. 触发\n\n在“设置 → 窗口增强 → 快捷功能”设置“快捷删除文件”的组合键并单独开启功能；Finder／桌面处于前台且有文件选区时按该组合键。\n\n设置入口标识：`data-annotation-id=window-enhancement-file-trash`。本项目使用 SwiftUI 辅助功能标识承载该映射，不新增网页业务入口。",
+            "4. 流程\n\n1. 首次使用默认关闭、没有预设快捷键。用户录入、修改或清除快捷键不会改变开关。\n2. 录入沿用现有至少一个修饰键、Esc 取消、单按 Delete 清除和可见清除按钮；与其他已配置功能冲突时保留原绑定并提示冲突。\n3. 执行前复核窗口增强总开关、文件功能开关、绑定、辅助功能权限、Finder 前台状态及排除列表。\n4. 排除名称编辑、其他文本输入、模态对话框或无法确定安全文件选区的情形。\n5. 调用 Finder 自身明确且已启用的“移到废纸篓”菜单命令。其他应用前台、无选择或命令不可用时不执行，并反馈原因。\n6. 菜单命令请求成功与文件实际移动分开：未观测到结果时只反馈已请求 Finder 执行，不虚报删除数量或完成状态。恢复通过 Finder／废纸篓的原生能力完成。",
+            "5. 规则\n\n- 文件动作使用独立 ID `file.moveToTrash`，不加入 `WindowQuickAction`，不绑定当前前台窗口的关闭操作。\n- 与现有功能共用快捷键存储、内部冲突校验、注册预检、清除及注册失败回退；本项只在 Finder 场景生效，不显示“覆盖其他 App 原生快捷键”的笼统警告。\n- 总开关或本项开关关闭时停止执行但保留绑定；Finder 被排除时不执行。\n- 仅在 Finder 前台且功能可用时注册文件快捷键；切走立即注销，回到 Finder 后按最新配置重新注册，其他应用保留该组合键的原行为。\n- 一次物理按下最多执行一次；按住产生的重复事件不重复删除，确认按键释放后才允许下一次触发。\n- 按键周期、Finder 前台会话或绑定变化后，旧周期排队的迟到回调失效；睡眠、会话退出、停止功能时取消旧操作。按键尚未释放时切回 Finder，不自动补做删除。\n- 一次处理 Finder 当前选区，遵守系统菜单对文件、目录、位置与权限的限制。\n- 只请求移到废纸篓，不调用永久删除或清空废纸篓，不自动确认任何永久删除弹窗。",
+            "6. 边界\n\n- 仅支持 Finder 和由 Finder 管理的桌面，不扩展到第三方文件管理器、网页文件或应用内部附件。\n- 正在重命名、文本输入或对话框无法排除时不执行；不模拟裸 Delete、不猜坐标，不读取私有文件数据补猜选区。\n- 只使用已有辅助功能权限；不新增 AppleEvents／自动化授权界面、屏幕录制要求、网络访问或额外依赖。\n- 受权限、卷类型或 Finder 状态影响无法移到废纸篓时，保留原文件并交由系统原生界面处理；SuperIsland 不代替用户接受不可恢复删除。",
+            "7. 数据\n\n- `windowEnhancement.fileTrash` 持久化独立开关，默认 `false`；`windowEnhancement.shortcuts[\"file.moveToTrash\"]` 存储组合键，默认缺省。\n- `fileTrashEnabled` 进入既有 `configurationChanges`，运行时反馈不进入该配置流，避免反馈引起快捷键与窗口监听重建。\n- 不保存选区路径、文件内容、删除历史或文件名日志；HTML 文件、废纸篓与撤销均为虚构数据，不代表 App 增加独立文件管理或撤销界面。",
+            "8. 验收\n\n- [ ] 设置入口、录入、清除、冲突提示、默认值及重启持久化正确；开关与绑定独立。\n- [ ] Finder／桌面选中的可丢弃测试文件移到废纸篓，未选择的文件保留，可用系统能力恢复。\n- [ ] 其他应用前台、没有文件选择、正在重命名、文本输入、模态对话框、Finder 被排除、总开关关闭时不执行。\n- [ ] 长按组合键只请求一次删除；释放后可再次触发；切走／切回 Finder、更新配置或恢复会话后，不执行旧按键周期的迟到回调。\n- [ ] 没有权限或找不到明确菜单动作时反馈失败，不模拟按键或点击补救，不确认永久删除。\n- [ ] 未安装、未实测阶段不得勾选原生行为通过；测试只在用户允许屏幕和鼠标操作后开展。"
+          ]
+        },
+        {
+          "id": "window-enhancement-settings",
+          "selector": "[data-annotation-id=\"window-enhancement-settings\"]",
+          "target": "设置 → 窗口增强 → 隐藏/显示所有窗口（复用设置入口）",
+          "sections": [
+            "功能点 6：隐藏/显示所有窗口（2026-09-17 增补）",
+            "1. 业务目的\n\n用同一个快捷键临时腾出桌面，再恢复刚才收起的一批窗口，保留用户原先最小化的状态。",
+            "2. 使用者\n\n需要临时查看桌面或收起多个应用窗口的用户。",
+            "3. 触发\n\n用户按已绑定的 `action.hideAll` 快捷键；设置项名称由“隐藏所有窗口”改为“隐藏/显示所有窗口”。\n\n标注映射复用窗口增强设置入口 `data-annotation-id=window-enhancement-settings`；不为标注增加独立业务入口。",
+            "4. 流程\n\n1. 初次触发按既有可管理窗口规则收起当前窗口，并记住本次成功收起的窗口身份。\n2. 第二次触发恢复本次记住且仍存在、仍可操作的窗口；全部恢复或确认窗口已不存在后结束会话，暂时恢复失败的窗口保留待下一次重试。\n3. 原先已最小化的窗口保持不变；后续继续按键时重新开始下一轮收起／恢复。",
+            "5. 规则\n\n- 采用已确认的“仅恢复本次收起”范围，不提供“恢复全部已最小化窗口”的业务设置。\n- 保留 `hideAll` 枚举值、`action.hideAll` 快捷键 ID、已有用户绑定及开关，不另建重复动作或迁移成新 ID。\n- 沿用已有收起会话与窗口身份记录，不用全局“显示所有应用”替代精确恢复；不改动已验收的 Cmd-Tab、Dock、调度中心和全屏移屏策略。\n- 设置说明明确“第一次收起全部，第二次恢复刚才收起的窗口”。\n- `action.hideAll` 一次按下只切换一次，长按不反复收起／恢复；以 Carbon 按键释放事件解除本次按下限制，其他窗口布局和快捷键保留原有重复响应行为。\n- 继续与“隐藏其他窗口”及 Aero Shake 共用一批可恢复会话：已有会话时，任一收起入口先恢复同一批，不叠加新的收起批次。",
+            "6. 边界\n\n- 仍服从原有可管理窗口、应用排除、系统窗口及权限限制；不能操作的窗口不宣称已收起。\n- 原先最小化、未参与本次收起、之后新建的窗口不加入恢复集合；已关闭或身份失效的窗口不重新打开。\n- “打开全部”只表示恢复本次现有窗口，不启动应用、不创建窗口，不把原先最小化的窗口一起展开。\n- 临时 AX 拒绝恢复时保留该窗口的会话所有权，下一次触发或停止清理可重试；短暂枚举缺失不直接丢弃，按既有多次观察规则确认失效。成功恢复、已被用户恢复或确认应用退出的窗口从待恢复集合移出。",
+            "7. 数据\n\n- 继续使用 `action.hideAll` 的既有持久化快捷键及动作开关；本次会话只保留运行期的窗口身份，不持久化窗口内容或截图。\n- HTML 中“全部已最小化窗口”仅保留为未采用的方案对比，不代表正式可配置选项。",
+            "8. 验收\n\n- [ ] A、B 打开、C 预先最小化时，第一次收起 A、B；第二次恢复 A、B，C 仍最小化。\n- [ ] 可连续多轮操作；关闭其中一扇或出现新窗口后，不重新创建已关闭窗口、不恢复未参与的窗口。\n- [ ] 长按“隐藏/显示所有窗口”只切换一次；其他快捷键的原有行为不变；与隐藏其他窗口／Aero Shake 交替使用时先恢复已有批次，恢复失败可重试。\n- [ ] 原有快捷键及开关保留；设置标题、说明与实际行为一致。\n- [ ] Cmd-Tab／Dock 预览、调度中心关闭及 Chrome 全屏跨显示器移动不回退。\n- [ ] 本轮尚未安装或实测，以上原生验收保持未完成。"
+          ]
+        }
+      ]
+    }
+  ]
+}

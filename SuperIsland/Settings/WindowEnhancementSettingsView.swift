@@ -347,6 +347,7 @@ struct ShortcutRecorderButton: View {
     }
 
     private func highRiskWarning(for shortcut: WindowShortcut) -> String? {
+        guard targetID != FinderFileShortcut.id else { return nil }
         guard shortcut.modifiers == UInt32(cmdKey) else { return nil }
         let highRiskKeys: Set<Int> = [
             kVK_ANSI_D,
