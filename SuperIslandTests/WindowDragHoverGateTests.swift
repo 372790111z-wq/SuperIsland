@@ -2,6 +2,34 @@ import XCTest
 @testable import SuperIsland
 
 final class WindowDragHoverGateTests: XCTestCase {
+    func testHeldHoverBeforeWindowMovementInvalidatesQueuedActivation() {
+        var gate = WindowDragHoverGate()
+        gate.recordHover(true)
+        let queued = gate.generation
+        gate.suppressUntilPointerExit()
+        XCTAssertFalse(gate.isDragging)
+        XCTAssertFalse(gate.permitsActivation(generation: queued))
+        XCTAssertFalse(gate.recordHover(true))
+        XCTAssertFalse(gate.setDragging(false))
+        XCTAssertTrue(gate.requiresPointerExit)
+        gate.recordHover(false)
+        XCTAssertTrue(gate.recordHover(true))
+        XCTAssertTrue(gate.permitsActivation(generation: gate.generation))
+    }
+
+    func testClampedDragMayBecomeAConfirmedMoveWithoutReplayingHover() {
+        var gate = WindowDragHoverGate()
+        gate.suppressUntilPointerExit()
+        let clamped = gate.generation
+        gate.setDragging(true)
+        XCTAssertTrue(gate.isSuppressed)
+        gate.recordHover(false)
+        gate.setDragging(false)
+        XCTAssertFalse(gate.isSuppressed)
+        XCTAssertFalse(gate.permitsActivation(generation: clamped))
+        XCTAssertTrue(gate.recordHover(true))
+    }
+
     func testQueuedHoverCannotActivateAfterDragStarts() {
         var gate = WindowDragHoverGate()
         XCTAssertTrue(gate.recordHover(true))

@@ -10,6 +10,14 @@ struct WindowDragHoverGate {
 
     var isSuppressed: Bool { isDragging || requiresPointerExit }
 
+    /// A held pointer can reach the notch before a top-clamped window moves.
+    /// Suppress only hover; file-drop and explicit click paths remain separate.
+    mutating func suppressUntilPointerExit() {
+        generation &+= 1
+        isPointerInside = true
+        requiresPointerExit = true
+    }
+
     @discardableResult
     mutating func setDragging(_ dragging: Bool) -> Bool {
         guard isDragging != dragging else { return false }

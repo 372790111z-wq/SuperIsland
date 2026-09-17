@@ -335,11 +335,16 @@ final class AppState: ObservableObject {
         if !dragging, windowDragHoverGate.isDragging {
             // The snap panel can delay the main island's hover entry callback.
             // Reconcile the physical release position before removing the gate.
-            windowDragHoverGate.recordHover(isPointerOverIsland)
+            let pointerInside = isPointerOverIsland
+            windowDragHoverGate.recordHover(pointerInside)
+            isHovering = pointerInside
+            if pointerInside {
+                cancelAutoDismiss()
+                cancelFullExpandedDismiss()
+            }
         }
         guard windowDragHoverGate.setDragging(dragging) else { return }
         cancelHoverActivation()
-        isHovering = false
         // Ending a drag never replays the hover which happened while held.
     }
 
@@ -348,6 +353,13 @@ final class AppState: ObservableObject {
         return NSApp?.windows.contains {
             $0 is IslandPanel && $0.isVisible && $0.frame.contains(pointer)
         } ?? false
+    }
+
+    private func suppressHoverForHeldPointer() -> Bool {
+        guard !isShelfDragActive, NSEvent.pressedMouseButtons & 1 != 0 else { return false }
+        windowDragHoverGate.suppressUntilPointerExit()
+        cancelHoverActivation()
+        return true
     }
 
     init(synchronizesRuntimeEnergyState: Bool = true) {
@@ -620,16 +632,11 @@ final class AppState: ObservableObject {
     func handleHoverChange(_ hovering: Bool) {
         // Ignore a late synthetic exit caused by a disappearing snap panel.
         // The post-drag barrier ends only when the pointer really leaves.
-        if !hovering, windowDragHoverGate.requiresPointerExit, isPointerOverIsland {
+        if !isShelfDragActive, !hovering, windowDragHoverGate.requiresPointerExit, isPointerOverIsland {
             cancelHoverActivation()
-            isHovering = false
             return
         }
-        guard windowDragHoverGate.recordHover(hovering) else {
-            cancelHoverActivation()
-            isHovering = false
-            return
-        }
+        let allowsHover = windowDragHoverGate.recordHover(hovering)
         guard !isZilanInteractionSuppressed else {
             cancelHoverActivation()
             return
@@ -649,12 +656,18 @@ final class AppState: ObservableObject {
         }
 
         if hovering {
+            cancelAutoDismiss()
+            cancelFullExpandedDismiss()
+
+            // Keep real hover for explicit click/Shelf presentations so they
+            // stay open under the pointer. Only automatic opening is gated.
+            guard allowsHover, !suppressHoverForHeldPointer() else {
+                cancelHoverActivation()
+                return
+            }
             if !wasHovering {
                 performNotchEntryHapticIfNeeded()
             }
-
-            cancelAutoDismiss()
-            cancelFullExpandedDismiss()
 
             if isSystemEmojiInteractionActive {
                 cancelHoverActivation()
@@ -853,6 +866,7 @@ final class AppState: ObservableObject {
             guard let self, self.canHandleIslandInput(generation: inputGeneration),
                   self.windowDragHoverGate.permitsActivation(generation: hoverGeneration),
                   self.isHovering, self.currentState != .fullExpanded else { return }
+            guard !self.suppressHoverForHeldPointer() else { return }
 
             if self.shouldHoverExpandNotifications(from: startingState) {
                 self.presentNotificationsFullExpanded()
@@ -892,6 +906,7 @@ final class AppState: ObservableObject {
 
     private func shouldDirectlyOpenNotificationsOnHover(for module: ActiveModule) -> Bool {
         guard currentState != .fullExpanded,
+              !isWindowDragHoverSuppressed,
               isHover,
               case .builtIn(.notifications) = module,
               hasFreshNotificationForHover else {
