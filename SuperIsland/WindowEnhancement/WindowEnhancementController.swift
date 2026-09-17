@@ -258,13 +258,16 @@ final class WindowEnhancementController {
         commandTabMonitor.stop()
         missionControlMonitor.stop()
         dockDisplayLockController.stop()
-        let minimizedWindowsRestored = restoreMinimizedWindowsForShutdown()
+        _ = restoreMinimizedWindowsForShutdown()
 
         let deadline = Date().addingTimeInterval(timeout)
-        while activeWindowMutationTask != nil, Date() < deadline {
+        while (activeWindowMutationTask != nil || minimizationSessions.hasActiveSession), Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
+            if minimizationSessions.hasActiveSession {
+                _ = restoreMinimizedWindowsForShutdown()
+            }
         }
-        let recoveryComplete = minimizedWindowsRestored && restoreMinimizedWindowsForShutdown()
+        let recoveryComplete = restoreMinimizedWindowsForShutdown()
         let windowMutationResolved = activeWindowMutationTask == nil &&
             lastWindowMutationCompletion != .unresolved
         guard windowMutationResolved, recoveryComplete else {
@@ -650,15 +653,23 @@ final class WindowEnhancementController {
             excludingBundleIdentifiers: excludedBundleIdentifiers
         )
         switch outcome {
-        case let .minimized(_, succeeded, failed):
-            if failed > 0 {
+        case let .minimized(_, succeeded, pending, failed):
+            if succeeded + pending == 0 {
+                feedback("当前窗口暂不可收起")
+            } else if pending > 0 {
+                let failureNote = failed > 0 ? "，\(failed) 个暂不可收起" : ""
+                feedback("已请求收起 \(succeeded + pending) 个窗口\(failureNote)；再按一次打开本批窗口")
+            } else if failed > 0 {
                 feedback("已收起 \(succeeded) 个窗口，\(failed) 个窗口不允许最小化；再按一次打开本批窗口")
             } else {
                 feedback("已收起 \(succeeded) 个窗口；再按一次打开本批窗口")
             }
-        case let .restored(_, succeeded, failed, missing):
+        case let .restored(_, succeeded, pending, failed, missing):
             let unresolved = failed + missing
-            if unresolved > 0 {
+            if pending > 0 {
+                let failureNote = unresolved > 0 ? "，\(unresolved) 个已关闭或暂不可恢复" : ""
+                feedback("已请求恢复 \(succeeded + pending) 个窗口\(failureNote)")
+            } else if unresolved > 0 {
                 feedback("已恢复 \(succeeded) 个窗口，\(unresolved) 个窗口已关闭或不允许恢复")
             } else {
                 feedback("已恢复 \(succeeded) 个窗口")
@@ -677,8 +688,8 @@ final class WindowEnhancementController {
         // AX can transiently reject unminimize while an App is transitioning.
         // Retry once synchronously; any remaining references stay owned by the
         // session controller rather than being silently forgotten.
-        guard case let .restored(_, _, failed, _) = minimizationSessions.restoreActiveSession(),
-              failed > 0 else { return !minimizationSessions.hasActiveSession }
+        guard case let .restored(_, _, pending, failed, _) = minimizationSessions.restoreActiveSession(),
+              failed + pending > 0 else { return !minimizationSessions.hasActiveSession }
         _ = minimizationSessions.restoreActiveSession()
         return !minimizationSessions.hasActiveSession
     }

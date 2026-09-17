@@ -23,8 +23,8 @@ final class FinderFileShortcutController {
     init(preferences: WindowEnhancementPreferences, feedback: @escaping (String) -> Void) {
         self.preferences = preferences
         self.feedback = feedback
-        registry.onEvent = { [weak self] id, pressed in
-            self?.receive(id: id, pressed: pressed)
+        registry.onEvent = { [weak self] id, pressed, eventTime in
+            self?.receive(id: id, pressed: pressed, eventTime: eventTime)
         }
     }
 
@@ -121,7 +121,7 @@ final class FinderFileShortcutController {
         failedContext = nil
     }
 
-    private func receive(id: UInt32, pressed: Bool) {
+    private func receive(id: UInt32, pressed: Bool, eventTime: EventTime) {
         guard registry.activeID == id, let context = gate.context,
               eligibleContext() == context else { refresh(); return }
         if !pressed {
@@ -132,13 +132,16 @@ final class FinderFileShortcutController {
             return
         }
         let generation = gate.generation
-        guard keyIsDown(context.keyCode) else { return }
+        guard let lifetime = FinderShortcutEventLifetime(eventTime: eventTime, now: GetCurrentEventTime()),
+              keyIsDown(context.keyCode) else { return }
         guard gate.press(generation: generation) else { return }
         waitForRelease()
         let outcome = executor.perform(expectedPID: context.pid) { [weak self] in
             guard let self else { return false }
+            // Once claimed, a normal key-up must not cancel the same action.
+            // Its context and original event deadline still apply to every AX read.
             return self.registry.activeID == id && self.gate.isCurrent(generation) &&
-                self.eligibleContext() == context && self.keyIsDown(context.keyCode)
+                self.eligibleContext() == context && lifetime.isCurrent(now: GetCurrentEventTime())
         }
         guard gate.isCurrent(generation) else { return }
         feedback(outcome.message)
@@ -175,7 +178,7 @@ private final class FinderFileHotKeyRegistry {
     private var nextID: UInt32 = 0
     private var queuedPressGate = FinderShortcutQueuedPressGate()
     private(set) var activeID: UInt32?
-    var onEvent: ((UInt32, Bool) -> Void)?
+    var onEvent: ((UInt32, Bool, EventTime) -> Void)?
 
     func register(keyCode: UInt32, modifiers: UInt32) -> OSStatus {
         unregister()
@@ -224,12 +227,16 @@ private final class FinderFileHotKeyRegistry {
             guard registry.activeID == id.id else { return OSStatus(eventNotHandledErr) }
             let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
             let receivedID = id.id
+            let eventTime = GetEventTime(event)
+            // Invalidate an unclaimed press before either callback is queued.
+            // Otherwise an old press could borrow a later physical key cycle.
+            if !pressed { registry.queuedPressGate.release() }
             let ticket = pressed ? registry.queuedPressGate.enqueuePress() : nil
             if pressed, ticket == nil { return noErr }
             DispatchQueue.main.async { [weak registry] in
                 guard let registry, registry.activeID == receivedID else { return }
                 if let ticket, !registry.queuedPressGate.isCurrent(ticket) { return }
-                registry.onEvent?(receivedID, pressed)
+                registry.onEvent?(receivedID, pressed, eventTime)
             }
             return noErr
         }, types.count, &types, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)

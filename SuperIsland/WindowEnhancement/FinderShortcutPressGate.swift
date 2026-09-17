@@ -39,8 +39,26 @@ struct FinderShortcutPressGate {
     }
 }
 
+/// Uses the Carbon event clock for both checks. Claiming a press never renews
+/// its deadline, and releasing a claimed press does not extend or cancel it.
+struct FinderShortcutEventLifetime {
+    static let maximumClaimAge = 0.100
+    static let maximumDuration = 0.250
+    private let eventTime: Double
+
+    init?(eventTime: Double, now: Double) {
+        guard eventTime.isFinite, now.isFinite, eventTime >= 0,
+              now >= eventTime, now - eventTime <= Self.maximumClaimAge else { return nil }
+        self.eventTime = eventTime
+    }
+
+    func isCurrent(now: Double) -> Bool {
+        now.isFinite && now >= eventTime && now - eventTime < Self.maximumDuration
+    }
+}
+
 /// Deduplicates Carbon events before they are queued onto the main actor.
-/// A physical release invalidates pending work even if the next key cycle has
+/// A hotkey release invalidates pending work even if the next key cycle has
 /// already started by the time that work is delivered.
 struct FinderShortcutQueuedPressGate {
     private(set) var cycle: UInt64 = 0

@@ -187,4 +187,89 @@ final class FinderTrashExecutorTests: XCTestCase {
         XCTAssertEqual(FinderTrashFocusPolicy.selectionAttributes(for: "AXTextField"), [])
         XCTAssertEqual(FinderTrashFocusPolicy.selectionAttributes(for: nil), [])
     }
+
+    func testObservedFinderCollectionListPathIsAccepted() {
+        // Structural readback: no file names, paths or values are required.
+        let path = [FinderTrashFocusNode(role: "AXList", subrole: "AXCollectionList"),
+                    FinderTrashFocusNode(role: "AXScrollArea"),
+                    FinderTrashFocusNode(role: "AXSplitGroup"),
+                    FinderTrashFocusNode(role: "AXSplitGroup"),
+                    window, application]
+        XCTAssertTrue(FinderTrashFocusPolicy.allows(path, reachesFinderRoot: true))
+        XCTAssertFalse(FinderTrashFocusPolicy.allows(path, reachesFinderRoot: false))
+    }
+
+    func testCollectionListSubroleCannotBypassRoleEditingOrModalGuards() {
+        let tail = [FinderTrashFocusNode(role: "AXScrollArea"), window, application]
+        for leaf in [FinderTrashFocusNode(role: "AXList", subrole: "AXCollectionList", editable: true),
+                     FinderTrashFocusNode(role: "AXList", subrole: "AXCollectionList", modal: true),
+                     FinderTrashFocusNode(role: "AXList", subrole: "AXSearchField"),
+                     FinderTrashFocusNode(role: "AXTable", subrole: "AXCollectionList"),
+                     FinderTrashFocusNode(role: "AXTextField", subrole: "AXCollectionList")] {
+            XCTAssertFalse(FinderTrashFocusPolicy.allows([leaf] + tail, reachesFinderRoot: true))
+        }
+        let leaf = FinderTrashFocusNode(role: "AXList", subrole: "AXCollectionList")
+        for ancestor in [FinderTrashFocusNode(role: "AXGroup", editable: true),
+                         FinderTrashFocusNode(role: "AXGroup", modal: true)] {
+            XCTAssertFalse(FinderTrashFocusPolicy.allows([leaf, ancestor] + tail, reachesFinderRoot: true))
+        }
+    }
+
+    func testObservedRootScrollAreaImagePathNeedsNoSpecialRoleRelaxation() {
+        let path = [FinderTrashFocusNode(role: "AXImage"),
+                    FinderTrashFocusNode(role: "AXGroup", modal: false),
+                    FinderTrashFocusNode(role: "AXScrollArea", modal: false), application]
+        XCTAssertTrue(FinderTrashFocusPolicy.allows(path, reachesFinderRoot: true))
+        var editing = path
+        editing[0] = FinderTrashFocusNode(role: "AXTextField")
+        XCTAssertFalse(FinderTrashFocusPolicy.allows(editing, reachesFinderRoot: true))
+    }
+
+    func testObservedFocusedDesktopGroupRequiresItsOwnSelectedChildren() {
+        let path = [FinderTrashFocusNode(role: "AXGroup", modal: false, selectedChildrenCount: 1),
+                    FinderTrashFocusNode(role: "AXScrollArea", modal: false, selectedChildrenCount: 0),
+                    FinderTrashFocusNode(role: "AXApplication", modal: false, selectedChildrenCount: 0)]
+        XCTAssertTrue(FinderTrashFocusPolicy.allows(path, reachesFinderRoot: true))
+        XCTAssertFalse(FinderTrashFocusPolicy.allows(path, reachesFinderRoot: false))
+        XCTAssertEqual(FinderTrashFocusPolicy.selectionAttributes(for: "AXGroup", isFocused: true),
+                       ["AXSelectedChildren"])
+        XCTAssertEqual(FinderTrashFocusPolicy.selectionAttributes(for: "AXGroup", isFocused: false), [])
+        for count in [nil, 0, -1, FinderTrashSelectionPolicy.maximumItems + 1] as [Int?] {
+            var invalid = path
+            invalid[0].selectedChildrenCount = count
+            XCTAssertFalse(FinderTrashFocusPolicy.allows(invalid, reachesFinderRoot: true))
+        }
+    }
+
+    func testDesktopGroupExceptionDoesNotApplyInsideAWindowOrAnotherContainer() {
+        let group = FinderTrashFocusNode(role: "AXGroup", modal: false, selectedChildrenCount: 1)
+        let scroll = FinderTrashFocusNode(role: "AXScrollArea", modal: false)
+        let app = FinderTrashFocusNode(role: "AXApplication", modal: false)
+        XCTAssertFalse(FinderTrashFocusPolicy.allows([group, scroll, window, app], reachesFinderRoot: true))
+        XCTAssertFalse(FinderTrashFocusPolicy.allows([group, group, scroll, app], reachesFinderRoot: true))
+        XCTAssertFalse(FinderTrashFocusPolicy.allows([group, app], reachesFinderRoot: true))
+        XCTAssertFalse(FinderTrashFocusPolicy.allows([group, window, app], reachesFinderRoot: true))
+    }
+
+    func testSelectedDesktopGroupStillRejectsEditingModalAndSpecialSubroles() {
+        let path = [FinderTrashFocusNode(role: "AXGroup", modal: false, selectedChildrenCount: 1),
+                    FinderTrashFocusNode(role: "AXScrollArea", modal: false),
+                    FinderTrashFocusNode(role: "AXApplication", modal: false)]
+        for index in path.indices {
+            var editing = path
+            editing[index].editable = true
+            XCTAssertFalse(FinderTrashFocusPolicy.allows(editing, reachesFinderRoot: true))
+            for modal in [nil, true] as [Bool?] {
+                var dialog = path
+                dialog[index].modal = modal
+                XCTAssertFalse(FinderTrashFocusPolicy.allows(dialog, reachesFinderRoot: true))
+            }
+            var special = path
+            special[index].subrole = "AXSearchField"
+            XCTAssertFalse(FinderTrashFocusPolicy.allows(special, reachesFinderRoot: true))
+        }
+        var disguised = path
+        disguised[0].subrole = "AXCollectionList"
+        XCTAssertFalse(FinderTrashFocusPolicy.allows(disguised, reachesFinderRoot: true))
+    }
 }
