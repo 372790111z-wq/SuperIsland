@@ -623,9 +623,9 @@ struct IslandContainerView: View {
     }
 
     private func validateHoverState() {
-        // AppState intentionally clears its public hover while dragging. Still
-        // reconcile the view's local flags so a missed exit cannot leave the
-        // post-drag hover gate waiting forever (including a removed display).
+        // Reconcile the view's local flags even if a missed callback left the
+        // public hover false, so the post-drag gate cannot wait forever after
+        // a pointer exit (including a removed display).
         guard appState.isHovering || appState.isWindowDragHoverSuppressed ||
                 isHoveringIslandSurface || isHoveringPreviousButton || isHoveringNextButton else { return }
         let islandPanels = NSApp.windows.compactMap { $0 as? IslandPanel }.filter(\.isVisible)
