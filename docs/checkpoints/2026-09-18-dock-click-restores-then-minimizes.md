@@ -43,7 +43,7 @@
 - 源码提交 `2ffd844c991c7af2c49e05b389a870ae2af75462`；新构建 `20260918171124`，稳定证书 `SuperIsland WE1 Debug Local Code Signing` 签名，严格校验通过；无 XCTest 运行时残留。
 - 候选代码载荷：`a24179903c10e780edd086f42f81e4005352ebfc959952cb5ae226d25e2261f9`；101 项文件／链接／权限及源码身份清单：`build/DockClickRepair/candidate-manifest.json`。
 - 新候选位于 `build/WE1-Debug/SuperIsland-WE1-Debug.app`，包含设置预览；之前 160354 候选已自动归档到 `build/WE1-Debug/backups/SuperIsland-WE1-Debug-20260918-171124.app` 并回读核对构建号。旧候选清单同步指向该真实归档路径。
-- 当前仅完成本地提交与打包，尚未安装／重启／实际点击验收。
+- 打包阶段仅完成本地提交与候选校验；后续安装及用户验收结果见末尾。
 
 ## 171124 安装尝试：等待旧版退出
 
@@ -53,3 +53,13 @@
 - 确认此版本 SIGTERM 会进入应用自身正常退出／窗口恢复流程后，尝试一次该信号，发送成功，25.06 秒后主进程仍在。原 MediaRemote 子进程 59128 已退出；未发送 SIGKILL，未关闭其他应用。
 - 因旧进程尚在，安装停止于替换前，Applications 仍为 105549。强制结束旧 PID 59120 需要额外授权，已向用户提出；当前不宣称安装或实际点击验证完成。
 - 证据保存在 `build/DockClickRepair/Install/`：`installation.json`、`backup-manifest.json`、正常 Quit／SIGTERM 输出和主线程采样。旧 helper、其他应用及用户偏好均未被强制修改。
+
+## 171124 已安装，用户三项实测通过
+
+- 用户对“只强制结束旧 WE1 PID 59120，继续安装”的明确问题再次答复“确认”。重新核对旧进程启动时间、精确路径、105549 原包／备份，以及 171124 source／staging 的 101 项清单和相同签名之后，仅对旧 PID 59120 发送一次 SIGKILL。
+- 旧进程约 0.09 秒内结束，随后替换 Applications 中的 WE1，并后台启动新版。新进程 PID 2157 于 18:19:21 启动，实际加载 `/Applications/SuperIsland-WE1-Debug.app/Contents/MacOS/SuperIsland.debug.dylib`；安装的完整清单、载荷与稳定证书校验一致。
+- 新版 MediaRemote 辅助进程 PID 2196 的父进程为 2157；旧 PID 59120 已退出。其他应用未被退出或发送信号，未发送键鼠操作，未修改用户偏好。
+- 除安装前完整备份外，旧实际安装还保存在 `build/WE1-Debug/backups/Previous-installed-20260918105549-during-20260918171124.app`。设置预览候选 160354 的独立备份及标签继续保留。
+- 在确认为 171124 的安装后，用户按提示依次检查：后台应用单击 Dock 正常打开、最小化应用单击 Dock 正常恢复、原本前台应用再次单击 Dock 正常收起；答复 **“三种情况都正常”**。这三项记为用户实测通过。
+- 本次验收不扩展到快速连续点击、应用无通知自主变化或设置悬停预览；两个设置演示已随同安装，但尚无单独实测反馈。旧版正常退出失败的具体原因仍为独立待定位事项。
+- 安装和用户验收范围已回写 `build/DockClickRepair/Install/installation.json` 及候选清单；源码修复仍为 `2ffd844`，本阶段只补交付记录。
