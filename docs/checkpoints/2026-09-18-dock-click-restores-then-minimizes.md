@@ -44,3 +44,12 @@
 - 候选代码载荷：`a24179903c10e780edd086f42f81e4005352ebfc959952cb5ae226d25e2261f9`；101 项文件／链接／权限及源码身份清单：`build/DockClickRepair/candidate-manifest.json`。
 - 新候选位于 `build/WE1-Debug/SuperIsland-WE1-Debug.app`，包含设置预览；之前 160354 候选已自动归档到 `build/WE1-Debug/backups/SuperIsland-WE1-Debug-20260918-171124.app` 并回读核对构建号。旧候选清单同步指向该真实归档路径。
 - 当前仅完成本地提交与打包，尚未安装／重启／实际点击验收。
+
+## 171124 安装尝试：等待旧版退出
+
+- 用户确认安装并仅重启 WE1 后，独立回读确认候选 101 项清单、实际代码载荷及稳定证书均正确；同时修正清单曾只取 codesign stderr 的记录瑕疵，签名本身没有问题。
+- 旧 105549 完整备份到 `build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-105549-before-171124.app`，文件／链接／权限及签名均与原安装一致。新包 staging 位于 `/Applications/.SuperIsland-WE1-Debug.install-20260918171124.app`，也完成全部校验。
+- 对核验过身份的旧 PID 59120 发出正常 Quit，API 返回 true，但 30.19 秒后仍未退出。主线程采样仍为普通 AppKit run loop；不能仅据此认定具体取消原因。
+- 确认此版本 SIGTERM 会进入应用自身正常退出／窗口恢复流程后，尝试一次该信号，发送成功，25.06 秒后主进程仍在。原 MediaRemote 子进程 59128 已退出；未发送 SIGKILL，未关闭其他应用。
+- 因旧进程尚在，安装停止于替换前，Applications 仍为 105549。强制结束旧 PID 59120 需要额外授权，已向用户提出；当前不宣称安装或实际点击验证完成。
+- 证据保存在 `build/DockClickRepair/Install/`：`installation.json`、`backup-manifest.json`、正常 Quit／SIGTERM 输出和主线程采样。旧 helper、其他应用及用户偏好均未被强制修改。
