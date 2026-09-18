@@ -37,3 +37,10 @@
 - 当前安装及其标签保持；本地源码可回到 `171f258` 或回退本次独立提交。
 - 新候选的安装和真实设置 hover/focus 体验需要安装后验证；离屏图片不能冒充设备交互验收。
 - 首次桌面删除提示的原有诊断事项和带待恢复批次的退出验证仍独立保留，不因本轮 UI 预览完成而判定通过。
+
+## 候选包
+
+- UI 源码提交 `e1cbda0`；候选构建 `20260918160354`，稳定证书签名并通过严格签名校验。代码载荷 SHA-256：`b2696d559fbeea905b01bfca42e8d2edbd66c62199e98d5ee60a1156f252cfba`。
+- 候选路径 `build/WE1-Debug/SuperIsland-WE1-Debug.app`；101 项文件／链接／权限清单与源码提交、验证边界记录在 `build/SettingsShortcutPreview/candidate-manifest.json`。
+- 旧 105549 打包产物自动转存 `build/WE1-Debug/backups/SuperIsland-WE1-Debug-20260918-160355.app` 并回读构建号；旧清单更新候选归档路径，避免指向新的产物。Applications 中的 105549 未替换，进程未重启。
+- 本候选尚未安装、未获真实设置交互验收。
