@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-enum FinderTrashFailure: Error, Equatable {
+enum FinderTrashFailure: String, Error, Equatable {
     case accessibilityUnavailable
     case finderNotFrontmost
     case unsafeFocus
@@ -28,6 +28,101 @@ enum FinderTrashFailure: Error, Equatable {
         case .requestUnconfirmed: return "无法确认 Finder 是否已接收命令，请先检查文件状态"
         }
     }
+}
+
+/// Structural diagnostics only: unknown AX strings are reduced to fixed codes.
+/// A dedicated bounded stream keeps pointer traffic from dropping first-use
+/// failures or the user's immediate retry. It never reads file names or URLs.
+struct FinderTrashDiagnosticTrace {
+    enum Stage: String {
+        case context, initialFocus, initialCommand, currentFocus, currentCommand, finalFocus, press
+    }
+
+    var stage: Stage = .context
+    private(set) var focusPath = "unread"
+    private(set) var focusDepth = 0
+    private(set) var editable = false
+    private(set) var modal = false
+    private(set) var editableStates = "unread"
+    private(set) var modalStates = "unread"
+    private(set) var subroleStates = "unread"
+    private(set) var selectionState = "unread"
+
+    private static func booleanCode(_ value: Bool?) -> String {
+        switch value {
+        case true?: return "t"
+        case false?: return "f"
+        case nil: return "u"
+        }
+    }
+
+    mutating func observeFocus(_ nodes: [FinderTrashFocusNode]) {
+        focusDepth = nodes.count
+        focusPath = nodes.prefix(FinderTrashFocusPolicy.maximumDepth).map { node in
+            switch node.role {
+            case "AXGroup": return "group"
+            case "AXList": return "list"
+            case "AXOutline": return "outline"
+            case "AXTable": return "table"
+            case "AXBrowser": return "browser"
+            case "AXGrid": return "grid"
+            case "AXLayoutArea": return "layout"
+            case "AXScrollArea": return "scroll"
+            case "AXCell": return "cell"
+            case "AXRow": return "row"
+            case "AXImage": return "image"
+            case "AXStaticText": return "text"
+            case "AXTextField", "AXTextArea", "AXComboBox": return "edit"
+            case "AXWindow": return "window"
+            case "AXApplication": return "app"
+            case nil: return "missing"
+            default: return "other"
+            }
+        }.joined(separator: ".")
+        if focusPath.isEmpty { focusPath = "unread" }
+        editable = nodes.contains { $0.editable == true }
+        modal = nodes.contains { $0.modal == true }
+        let boundedNodes = nodes.prefix(FinderTrashFocusPolicy.maximumDepth)
+        editableStates = nodes.isEmpty ? "unread" : boundedNodes.map { Self.booleanCode($0.editable) }.joined(separator: ".")
+        modalStates = nodes.isEmpty ? "unread" : boundedNodes.map { Self.booleanCode($0.modal) }.joined(separator: ".")
+        // m=missing, e=empty, u=AXUnknown, s=standard window,
+        // c=collection, d=dialog, q=search, o=any other subrole.
+        subroleStates = nodes.isEmpty ? "unread" : boundedNodes.map { node in
+            switch node.subrole {
+            case nil: return "m"
+            case "": return "e"
+            case "AXUnknown": return "u"
+            case "AXStandardWindow": return "s"
+            case "AXCollectionList": return "c"
+            case "AXDialog": return "d"
+            case "AXSearchField": return "q"
+            default: return "o"
+            }
+        }.joined(separator: ".")
+        switch nodes.first?.selectedChildrenCount {
+        case nil: selectionState = nodes.isEmpty ? "unread" : "missing"
+        case 0?: selectionState = "empty"
+        case let count?:
+            selectionState = count < 0 ? "invalid" :
+                (count > FinderTrashSelectionPolicy.maximumItems ? "oversized" : "nonempty")
+        }
+    }
+
+    func metadata(failure: FinderTrashFailure?, elapsed: TimeInterval) -> [String: WindowInteractionDiagnosticValue] {
+        // Clamp diagnostic conversion only; the operation's deadline is unchanged.
+        let elapsedMS = elapsed.isFinite ? Int64(min(60_000, max(0, elapsed * 1_000))) : -1
+        return ["stage": .code(stage.rawValue), "result": .code(failure?.rawValue ?? "requested"),
+                "elapsed_ms": .integer(elapsedMS), "focus_path": .code(focusPath),
+                "focus_depth": .integer(Int64(focusDepth)),
+                "editable": .flag(editable), "modal": .flag(modal),
+                "editable_states": .code(editableStates), "modal_states": .code(modalStates),
+                "subrole_states": .code(subroleStates), "selection": .code(selectionState)]
+    }
+
+    static let recorder = WindowLifecycleDiagnosticRecorder(
+        fileURL: WindowInteractionDiagnosticRecorder.diagnosticFileURL?
+            .deletingLastPathComponent().appendingPathComponent("finder-shortcuts.jsonl")
+    )
 }
 
 /// Only structural AX metadata is used. File names, paths and document contents
@@ -264,37 +359,55 @@ final class FinderTrashExecutor {
     /// This performs no input synthesis and does not open a menu or confirm any
     /// Finder dialog. A successful AXPress only acknowledges the command request.
     func perform(expectedPID: pid_t, isCurrent: () -> Bool) -> Outcome {
-        let deadline = ProcessInfo.processInfo.systemUptime + Self.durationLimit
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let deadline = startedAt + Self.durationLimit
+        var trace = FinderTrashDiagnosticTrace()
+        func finish(_ outcome: Outcome) -> Outcome {
+            let failure: FinderTrashFailure?
+            switch outcome {
+            case .requested: failure = nil
+            case let .rejected(reason): failure = reason
+            }
+            FinderTrashDiagnosticTrace.recorder.record(event: "trashRequest", metadata: trace.metadata(
+                failure: failure, elapsed: ProcessInfo.processInfo.systemUptime - startedAt))
+            return outcome
+        }
         do {
             try validateContext(expectedPID: expectedPID, isCurrent: isCurrent, deadline: deadline)
             let application = AXUIElementCreateApplication(expectedPID)
+            trace.stage = .initialFocus
             let initialFocus = try focusEvidence(application: application, expectedPID: expectedPID,
-                                                 deadline: deadline, isCurrent: isCurrent)
+                                                 deadline: deadline, isCurrent: isCurrent, trace: &trace)
+            trace.stage = .initialCommand
             let initialCommand = try trashCommand(application: application, expectedPID: expectedPID,
                                                    deadline: deadline, isCurrent: isCurrent)
             try validateContext(expectedPID: expectedPID, isCurrent: isCurrent, deadline: deadline)
+            trace.stage = .currentFocus
             let currentFocus = try focusEvidence(application: application, expectedPID: expectedPID,
-                                                 deadline: deadline, isCurrent: isCurrent)
-            guard initialFocus.matches(currentFocus) else { return .rejected(.contextChanged) }
+                                                 deadline: deadline, isCurrent: isCurrent, trace: &trace)
+            guard initialFocus.matches(currentFocus) else { return finish(.rejected(.contextChanged)) }
+            trace.stage = .currentCommand
             let currentCommand = try trashCommand(application: application, expectedPID: expectedPID,
                                                    deadline: deadline, isCurrent: isCurrent)
             guard CFEqual(initialCommand.element, currentCommand.element),
                   initialCommand.descriptor == currentCommand.descriptor else {
-                return .rejected(.contextChanged)
+                return finish(.rejected(.contextChanged))
             }
+            trace.stage = .finalFocus
             let finalFocus = try focusEvidence(application: application, expectedPID: expectedPID,
-                                               deadline: deadline, isCurrent: isCurrent)
-            guard initialFocus.matches(finalFocus) else { return .rejected(.contextChanged) }
+                                               deadline: deadline, isCurrent: isCurrent, trace: &trace)
+            guard initialFocus.matches(finalFocus) else { return finish(.rejected(.contextChanged)) }
+            trace.stage = .press
             try prepare(currentCommand.element, expectedPID: expectedPID,
                         deadline: deadline, isCurrent: isCurrent)
             try validateContext(expectedPID: expectedPID, isCurrent: isCurrent, deadline: deadline)
             let result = AXUIElementPerformAction(currentCommand.element, kAXPressAction as CFString)
             // Never retry an uncertain AXPress: Finder may already be acting.
-            return result == .success ? .requested : .rejected(.requestUnconfirmed)
+            return finish(result == .success ? .requested : .rejected(.requestUnconfirmed))
         } catch let failure as FinderTrashFailure {
-            return .rejected(failure)
+            return finish(.rejected(failure))
         } catch {
-            return .rejected(.commandUnavailable)
+            return finish(.rejected(.commandUnavailable))
         }
     }
 
@@ -365,7 +478,9 @@ final class FinderTrashExecutor {
     }
 
     private func focusEvidence(application: AXUIElement, expectedPID: pid_t,
-                               deadline: TimeInterval, isCurrent: () -> Bool) throws -> FocusEvidence {
+                               deadline: TimeInterval, isCurrent: () -> Bool,
+                               trace: inout FinderTrashDiagnosticTrace) throws -> FocusEvidence {
+        trace.observeFocus([])
         guard let focused = axElement(try attribute(kAXFocusedUIElementAttribute as String, of: application,
                                                     expectedPID: expectedPID, deadline: deadline,
                                                     isCurrent: isCurrent)) else {
@@ -385,6 +500,7 @@ final class FinderTrashExecutor {
                 subrole: FinderTrashAttributePolicy.string(values[1]),
                 editable: FinderTrashAttributePolicy.boolean(values[2]),
                 modal: FinderTrashAttributePolicy.boolean(values[3])))
+            trace.observeFocus(nodes)
             for name in FinderTrashFocusPolicy.selectionAttributes(for: nodes.last?.role,
                                                                    isFocused: nodes.count == 1) {
                 let selection = try selectedElements(name, of: current, expectedPID: expectedPID,
@@ -395,6 +511,7 @@ final class FinderTrashExecutor {
                 selections.append(SelectionEvidence(pathIndex: nodes.count - 1,
                                                      attribute: name, elements: selection))
             }
+            trace.observeFocus(nodes)
             if CFEqual(current, application) {
                 guard FinderTrashFocusPolicy.allows(nodes, reachesFinderRoot: true) else {
                     throw FinderTrashFailure.unsafeFocus

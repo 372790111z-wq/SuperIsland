@@ -3,6 +3,104 @@ import ApplicationServices
 @testable import SuperIsland
 
 final class FinderTrashExecutorTests: XCTestCase {
+    func testTrashDiagnosticsRedactUnknownAXStringsAndBoundThePath() throws {
+        var trace = FinderTrashDiagnosticTrace()
+        trace.observeFocus([
+            .init(role: "/Users/person/private-file.txt", subrole: "private document"),
+            .init(role: "AXGroup"), .init(role: "AXScrollArea"), .init(role: "AXApplication")
+        ])
+        let metadata = trace.metadata(failure: .unsafeFocus, elapsed: 0.05)
+        XCTAssertEqual(metadata["focus_path"], .code("other.group.scroll.app"))
+        XCTAssertTrue(metadata.values.allSatisfy(\.isAllowed))
+        let text = String(decoding: try JSONEncoder().encode(metadata), as: UTF8.self)
+        XCTAssertFalse(text.contains("private"))
+        XCTAssertFalse(text.contains("/Users"))
+
+        trace.observeFocus(Array(repeating: .init(role: "AXOutline"), count: 20))
+        XCTAssertTrue(trace.metadata(failure: .unsafeFocus, elapsed: 0).values.allSatisfy(\.isAllowed))
+        XCTAssertEqual(trace.focusPath.split(separator: ".").count, FinderTrashFocusPolicy.maximumDepth)
+    }
+
+    func testTrashDiagnosticsPreserveStageAndFailureWithoutClaimingDeletion() {
+        var trace = FinderTrashDiagnosticTrace()
+        trace.stage = .initialCommand
+        let rejected = trace.metadata(failure: .commandUnavailable, elapsed: 0.08)
+        XCTAssertEqual(rejected["stage"], .code("initialCommand"))
+        XCTAssertEqual(rejected["result"], .code("commandUnavailable"))
+        XCTAssertEqual(rejected["elapsed_ms"], .integer(80))
+        trace.stage = .press
+        XCTAssertEqual(trace.metadata(failure: .requestUnconfirmed, elapsed: 0.1)["result"],
+                       .code("requestUnconfirmed"))
+        XCTAssertEqual(trace.metadata(failure: nil, elapsed: 0.1)["result"], .code("requested"))
+    }
+
+    func testTrashDiagnosticsClearEarlierFocusAndKeepUnsafeFlags() {
+        var trace = FinderTrashDiagnosticTrace()
+        trace.observeFocus([.init(role: "AXTextField", editable: true, modal: true)])
+        XCTAssertEqual(trace.metadata(failure: .unsafeFocus, elapsed: 0)["editable"], .flag(true))
+        XCTAssertEqual(trace.metadata(failure: .unsafeFocus, elapsed: 0)["modal"], .flag(true))
+        trace.observeFocus([])
+        XCTAssertEqual(trace.focusPath, "unread")
+        XCTAssertEqual(trace.focusDepth, 0)
+        XCTAssertFalse(trace.editable)
+        XCTAssertFalse(trace.modal)
+    }
+
+    func testTrashDiagnosticElapsedConversionCannotTrapOrAlterOperation() {
+        let trace = FinderTrashDiagnosticTrace()
+        for duration in [Double.nan, .infinity, -.infinity] {
+            XCTAssertEqual(trace.metadata(failure: .timedOut, elapsed: duration)["elapsed_ms"], .integer(-1))
+        }
+        XCTAssertEqual(trace.metadata(failure: nil, elapsed: -1)["elapsed_ms"], .integer(0))
+        XCTAssertEqual(trace.metadata(failure: nil, elapsed: .greatestFiniteMagnitude)["elapsed_ms"], .integer(60_000))
+    }
+
+    func testTrashDiagnosticsDistinguishDesktopMissingMetadataFromFalseAndEmpty() {
+        var trace = FinderTrashDiagnosticTrace()
+        trace.observeFocus([.init(role: "AXGroup", subrole: "AXUnknown", editable: nil, modal: nil),
+                            .init(role: "AXScrollArea", modal: false),
+                            .init(role: "AXApplication", modal: false)])
+        let missing = trace.metadata(failure: .unsafeFocus, elapsed: 0)
+        XCTAssertEqual(missing["modal_states"], .code("u.f.f"))
+        XCTAssertEqual(missing["selection"], .code("missing"))
+        XCTAssertEqual(missing["subrole_states"], .code("u.m.m"))
+        for (count, expected) in [(0, "empty"), (1, "nonempty"), (257, "oversized"), (-1, "invalid")] {
+            trace.observeFocus([.init(role: "AXGroup", editable: false, modal: false, selectedChildrenCount: count)])
+            let metadata = trace.metadata(failure: .unsafeFocus, elapsed: 0)
+            XCTAssertEqual(metadata["modal_states"], .code("f"))
+            XCTAssertEqual(metadata["editable_states"], .code("f"))
+            XCTAssertEqual(metadata["selection"], .code(expected))
+            XCTAssertLessThanOrEqual(metadata.count, 16)
+            XCTAssertTrue(metadata.values.allSatisfy(\.isAllowed))
+        }
+        trace.observeFocus([])
+        XCTAssertEqual(trace.selectionState, "unread")
+        XCTAssertEqual(trace.modalStates, "unread")
+    }
+
+    func testTrashFailureAndImmediateRetryBothSurviveDiagnosticReadback() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("finder-shortcuts.jsonl")
+        let recorder = WindowLifecycleDiagnosticRecorder(
+            bundleIdentifier: WindowInventoryDiagnosticGate.debugBundleIdentifier, fileURL: file)
+        var trace = FinderTrashDiagnosticTrace()
+        trace.stage = .initialFocus
+        trace.observeFocus([.init(role: "AXGroup"), .init(role: "AXScrollArea"), .init(role: "AXApplication")])
+        recorder.record(event: "trashRequest", metadata: trace.metadata(failure: .unsafeFocus, elapsed: 0.01))
+        trace.stage = .press
+        recorder.record(event: "trashRequest", metadata: trace.metadata(failure: nil, elapsed: 0.04))
+        await withCheckedContinuation { continuation in recorder.flush { continuation.resume() } }
+        let rows = try String(contentsOf: file, encoding: .utf8).split(separator: "\n").map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        XCTAssertEqual(rows.count, 2)
+        let metadata = try rows.map { try XCTUnwrap($0["metadata"] as? [String: Any]) }
+        XCTAssertEqual(metadata[0]["result"] as? String, "unsafeFocus")
+        XCTAssertEqual(metadata[1]["result"] as? String, "requested")
+        XCTAssertEqual(metadata[0]["focus_path"] as? String, "group.scroll.app")
+    }
+
     private let window = FinderTrashFocusNode(role: "AXWindow", subrole: "AXStandardWindow", modal: false)
     private let application = FinderTrashFocusNode(role: "AXApplication")
     private var command: FinderTrashCommandDescriptor {
