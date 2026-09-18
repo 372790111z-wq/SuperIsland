@@ -146,6 +146,131 @@ final class FinderTrashExecutorTests: XCTestCase {
         XCTAssertEqual(FinderTrashCommandPolicy.resolve([putBack, command]), .success(1))
     }
 
+    func testDirectMenuScopeFindsUniqueTrashWithoutReadingLargeUnrelatedSubtree() throws {
+        let largeSubmenu = MenuNode("AXMenu", children: (0..<200).map { _ in MenuNode("AXMenuItem") })
+        let openWith = MenuNode("AXMenuItem", children: [largeSubmenu])
+        let trash = MenuNode("AXMenuItem", command: command)
+        let menu = MenuNode("AXMenu", children: [openWith, trash])
+        let file = MenuNode("AXMenuBarItem", children: [menu])
+        var childrenRead: [MenuNode] = []
+
+        let items = try FinderTrashMenuScope.directItems(of: file, role: { $0.role }, children: { node in
+            childrenRead.append(node)
+            guard node === file || node === menu else {
+                XCTFail("An unrelated command subtree must not be read")
+                throw FinderTrashFailure.commandUnavailable
+            }
+            return node.children
+        })
+
+        XCTAssertEqual(items.count, 2)
+        XCTAssertTrue(items[0] === openWith && items[1] === trash)
+        XCTAssertEqual(FinderTrashCommandPolicy.resolve(items.compactMap(\.command)), .success(0))
+        XCTAssertEqual(childrenRead.count, 2)
+        XCTAssertTrue(childrenRead[0] === file && childrenRead[1] === menu)
+    }
+
+    func testNestedTrashCannotAuthorizeASelectionCommand() throws {
+        let nestedTrash = MenuNode("AXMenuItem", command: command)
+        let submenu = MenuNode("AXMenu", children: [nestedTrash])
+        let parentCommand = MenuNode("AXMenuItem", children: [submenu])
+        let menu = MenuNode("AXMenu", children: [parentCommand])
+        let file = MenuNode("AXMenuBarItem", children: [menu])
+
+        let items = try FinderTrashMenuScope.directItems(of: file, role: { $0.role }, children: { node in
+            guard node === file || node === menu else {
+                XCTFail("Nested Trash must not be inspected")
+                throw FinderTrashFailure.commandUnavailable
+            }
+            return node.children
+        })
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertTrue(items[0] === parentCommand)
+        XCTAssertEqual(FinderTrashCommandPolicy.resolve(items.compactMap(\.command)),
+                       .failure(.commandUnavailable))
+    }
+
+    func testAllDirectCommandsAreRetainedSoALaterDuplicateRemainsAmbiguous() throws {
+        var disabled = command
+        disabled.enabled = false
+        let first = MenuNode("AXMenuItem", command: command)
+        let last = MenuNode("AXMenuItem", command: disabled)
+        let menu = MenuNode("AXMenu", children: [first, MenuNode("AXMenuItem"), last])
+        let file = MenuNode("AXMenuBarItem", children: [menu])
+
+        let items = try FinderTrashMenuScope.directItems(of: file, role: { $0.role }, children: { $0.children })
+
+        XCTAssertEqual(items.count, 3)
+        XCTAssertTrue(items.last === last)
+        XCTAssertEqual(FinderTrashCommandPolicy.resolve(items.compactMap(\.command)),
+                       .failure(.ambiguousCommand))
+    }
+
+    func testDirectMenuScopeRejectsUnknownOrAmbiguousStructure() {
+        let validMenu = MenuNode("AXMenu", children: [MenuNode("AXMenuItem", command: command)])
+        let invalidFiles = [
+            MenuNode(nil, children: [validMenu]),
+            MenuNode("AXMenu", children: [validMenu]),
+            MenuNode("AXMenuBarItem"),
+            MenuNode("AXMenuBarItem", children: [validMenu, validMenu]),
+            MenuNode("AXMenuBarItem", children: [MenuNode("AXGroup", children: [validMenu])]),
+            MenuNode("AXMenuBarItem", children: [MenuNode("AXMenu", children: [MenuNode(nil)])]),
+            MenuNode("AXMenuBarItem", children: [MenuNode("AXMenu", children: [MenuNode("AXRadioGroup")])]),
+            MenuNode("AXMenuBarItem", children: [MenuNode("AXMenu", children: [MenuNode("AXMenu")])])
+        ]
+
+        for file in invalidFiles {
+            XCTAssertThrowsError(try FinderTrashMenuScope.directItems(
+                of: file, role: { $0.role }, children: { $0.children }
+            )) { error in
+                XCTAssertEqual(error as? FinderTrashFailure, .commandUnavailable)
+            }
+        }
+    }
+
+    func testDirectMenuItemLimitIsPreservedWithoutCountingNestedDescendants() throws {
+        let directItems = (0..<FinderTrashMenuScope.maximumDirectItems).map { _ in MenuNode("AXMenuItem") }
+        let menu = MenuNode("AXMenu", children: directItems)
+        let file = MenuNode("AXMenuBarItem", children: [menu])
+        XCTAssertEqual(try FinderTrashMenuScope.directItems(
+            of: file, role: { $0.role }, children: { $0.children }
+        ).count, FinderTrashMenuScope.maximumDirectItems)
+
+        let excessiveMenu = MenuNode("AXMenu", children: directItems + [MenuNode("AXMenuItem")])
+        let excessiveFile = MenuNode("AXMenuBarItem", children: [excessiveMenu])
+        XCTAssertThrowsError(try FinderTrashMenuScope.directItems(
+            of: excessiveFile, role: { $0.role }, children: { $0.children }
+        )) { error in
+            XCTAssertEqual(error as? FinderTrashFailure, .commandUnavailable)
+        }
+    }
+
+    func testDirectMenuScopePropagatesReadAndContextFailures() {
+        let menu = MenuNode("AXMenu", children: [MenuNode("AXMenuItem", command: command)])
+        let file = MenuNode("AXMenuBarItem", children: [menu])
+        for failure in [FinderTrashFailure.commandUnavailable, .contextChanged, .timedOut] {
+            XCTAssertThrowsError(try FinderTrashMenuScope.directItems(of: file, role: { $0.role }, children: { node in
+                if node === menu { throw failure }
+                return node.children
+            })) { error in
+                XCTAssertEqual(error as? FinderTrashFailure, failure)
+            }
+        }
+    }
+
+    private final class MenuNode {
+        let role: String?
+        let children: [MenuNode]
+        let command: FinderTrashCommandDescriptor?
+
+        init(_ role: String?, children: [MenuNode] = [], command: FinderTrashCommandDescriptor? = nil) {
+            self.role = role
+            self.children = children
+            self.command = command
+        }
+    }
+
     func testBatchReadErrorsCannotBecomeMissingSafetyAttributes() throws {
         for code in [AXError.noValue, .attributeUnsupported] {
             var error = code

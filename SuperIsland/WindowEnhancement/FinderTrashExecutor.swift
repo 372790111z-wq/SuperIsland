@@ -177,6 +177,40 @@ enum FinderTrashCommandPolicy {
     }
 }
 
+/// Finder's selection command belongs directly to File's one AXMenu. Submenus
+/// such as Open With are unrelated command scopes and may contain large,
+/// dynamic trees; they must neither authorize Trash nor exhaust its lookup.
+enum FinderTrashMenuScope {
+    static let maximumDirectItems = 96
+
+    static func directItems<Element>(
+        of fileMenuItem: Element,
+        role: (Element) throws -> String?,
+        children: (Element) throws -> [Element]
+    ) throws -> [Element] {
+        guard try role(fileMenuItem) == "AXMenuBarItem" else {
+            throw FinderTrashFailure.commandUnavailable
+        }
+        let menus = try children(fileMenuItem)
+        guard menus.count == 1, let menu = menus.first,
+              try role(menu) == "AXMenu" else {
+            throw FinderTrashFailure.commandUnavailable
+        }
+        let items = try children(menu)
+        guard items.count <= maximumDirectItems else {
+            throw FinderTrashFailure.commandUnavailable
+        }
+        for item in items {
+            guard try role(item) == "AXMenuItem" else {
+                throw FinderTrashFailure.commandUnavailable
+            }
+        }
+        // Deliberately never ask for an AXMenuItem's children. Scan this entire
+        // returned set before resolving the command, so duplicates fail closed.
+        return items
+    }
+}
+
 @MainActor
 final class FinderTrashExecutor {
     typealias Reason = FinderTrashFailure
@@ -224,8 +258,7 @@ final class FinderTrashExecutor {
 
     private static let durationLimit: TimeInterval = 0.250
     private static let perRequestLimit: TimeInterval = 0.020
-    private static let maximumMenuNodes = 96
-    private static let maximumMenuDepth = 5
+    private static let maximumMenuNodes = FinderTrashMenuScope.maximumDirectItems
     private static let fileMenuTitles: Set<String> = ["File", "文件", "檔案"]
 
     /// This performs no input synthesis and does not open a menu or confirm any
@@ -423,16 +456,14 @@ final class FinderTrashExecutor {
         guard fileMenus.count == 1, let fileMenu = fileMenus.first else {
             throw FinderTrashFailure.commandUnavailable
         }
-        var queue: [(AXUIElement, Int)] = [(fileMenu, 0)]
-        var visited: [AXUIElement] = []
+        let directItems = try FinderTrashMenuScope.directItems(of: fileMenu, role: { element in
+            try attribute(kAXRoleAttribute as String, of: element, expectedPID: expectedPID,
+                          deadline: deadline, isCurrent: isCurrent) as? String
+        }, children: { element in
+            try children(of: element, expectedPID: expectedPID, deadline: deadline, isCurrent: isCurrent)
+        })
         var matches: [CommandEvidence] = []
-        var cursor = 0
-        while cursor < queue.count {
-            let (element, depth) = queue[cursor]
-            cursor += 1
-            if visited.contains(where: { CFEqual($0, element) }) { continue }
-            guard visited.count < Self.maximumMenuNodes else { throw FinderTrashFailure.commandUnavailable }
-            visited.append(element)
+        for element in directItems {
             let values = try attributes([kAXRoleAttribute as String, kAXTitleAttribute as String,
                                          kAXMenuItemCmdVirtualKeyAttribute as String,
                                          kAXMenuItemCmdModifiersAttribute as String,
@@ -451,13 +482,6 @@ final class FinderTrashExecutor {
                 descriptor.supportsPress = (actions as? [String])?.contains(kAXPressAction as String) == true
                 matches.append(CommandEvidence(element: element, descriptor: descriptor))
             }
-            let descendants = try children(of: element, expectedPID: expectedPID,
-                                            deadline: deadline, isCurrent: isCurrent)
-            guard descendants.isEmpty || (depth < Self.maximumMenuDepth &&
-                queue.count + descendants.count <= Self.maximumMenuNodes) else {
-                throw FinderTrashFailure.commandUnavailable
-            }
-            queue.append(contentsOf: descendants.map { ($0, depth + 1) })
         }
         switch FinderTrashCommandPolicy.resolve(matches.map(\.descriptor)) {
         case let .success(index): return matches[index]
