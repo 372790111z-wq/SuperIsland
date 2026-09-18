@@ -282,6 +282,11 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
     static let didRetireWindowsNotification = Notification.Name(
         "WindowAXLifecycleRegistry.didRetireWindows"
     )
+    /// State invalidation is separate from AX binding revisions: minimizing a
+    /// window must not invalidate the preview's otherwise valid action object.
+    static let didChangeWindowStateNotification = Notification.Name(
+        "WindowAXLifecycleRegistry.didChangeWindowState"
+    )
 
     private final class ProcessObservation {
         let identity: WindowThumbnailApplicationIdentity
@@ -675,6 +680,10 @@ final class WindowAXLifecycleRegistry: @unchecked Sendable {
         }), observation.identity.matchesCurrentProcess() else { return }
         touch(observation)
 
+        NotificationCenter.default.post(
+            name: Self.didChangeWindowStateNotification,
+            object: NSNumber(value: observation.identity.processIdentifier)
+        )
         switch notification {
         case kAXWindowCreatedNotification as String:
             track(element, in: observation, source: .windowCreated)

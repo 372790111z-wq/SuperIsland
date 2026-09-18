@@ -341,6 +341,17 @@ final class WindowDockInteractionMonitor {
     private var hoveredLifecycleRevisions: [String: WindowAXLifecycleRevision] = [:]
     private var mouseDownTargetPID: pid_t?
     private var mouseDownReverseAction: DockReverseAction?
+    private let reverseSampler = DockReversePreclickSampler()
+    private var reverseSnapshot: DockReversePreclickSnapshot?
+    private var reverseSamplingTimer: Timer?
+    private var reverseSamplingInFlight = false
+    private var reverseSamplingPID: pid_t?
+    private var reverseSamplingGeneration: UInt64 = 0
+    private var reverseSamplingNotBefore: TimeInterval = 0
+    private var reverseWorkspaceObservers: [NSObjectProtocol] = []
+    private var reverseWindowStateObserver: NSObjectProtocol?
+    private var reverseDisplayObserver: NSObjectProtocol?
+    private var reverseClickGeneration: UInt64 = 0
     private var reverseMinimizedWindows: [pid_t: [AXUIElement]] = [:]
     private var reverseOperationGenerations: [pid_t: Int] = [:]
     /// Invalidates every delayed Dock-reverse callback across feature toggles.
@@ -361,6 +372,7 @@ final class WindowDockInteractionMonitor {
         case mouseMoved
         case leftMouseDown
         case leftMouseUp
+        case invalidateReverse
     }
 
     /// `NSEvent` itself is not Sendable. Monitor callbacks immediately reduce
@@ -406,6 +418,7 @@ final class WindowDockInteractionMonitor {
     }
 
     func stop() {
+        stopReverseSampling()
         removeMonitor()
         cancelPendingWork()
         preview.hide()
@@ -423,7 +436,10 @@ final class WindowDockInteractionMonitor {
     func updateEnabledState() {
         let reverseEnabled = preferences.isEnabled && preferences.dockReverseEnabled
         if !reverseEnabled {
+            stopReverseSampling()
             cancelDockReverseOperations(clearTracking: true)
+        } else {
+            startReverseSamplingIfNeeded()
         }
         let anyPreviewEnabled = preferences.isEnabled && (
             preferences.dockPreviewEnabled || preferences.cmdTabPlusEnabled
@@ -444,6 +460,11 @@ final class WindowDockInteractionMonitor {
         if preferences.isEnabled,
            preferences.dockPreviewEnabled || preferences.dockReverseEnabled {
             desiredEventMask.formUnion([.leftMouseDown, .leftMouseUp])
+        }
+        if reverseEnabled {
+            // Observe only: other input invalidates a previously sampled state
+            // and any delayed reverse action. These events are never consumed.
+            desiredEventMask.formUnion([.keyDown, .flagsChanged, .rightMouseDown, .otherMouseDown])
         }
         if !desiredEventMask.isEmpty {
             installMonitorIfNeeded(eventMask: desiredEventMask)
@@ -563,6 +584,7 @@ final class WindowDockInteractionMonitor {
         // removing their tokens. Re-enabling cannot replay an old click or
         // hover stream into the new generation.
         monitorGeneration &+= 1
+        cancelDockReverseOperations(clearTracking: false)
         lastAcceptedMonitorEvent = nil
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
@@ -582,6 +604,7 @@ final class WindowDockInteractionMonitor {
         case .mouseMoved: kind = .mouseMoved
         case .leftMouseDown: kind = .leftMouseDown
         case .leftMouseUp: kind = .leftMouseUp
+        case .keyDown, .flagsChanged, .rightMouseDown, .otherMouseDown: kind = .invalidateReverse
         default: return nil
         }
         return MonitoredDockEvent(
@@ -605,7 +628,8 @@ final class WindowDockInteractionMonitor {
             // App events. If macOS mirrors one native event to both, accept it
             // only once so reverse actions and hover generations do not toggle
             // twice.
-            return event.kind != .mouseMoved && preview.contains(event.appKitLocation)
+            return event.kind != .mouseMoved && event.kind != .invalidateReverse &&
+                preview.contains(event.appKitLocation)
         }
         lastAcceptedMonitorEvent = event
 
@@ -617,6 +641,8 @@ final class WindowDockInteractionMonitor {
             )
             return false
         case .leftMouseDown:
+            let beforeClick = reverseSnapshot
+            beginDockReverseClick()
             if preview.handleExternalPointer(
                 type: .leftMouseDown,
                 at: event.appKitLocation
@@ -625,7 +651,11 @@ final class WindowDockInteractionMonitor {
                 cancelScheduledHide()
                 return true
             }
-            handleMouseDown(quartzLocation: event.quartzLocation)
+            handleMouseDown(
+                quartzLocation: event.quartzLocation,
+                timestamp: event.timestamp,
+                beforeClick: beforeClick
+            )
             return false
         case .leftMouseUp:
             if preview.handleExternalPointer(
@@ -637,6 +667,9 @@ final class WindowDockInteractionMonitor {
                 return true
             }
             handleMouseUp(quartzLocation: event.quartzLocation)
+            return false
+        case .invalidateReverse:
+            beginDockReverseClick()
             return false
         }
     }
@@ -1386,8 +1419,130 @@ final class WindowDockInteractionMonitor {
         hoverCaptureGeneration &+= 1
     }
 
-    private func handleMouseDown(quartzLocation: CGPoint) {
+    private func startReverseSamplingIfNeeded() {
+        guard reverseSamplingTimer == nil else { return }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didActivateApplicationNotification,
+                     NSWorkspace.didHideApplicationNotification,
+                     NSWorkspace.didUnhideApplicationNotification,
+                     NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification,
+                     NSWorkspace.willSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            reverseWorkspaceObservers.append(workspace.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.invalidateReverseSnapshot() }
+            })
+        }
+        reverseWindowStateObserver = NotificationCenter.default.addObserver(
+            forName: WindowAXLifecycleRegistry.didChangeWindowStateNotification,
+            object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let pid = (notification.object as? NSNumber)?.int32Value else { return }
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.reverseSamplingPID == pid ||
+                        self.reverseSnapshot?.context.processIdentifier == pid else { return }
+                self.invalidateReverseSnapshot()
+            }
+        }
+        reverseDisplayObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.invalidateReverseSnapshot() }
+        }
+        let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sampleReverseFrontmostIfNeeded() }
+        }
+        reverseSamplingTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopReverseSampling() {
+        reverseSamplingTimer?.invalidate()
+        reverseSamplingTimer = nil
+        reverseWorkspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        reverseWorkspaceObservers.removeAll()
+        if let reverseWindowStateObserver {
+            NotificationCenter.default.removeObserver(reverseWindowStateObserver)
+            self.reverseWindowStateObserver = nil
+        }
+        if let reverseDisplayObserver {
+            NotificationCenter.default.removeObserver(reverseDisplayObserver)
+            self.reverseDisplayObserver = nil
+        }
+        invalidateReverseSnapshot()
+    }
+
+    private func invalidateReverseSnapshot() {
+        reverseSnapshot = nil
+        reverseSamplingGeneration &+= 1
+    }
+
+    private func beginDockReverseClick() {
+        reverseClickGeneration &+= 1
+        resetMouseDownState()
+        invalidateReverseSnapshot()
+    }
+
+    private var pointerIsNearDockEdge: Bool {
+        let point = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) else { return false }
+        // Covers native bottom/left/right Docks including magnification. This
+        // is only a cheap sampling bound; actual clicks still require a Dock AX hit.
+        let frame = screen.frame
+        return point.y - frame.minY <= 160 || point.x - frame.minX <= 160 ||
+            frame.maxX - point.x <= 160
+    }
+
+    private func sampleReverseFrontmostIfNeeded() {
+        guard isDockReverseActive, NSEvent.pressedMouseButtons == 0,
+              NSEvent.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+              ProcessInfo.processInfo.systemUptime >= reverseSamplingNotBefore,
+              pointerIsNearDockEdge else {
+            invalidateReverseSnapshot()
+            return
+        }
+        guard !reverseSamplingInFlight else { return }
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              application.activationPolicy == .regular, !application.isHidden,
+              !application.isTerminated, !preferences.isExcluded(application),
+              let launchDate = application.launchDate else {
+            invalidateReverseSnapshot()
+            return
+        }
+        let pid = application.processIdentifier
+        let generation = reverseSamplingGeneration
+        reverseSamplingInFlight = true
+        reverseSamplingPID = pid
+        reverseSampler.sample(processIdentifier: pid, launchDate: launchDate) { [weak self] snapshot in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.reverseSamplingInFlight = false
+                self.reverseSamplingPID = nil
+                guard self.isDockReverseActive,
+                      self.reverseSamplingGeneration == generation,
+                      NSEvent.pressedMouseButtons == 0,
+                      NSEvent.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                      self.pointerIsNearDockEdge,
+                      let current = NSWorkspace.shared.frontmostApplication,
+                      current.processIdentifier == pid, current.launchDate == launchDate,
+                      !current.isTerminated, !current.isHidden else { return }
+                self.reverseSnapshot = snapshot
+            }
+        }
+    }
+
+    private func handleMouseDown(
+        quartzLocation: CGPoint,
+        timestamp: TimeInterval,
+        beforeClick: DockReversePreclickSnapshot?
+    ) {
         guard preferences.dockReverseEnabled,
+              NSEvent.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
               let application = dockApplication(at: quartzLocation),
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               !preferences.isExcluded(application) else {
@@ -1399,11 +1554,31 @@ final class WindowDockInteractionMonitor {
         let windows = windows(for: application)
         let operationalWindows = windows.filter { $0.element != nil }
         let visibleWindows = operationalWindows.filter { !$0.isMinimized }
-        let targetWasFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID
+        // Dock may already have activated/restored the target before this global
+        // monitor runs. Never turn the resulting current state into pre-click evidence.
+        let targetWasFrontmost = DockReversePreclickPolicy.canMinimize(
+            context: beforeClick?.context,
+            targetProcessIdentifier: targetPID,
+            targetLaunchDate: application.launchDate,
+            mouseDownAt: timestamp,
+            now: ProcessInfo.processInfo.systemUptime
+        )
+        let provenVisibleElements = DockReversePreclickPolicy.windowsToMinimize(
+            context: beforeClick?.context,
+            visibleBefore: beforeClick?.visibleWindows ?? [],
+            visibleNow: visibleWindows.compactMap(\.element),
+            targetProcessIdentifier: targetPID,
+            targetLaunchDate: application.launchDate,
+            mouseDownAt: timestamp,
+            now: ProcessInfo.processInfo.systemUptime,
+            matches: { CFEqual($0, $1) }
+        )
 
         mouseDownTargetPID = targetPID
-        if targetWasFrontmost, !visibleWindows.isEmpty {
-            mouseDownReverseAction = .minimize(visibleWindows.compactMap(\.element))
+        let decision: String
+        if targetWasFrontmost, !provenVisibleElements.isEmpty {
+            mouseDownReverseAction = .minimize(provenVisibleElements)
+            decision = "minimize"
         } else if visibleWindows.isEmpty, !operationalWindows.isEmpty {
             // Prefer restoring exactly the windows this feature minimized. If
             // the user/system minimized every window separately, restoring the
@@ -1414,11 +1589,21 @@ final class WindowDockInteractionMonitor {
             mouseDownReverseAction = .restore(
                 tracked.isEmpty ? operationalWindows.compactMap(\.element) : tracked
             )
+            decision = "restore"
         } else {
             // Clicking a background App with visible windows should retain the
             // Dock's normal activation behavior; it must not immediately vanish.
             mouseDownReverseAction = nil
+            decision = "native"
         }
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "dock", event: "reverseDownDecision", metadata: [
+                "decision": .code(decision),
+                "preclickEvidence": .flag(targetWasFrontmost),
+                "provenVisibleCount": .integer(Int64(provenVisibleElements.count)),
+                "currentVisibleCount": .integer(Int64(visibleWindows.count))
+            ]
+        )
     }
 
     private func handleMouseUp(quartzLocation: CGPoint) {
@@ -1435,10 +1620,12 @@ final class WindowDockInteractionMonitor {
         // Let Dock finish its own click handling first. AXMinimized invokes the
         // system's native Dock animation, unlike NSRunningApplication.hide().
         let featureGeneration = reverseFeatureGeneration
+        let clickGeneration = reverseClickGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
             guard let self,
                   self.isDockReverseActive,
                   self.reverseFeatureGeneration == featureGeneration,
+                  self.reverseClickGeneration == clickGeneration,
                   let application = NSRunningApplication(processIdentifier: targetPID),
                   !application.isTerminated else { return }
             switch action {
@@ -1453,9 +1640,12 @@ final class WindowDockInteractionMonitor {
 
     private func minimizeWindows(_ elements: [AXUIElement], for application: NSRunningApplication) {
         guard isDockReverseActive, !elements.isEmpty else { return }
+        invalidateReverseSnapshot()
+        reverseSamplingNotBefore = ProcessInfo.processInfo.systemUptime + 0.16
         dismissPreview(animated: true)
         let targetPID = application.processIdentifier
         let featureGeneration = reverseFeatureGeneration
+        let clickGeneration = reverseClickGeneration
         let generation = (reverseOperationGenerations[targetPID] ?? 0) + 1
         reverseOperationGenerations[targetPID] = generation
         if reverseMinimizedWindows[targetPID] == nil {
@@ -1468,6 +1658,7 @@ final class WindowDockInteractionMonitor {
                 guard let self,
                       self.isDockReverseActive,
                       self.reverseFeatureGeneration == featureGeneration,
+                      self.reverseClickGeneration == clickGeneration,
                       generation == self.reverseOperationGenerations[targetPID] else { return }
                 guard self.boolAttribute(kAXMinimizedAttribute, of: element) != true else { return }
                 if AXUIElementSetAttributeValue(
@@ -1483,8 +1674,11 @@ final class WindowDockInteractionMonitor {
 
     private func restoreWindows(_ elements: [AXUIElement], for application: NSRunningApplication) {
         guard isDockReverseActive, !elements.isEmpty else { return }
+        invalidateReverseSnapshot()
+        reverseSamplingNotBefore = ProcessInfo.processInfo.systemUptime + 0.16
         let targetPID = application.processIdentifier
         let featureGeneration = reverseFeatureGeneration
+        let clickGeneration = reverseClickGeneration
         let generation = (reverseOperationGenerations[targetPID] ?? 0) + 1
         reverseOperationGenerations[targetPID] = generation
         let step = reverseStep(windowCount: elements.count)
@@ -1495,6 +1689,7 @@ final class WindowDockInteractionMonitor {
                 guard let self,
                       self.isDockReverseActive,
                       self.reverseFeatureGeneration == featureGeneration,
+                      self.reverseClickGeneration == clickGeneration,
                       generation == self.reverseOperationGenerations[targetPID] else { return }
                 guard self.boolAttribute(kAXMinimizedAttribute, of: element) == true else {
                     self.removeTracked(element, from: targetPID)
@@ -1516,6 +1711,7 @@ final class WindowDockInteractionMonitor {
                 guard let self,
                       self.isDockReverseActive,
                       self.reverseFeatureGeneration == featureGeneration,
+                      self.reverseClickGeneration == clickGeneration,
                       generation == self.reverseOperationGenerations[targetPID] else { return }
                 let appElement = AXUIElementCreateApplication(targetPID)
                 _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
@@ -1557,7 +1753,7 @@ final class WindowDockInteractionMonitor {
 
     private func cancelDockReverseOperations(clearTracking: Bool) {
         reverseFeatureGeneration &+= 1
-        resetMouseDownState()
+        beginDockReverseClick()
         reverseOperationGenerations.removeAll()
         if clearTracking {
             reverseMinimizedWindows.removeAll()
