@@ -37,3 +37,10 @@
 
 - 设置预览代码 `e1cbda0` 和标签 `we1-160354-settings-preview-candidate-20260918` 保留；修复候选会同时包含这两项设置演示。
 - 105549 安装、`we1-105549-installed-20260918`、092348 用户验收标签与旧应用备份均保留。回退本轮分支提交即可还原到 `138049e`；未推送或修改远端。
+
+## 打包候选
+
+- 源码提交 `2ffd844c991c7af2c49e05b389a870ae2af75462`；新构建 `20260918171124`，稳定证书 `SuperIsland WE1 Debug Local Code Signing` 签名，严格校验通过；无 XCTest 运行时残留。
+- 候选代码载荷：`a24179903c10e780edd086f42f81e4005352ebfc959952cb5ae226d25e2261f9`；101 项文件／链接／权限及源码身份清单：`build/DockClickRepair/candidate-manifest.json`。
+- 新候选位于 `build/WE1-Debug/SuperIsland-WE1-Debug.app`，包含设置预览；之前 160354 候选已自动归档到 `build/WE1-Debug/backups/SuperIsland-WE1-Debug-20260918-171124.app` 并回读核对构建号。旧候选清单同步指向该真实归档路径。
+- 当前仅完成本地提交与打包，尚未安装／重启／实际点击验收。
