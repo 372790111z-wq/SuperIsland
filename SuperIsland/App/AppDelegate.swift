@@ -61,6 +61,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var powerStateObserver: NSObjectProtocol?
     private var quitHotkeyMonitor: Any?
     private var deferredTerminationTask: Task<Void, Never>?
+    private var terminationAttemptSequence: UInt64 = 0
+    private var deferredTerminationAttemptID: UInt64?
+    private var acceptedTerminationAttemptID: UInt64?
+    private var invokingSignalTermination = false
     private var terminationSignalSource: DispatchSourceSignal?
     private let terminationSignalScheduler = WE1TerminationSignalScheduler()
     private var didBootstrapApp = false
@@ -91,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ])
             registerURLHandler()
         } else {
+            WindowTerminationDiagnostics.shared.record(.launched)
             installWE1TerminationSignalHandler()
         }
         installQuitHotkeyMonitor()
@@ -114,6 +119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !Self.isRunningUnitTests else { return }
+        defer { WindowTerminationDiagnostics.shared.flushBeforeExit() }
+        WindowEnhancementController.shared.recordTerminationDiagnostics(
+            .willTerminate, attemptID: acceptedTerminationAttemptID ?? terminationAttemptSequence
+        )
         zilanSuppressionReceiver?.stop()
         WindowEnhancementController.shared.stop()
         if didInitializeNowPlayingManager {
@@ -128,17 +137,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !Self.isRunningUnitTests else { return .terminateNow }
+        terminationAttemptSequence &+= 1
+        let attempt = terminationAttemptSequence
+        WindowEnhancementController.shared.recordTerminationDiagnostics(
+            .requestEntered, attemptID: attempt,
+            extra: ["source": .code(invokingSignalTermination ? "sigterm" : "appKit")]
+        )
         if Self.isWE1DebugBundle {
             terminationSignalScheduler.terminationDidBegin()
         }
-        guard deferredTerminationTask == nil else { return .terminateLater }
+        guard deferredTerminationTask == nil else {
+            WindowTerminationDiagnostics.shared.record(.requestAlreadyPending, metadata: [
+                "attempt": .integer(Int64(clamping: attempt)),
+                "activeAttempt": .integer(Int64(clamping: deferredTerminationAttemptID ?? 0))
+            ])
+            return .terminateLater
+        }
         guard WindowEnhancementController.shared.requiresTerminationPreparation else {
+            acceptedTerminationAttemptID = attempt
+            WindowTerminationDiagnostics.shared.record(.requestAllowedImmediately, metadata: [
+                "attempt": .integer(Int64(clamping: attempt))
+            ])
             return .terminateNow
         }
 
+        WindowTerminationDiagnostics.shared.record(.requestDeferred, metadata: [
+            "attempt": .integer(Int64(clamping: attempt))
+        ])
+        deferredTerminationAttemptID = attempt
         deferredTerminationTask = Task { @MainActor [weak self] in
-            let safeToTerminate = await WindowEnhancementController.shared.prepareForTermination()
+            WindowTerminationDiagnostics.shared.record(.deferredTaskStarted, metadata: [
+                "attempt": .integer(Int64(clamping: attempt))
+            ])
+            let safeToTerminate = await WindowEnhancementController.shared.prepareForTermination(
+                diagnosticAttemptID: attempt
+            )
             self?.deferredTerminationTask = nil
+            self?.deferredTerminationAttemptID = nil
+            self?.acceptedTerminationAttemptID = safeToTerminate ? attempt : nil
+            WindowTerminationDiagnostics.shared.record(.deferredTaskFinished, metadata: [
+                "attempt": .integer(Int64(clamping: attempt)),
+                "allowed": .flag(safeToTerminate)
+            ])
             sender.reply(toApplicationShouldTerminate: safeToTerminate)
         }
         return .terminateLater
@@ -179,6 +219,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         source.setEventHandler { [weak self] in
             guard let self else { return }
+            WindowTerminationDiagnostics.shared.record(.signalReceived, metadata: [
+                "deferred": .flag(self.deferredTerminationTask != nil)
+            ])
             self.terminationSignalScheduler.request(
                 isTerminationDeferred: { [weak self] in
                     self == nil || self?.deferredTerminationTask != nil
@@ -191,6 +234,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if self.didInitializeNowPlayingManager {
                         NowPlayingManager.shared.shutdownExternalProcesses()
                     }
+                    self.invokingSignalTermination = true
+                    defer { self.invokingSignalTermination = false }
                     NSApp.terminate(nil)
                 }
             )
