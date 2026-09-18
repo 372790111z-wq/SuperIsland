@@ -11,6 +11,7 @@ private enum WindowEnhancementPreview: Hashable {
     case missionControl
     case dockReverse
     case commandTab
+    case fileTrash
     case action(WindowQuickAction)
     case layout(WindowLayout)
 
@@ -24,6 +25,7 @@ private enum WindowEnhancementPreview: Hashable {
         case .missionControl: "调度中心 Pro"
         case .dockReverse: "Dock 窗口反转"
         case .commandTab: "Cmd-Tab Plus"
+        case .fileTrash: FinderFileShortcut.title
         case .action(let action): action.title
         case .layout(let layout): layout.title
         }
@@ -43,13 +45,13 @@ private enum WindowEnhancementPreview: Hashable {
             case .closeWindow: "mission-close"
             case .quitApp: "mission-quit"
             case .dockDisplayLock: "dock-lock"
-            case .hideAll: "hidden-all"
+            case .hideAll: nil
             case .hideOthers: "hidden-others"
             case .nextDisplay: "next-display"
             case .previousDisplay: "previous-display"
             case .centerWindow: "center"
             }
-        case .overview, .layout: nil
+        case .overview, .fileTrash, .layout: nil
         }
     }
 
@@ -137,7 +139,8 @@ struct WindowEnhancementSettingsView: View {
             }
 
             HStack(alignment: .top, spacing: 16) {
-                WindowEnhancementDemoView(preview: preview, accent: accentColor)
+                WindowEnhancementDemoView(preview: preview, accent: accentColor,
+                                          shortcutLabel: previewShortcutLabel)
                     .frame(maxWidth: .infinity)
                     .frame(height: 278)
 
@@ -249,24 +252,19 @@ struct WindowEnhancementSettingsView: View {
     }
 
     private var finderFileTrashRow: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(FinderFileShortcut.title)
-                    .font(.system(size: 13))
-                Text("Finder／桌面选中文件移到废纸篓，可恢复")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 12)
-            ShortcutRecorderButton(targetID: FinderFileShortcut.id, preferences: preferences)
-            Toggle(FinderFileShortcut.title, isOn: $preferences.fileTrashEnabled)
-                .labelsHidden()
-                .toggleStyle(.switch)
+        PreviewFinderTrashRow(
+            preferences: preferences,
+            onPreview: { preview = .fileTrash },
+            onExit: { resetPreview(ifCurrent: .fileTrash) }
+        )
+    }
+
+    private var previewShortcutLabel: String? {
+        switch preview {
+        case .fileTrash: preferences.shortcut(for: FinderFileShortcut.id)?.formattedDisplay
+        case .action(let action): preferences.shortcut(for: action.shortcutID)?.formattedDisplay
+        default: nil
         }
-        .padding(.horizontal, 16)
-        .frame(minHeight: 58)
-        .help("仅在 Finder 或桌面选中文件时移到废纸篓；正在重命名时不执行。快捷键与开关独立。")
-        .dataAnnotationID("window-enhancement-file-trash")
     }
 
     private var dockDisplayLockRow: some View {
@@ -549,6 +547,47 @@ private struct PreviewActionRow: View {
     }
 }
 
+private struct PreviewFinderTrashRow: View {
+    @ObservedObject var preferences: WindowEnhancementPreferences
+    let onPreview: () -> Void
+    let onExit: () -> Void
+    @FocusState private var focused: Bool
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(FinderFileShortcut.title)
+                    .font(.system(size: 13))
+                Text("Finder／桌面选中文件移到废纸篓，可恢复")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            ShortcutRecorderButton(targetID: FinderFileShortcut.id, preferences: preferences)
+            Toggle(FinderFileShortcut.title, isOn: $preferences.fileTrashEnabled)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 58)
+        .background(Color.white.opacity((hovered || focused) ? 0.025 : 0))
+        .contentShape(Rectangle())
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onHover { inside in
+            hovered = inside
+            (inside || focused) ? onPreview() : onExit()
+        }
+        .onChange(of: focused) { _, isFocused in
+            (isFocused || hovered) ? onPreview() : onExit()
+        }
+        .help("仅在 Finder 或桌面选中文件时移到废纸篓；正在重命名时不执行。快捷键与开关独立。")
+        .dataAnnotationID("window-enhancement-file-trash")
+    }
+}
+
 private struct DockDisplayLockActionRow: View {
     @Binding var isOn: Bool
     let windowEnhancementEnabled: Bool
@@ -686,6 +725,7 @@ private struct PreviewLayoutCard: View {
 private struct WindowEnhancementDemoView: View {
     let preview: WindowEnhancementPreview
     let accent: Color
+    let shortcutLabel: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -700,11 +740,24 @@ private struct WindowEnhancementDemoView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: preview)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(preview.title)演示")
+        .accessibilityValue(previewDescription)
+    }
+
+    private var previewDescription: String {
+        switch preview {
+        case .fileTrash: "选中文件，按设置的快捷键移到废纸篓，未选文件保留，可从废纸篓恢复。快捷键：\(shortcutLabel ?? "未设置快捷键")。"
+        case .action(.hideAll): "第一次按快捷键收起全部，第二次恢复刚才收起的窗口；原本收起的窗口保持原状。快捷键：\(shortcutLabel ?? "未设置快捷键")。"
+        default: ""
+        }
     }
 
     @ViewBuilder
     private var previewContent: some View {
-        if preview == .overview {
+        if preview == .fileTrash {
+            WindowShortcutDemoView(kind: .fileTrash, accent: accent, shortcutLabel: shortcutLabel)
+        } else if preview == .action(.hideAll) {
+            WindowShortcutDemoView(kind: .windowVisibility, accent: accent, shortcutLabel: shortcutLabel)
+        } else if preview == .overview {
             assetImage(named: "macbook-hero", extension: "png", folder: "settings-previews")
                 .padding(12)
         } else if let videoName = preview.videoAssetName,
