@@ -24,3 +24,12 @@
 - “已隐藏应用”的额外场景仅完成准备，后续按键因前台不符被拦截，不能算验收通过；最终场景清理另行记录。
 
 新候选的安装与文件实际移入废纸篓结果在后续实测后补充，不能用上述单测或只读探针替代。
+
+## 092348 候选与安装阻塞
+
+- 修复代码已提交 `0ae3554833411b0736637dcead9ebe13567ca10e`。签名候选构建 `20260918092348`，源载荷 `5a0f8c46450dd23d22918843a7cabf6f94cabbdef9d31a2cfe43d4a62a787267`；101 项清单与稳定 designated requirement 核对通过。
+- 旧版完整备份为 `build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-003847-before-trash-menu.app`，101 项内容/模式/链接及签名一致。
+- 安装工具先完成 staging，再正常请求 PID61206 退出；30 秒内未退出，所以没有替换正式安装目录。当前安装仍是003847，092348仍在 `.SuperIsland-WE1-Debug.install-20260918092348.app` 暂存路径。
+- 采样主线程全程处于 main dispatch drain → SIGTERM DispatchSource → NSApp.terminate → AppKit _shouldTerminate 的嵌套事件循环。源码的 terminateLater 依赖新建 MainActor Task 回答；强烈支持主队列重入等待的判断，未把未直接观察的 Task 队列当作事实。它不是卡在 AX 查询或本次菜单查找代码。
+- 已向用户请求仅强制结束这个卡住的 WE1 旧进程；尚未取得该补充确认。其他应用没有结束，测试文件和对照文件 SHA-256 均未改变。后续安装可改用校验目标的原生 Quit 请求避免本次信号入口，但仍必须等待退出，不能声称这种规避已实测。
+- 因安装被阻塞，新候选真实删除、废纸篓恢复及最终测试窗口清理仍未完成；保留测试现场，不能宣称该功能已经实机通过。
