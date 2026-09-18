@@ -62,7 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var quitHotkeyMonitor: Any?
     private var deferredTerminationTask: Task<Void, Never>?
     private var terminationSignalSource: DispatchSourceSignal?
-    private var isHandlingTerminationSignal = false
+    private let terminationSignalScheduler = WE1TerminationSignalScheduler()
     private var didBootstrapApp = false
     private var didInitializeNowPlayingManager = false
     private static var fallbackSettingsWindowController: NSWindowController?
@@ -128,6 +128,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !Self.isRunningUnitTests else { return .terminateNow }
+        if Self.isWE1DebugBundle {
+            terminationSignalScheduler.terminationDidBegin()
+        }
         guard deferredTerminationTask == nil else { return .terminateLater }
         guard WindowEnhancementController.shared.requiresTerminationPreparation else {
             return .terminateNow
@@ -175,14 +178,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         )
         source.setEventHandler { [weak self] in
-            guard let self, !self.isHandlingTerminationSignal else { return }
-            self.isHandlingTerminationSignal = true
-            // Stop child processes before asking AppKit to terminate. The
-            // delegate callback repeats this idempotently on the normal path.
-            if self.didInitializeNowPlayingManager {
-                NowPlayingManager.shared.shutdownExternalProcesses()
-            }
-            NSApp.terminate(nil)
+            guard let self else { return }
+            self.terminationSignalScheduler.request(
+                isTerminationDeferred: { [weak self] in
+                    self == nil || self?.deferredTerminationTask != nil
+                },
+                terminate: { [weak self] in
+                    guard let self else { return }
+                    // Stop children idempotently before normal termination.
+                    // The run-loop handoff lets deferred MainActor recovery
+                    // progress while AppKit waits for its termination reply.
+                    if self.didInitializeNowPlayingManager {
+                        NowPlayingManager.shared.shutdownExternalProcesses()
+                    }
+                    NSApp.terminate(nil)
+                }
+            )
         }
         terminationSignalSource = source
         source.resume()
