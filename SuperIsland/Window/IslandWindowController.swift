@@ -300,6 +300,14 @@ final class IslandWindowController {
     }
 
     private func targetFrame(size: CGSize, screen: NSScreen) -> NSRect {
+        @MainActor enum DiagnosticState {
+            static let topOffset: CGFloat = {
+                guard Bundle.main.bundleIdentifier == ShelfDropDiagnostics.debugBundleIdentifier,
+                      ProcessInfo.processInfo.environment["WE1_SHELF_PANEL_OFFSET"] == "48" else { return 0 }
+                ShelfDropDiagnostics.record("panel.offset", values: ["points": 48])
+                return 48
+            }()
+        }
         let screenFrame = screen.frame
         let hasNotch = ScreenDetector.hasNotch(screen: screen)
         let notchRect = ScreenDetector.notchRect(screen: screen)
@@ -315,7 +323,8 @@ final class IslandWindowController {
         }
 
         let x = anchorX - size.width / 2
-        let y = anchorY - size.height
+        // Candidate-only A/B: keep every presentation state below the screen's top edge.
+        let y = anchorY - size.height - DiagnosticState.topOffset
         return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
 
