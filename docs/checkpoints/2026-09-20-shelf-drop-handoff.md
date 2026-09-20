@@ -37,3 +37,12 @@ Source audit found no direct Mission Control launch call in this path. The obser
 4. Check whether real Mission Control still appears; correlate only sanitized destination events.
 
 No desktop gestures or app replacement were performed during source diagnosis and tests. Keep build 165341 running until the candidate is explicitly installed. This checkpoint and tests are local; no GitHub push or release is implied.
+
+## Prepared candidate
+
+- Source commit: `b59ed2adeeb41c78dea45218037da03300622d08`.
+- Optimized Release build `20260920181501`: build succeeded, approximately 20.16 MB.
+- Candidate binary SHA-256: `a20ab536badac537708a209e0a5def2072e0d09c149bdef9981ada59010df7fe`.
+- Deep/strict signature verification passed; bundle ID and designated requirement match installed 165341.
+- Candidate manifest: `build/WE1ShelfDrop.noindex/candidate.json`; Release log: `release.log` in the same directory.
+- Candidate is not installed or natively accepted. Installed build 165341 and its executable hash were read back unchanged.
