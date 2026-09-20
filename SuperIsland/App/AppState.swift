@@ -1565,6 +1565,9 @@ final class AppState: ObservableObject {
             guard shelfEnabled, !isZilanInteractionSuppressed else { return }
         }
         shelfDropTargets.setTarget(id, inside: inside)
+        ShelfDropDiagnostics.record("targets.changed", values: [
+            "inside": inside ? 1 : 0, "count": Int64(shelfDropTargets.targets.count)
+        ])
         shelfDragEndWorkItem?.cancel()
         shelfDragEndWorkItem = nil
         if shelfDropTargets.isActive {
@@ -1609,6 +1612,7 @@ final class AppState: ObservableObject {
     func beginShelfDragPresentation() {
         guard !isZilanInteractionSuppressed else { return }
         guard shelfEnabled else { return }
+        ShelfDropDiagnostics.record("presentation.begin", values: ["compact": currentState == .compact ? 1 : 0])
 
         isShelfDragActive = true
         cancelAutoDismiss()
@@ -1625,6 +1629,7 @@ final class AppState: ObservableObject {
     }
 
     func endShelfDragPresentation() {
+        ShelfDropDiagnostics.record("presentation.end", values: ["hovering": isHovering ? 1 : 0])
         isShelfDragActive = false
 
         guard !isHovering else { return }
