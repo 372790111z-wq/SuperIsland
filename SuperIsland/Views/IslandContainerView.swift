@@ -46,7 +46,6 @@ struct IslandContainerView: View {
     @State private var isHoveringPreviousButton = false
     @State private var isHoveringNextButton = false
     @State private var isShelfDropTargeted = false
-    @State private var shelfDragEndWorkItem: DispatchWorkItem?
     @State private var windowEnhancementFeedback: WindowEnhancementFeedbackEvent?
     @State private var windowEnhancementFeedbackDismissWorkItem: DispatchWorkItem?
     private let hoverValidationTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
@@ -68,13 +67,8 @@ struct IslandContainerView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onChange(of: isShelfDropTargeted) { _, isTargeted in
-            handleShelfDropTargetChange(isTargeted)
-        }
         .onChange(of: appState.zilanSuppressionRequestID) { _, requestID in
             guard requestID != nil else { return }
-            shelfDragEndWorkItem?.cancel()
-            shelfDragEndWorkItem = nil
             isHoveringIslandSurface = false
             isHoveringPreviousButton = false
             isHoveringNextButton = false
@@ -180,14 +174,14 @@ struct IslandContainerView: View {
                     )
                 }
         )
-        .onDrop(of: ShelfStore.acceptedDropTypes, isTargeted: $isShelfDropTargeted) { providers in
+        .shelfDropTarget(.surface, isTargeted: $isShelfDropTargeted,
+                         enabled: contentMode == .production && appState.shelfEnabled
+                            && !appState.isZilanInteractionSuppressed) { providers in
             guard contentMode == .production, appState.shelfEnabled,
                   appState.canHandleIslandInput(generation: inputGeneration) else { return false }
             return ShelfStore.shared.handleDrop(providers: providers) { addedCount in
                 guard addedCount > 0,
                       appState.canHandleIslandInput(generation: inputGeneration) else { return }
-                shelfDragEndWorkItem?.cancel()
-                shelfDragEndWorkItem = nil
                 appState.presentShelfAfterDrop()
             }
         }
@@ -501,31 +495,6 @@ struct IslandContainerView: View {
         }
 
         return false
-    }
-
-    // MARK: - Shelf Drop
-
-    private func handleShelfDropTargetChange(_ isTargeted: Bool) {
-        guard contentMode == .production, appState.shelfEnabled,
-              !appState.isZilanInteractionSuppressed else { return }
-
-        if isTargeted {
-            shelfDragEndWorkItem?.cancel()
-            shelfDragEndWorkItem = nil
-            appState.beginShelfDragPresentation()
-            return
-        }
-
-        let inputGeneration = appState.islandInputGeneration
-        let workItem = DispatchWorkItem {
-            guard !isShelfDropTargeted,
-                  appState.canHandleIslandInput(generation: inputGeneration) else { return }
-            appState.endShelfDragPresentation()
-            shelfDragEndWorkItem = nil
-        }
-        shelfDragEndWorkItem?.cancel()
-        shelfDragEndWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
     }
 
     // MARK: - Module Cycler

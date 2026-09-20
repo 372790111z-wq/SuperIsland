@@ -344,6 +344,8 @@ final class ShelfStore: ObservableObject {
                 add(droppedItems)
             }
             await MainActor.run {
+                NSLog("[ShelfDrop] receive=tray providers=%ld extracted=%ld added=%ld",
+                      providers.count, droppedItems.count, addedCount)
                 completion?(addedCount)
             }
         }
@@ -495,6 +497,8 @@ final class ShelfStore: ObservableObject {
         Task {
             let droppedItems = await Self.extractItems(from: providers)
             await MainActor.run {
+                NSLog("[ShelfDrop] receive=airDrop providers=%ld extracted=%ld",
+                      providers.count, droppedItems.count)
                 shareViaAirDrop(items: droppedItems)
             }
         }
@@ -619,7 +623,7 @@ final class ShelfStore: ObservableObject {
         service.perform(withItems: rawItems)
     }
 
-    private static func extractItems(from providers: [NSItemProvider]) async -> [ShelfItem] {
+    static func extractItems(from providers: [NSItemProvider]) async -> [ShelfItem] {
         var extracted: [ShelfItem] = []
 
         for provider in providers {
@@ -632,20 +636,22 @@ final class ShelfStore: ObservableObject {
     }
 
     private static func extractItem(from provider: NSItemProvider) async -> ShelfItem? {
-        NSLog("[Shelf] provider types=%@ suggestedName=%@",
-              provider.registeredTypeIdentifiers,
-              provider.suggestedName ?? "<nil>")
+        NSLog("[ShelfDrop] provider fileURL=%d url=%d image=%d text=%d",
+              provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+              provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
+              provider.hasItemConformingToTypeIdentifier(UTType.image.identifier),
+              provider.hasItemConformingToTypeIdentifier(UTType.text.identifier))
 
         if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
            let url = await loadURL(from: provider, type: .fileURL),
            url.isFileURL {
-            NSLog("[Shelf] fileURL branch → %@", url.lastPathComponent)
+            NSLog("[ShelfDrop] extracted=fileURL")
             return .file(from: url)
         }
 
         if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
            let url = await loadURL(from: provider, type: .url) {
-            NSLog("[Shelf] url branch → %@", url.absoluteString)
+            NSLog("[ShelfDrop] extracted=url")
             return url.isFileURL ? .file(from: url) : .link(url)
         }
 
@@ -657,7 +663,7 @@ final class ShelfStore: ObservableObject {
             return type.conforms(to: .image)
         }) {
             if let url = await loadPromisedFile(from: provider, typeIdentifier: imageTypeIdentifier) {
-                NSLog("[Shelf] promised-image branch → %@", url.lastPathComponent)
+                NSLog("[ShelfDrop] extracted=promised-image")
                 return .file(from: url)
             }
         }
@@ -665,7 +671,7 @@ final class ShelfStore: ObservableObject {
         if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier),
            let data = await loadData(from: provider, type: .image),
            let item = imageItem(from: data, type: .image, suggestedName: provider.suggestedName) {
-            NSLog("[Shelf] image branch → %@", item.displayName)
+            NSLog("[ShelfDrop] extracted=image")
             return item
         }
 
