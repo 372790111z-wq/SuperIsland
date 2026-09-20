@@ -4,6 +4,7 @@ struct AdvancedSettingsView: View {
     @State private var showResetAlert = false
     @State private var screenOptions: [ScreenDetector.ScreenOption] = ScreenDetector.availableScreenOptions()
     @ObservedObject private var updateChecker = UpdateChecker.shared
+    @ObservedObject private var updater = AutoUpdater.shared
     @ObservedObject private var scheduler = ModuleRefreshScheduler.shared
     @EnvironmentObject var appState: AppState
 
@@ -59,7 +60,7 @@ struct AdvancedSettingsView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("重置所有设置").font(.system(size: 13))
-                        Text("将所有设置恢复为默认值")
+                        Text("恢复默认设置，并清除已设快捷键")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer()
@@ -68,11 +69,11 @@ struct AdvancedSettingsView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .alert("Reset Settings", isPresented: $showResetAlert) {
-                        Button("Cancel", role: .cancel) {}
-                        Button("Reset", role: .destructive) { resetAllSettings() }
+                    .alert("重置所有设置？", isPresented: $showResetAlert) {
+                        Button("取消", role: .cancel) {}
+                        Button("重置", role: .destructive) { resetAllSettings() }
                     } message: {
-                        Text("这会将所有 SuperIsland 设置恢复为默认值。")
+                        Text("将恢复默认设置、清除快捷键，并退出 Linear 和 Last.fm。其他应用的数据不受影响。")
                     }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
@@ -118,46 +119,67 @@ struct AdvancedSettingsView: View {
 
     @ViewBuilder
     private var updateStatusText: some View {
-        switch updateChecker.checkState {
-        case .idle:
-            EmptyView()
-        case .checking:
-            Text("正在检查...").font(.system(size: 11)).foregroundColor(.secondary)
-        case .upToDate:
-            Text("已是最新版本").font(.system(size: 11)).foregroundColor(.green)
-        case .updateAvailable(let version, _, _):
-            Text("可更新到版本 \(version)").font(.system(size: 11)).foregroundColor(.orange)
-        case .failed(let message):
+        if case .failed(let message) = updater.state {
             Text(message).font(.system(size: 11)).foregroundColor(.red)
+        } else if case .downloading(let progress) = updater.state {
+            Text("正在下载 \(Int(progress * 100))%")
+                .font(.system(size: 11)).foregroundColor(.secondary)
+        } else if case .installing = updater.state {
+            Text("正在安装...").font(.system(size: 11)).foregroundColor(.secondary)
+        } else {
+            switch updateChecker.checkState {
+            case .idle:
+                EmptyView()
+            case .checking:
+                Text("正在检查...").font(.system(size: 11)).foregroundColor(.secondary)
+            case .noCompatibleRelease:
+                Text("暂无适用更新").font(.system(size: 11)).foregroundColor(.secondary)
+            case .upToDate:
+                Text("已是最新版本").font(.system(size: 11)).foregroundColor(.green)
+            case .updateAvailable(let version, _, _):
+                Text("可更新到版本 \(version)").font(.system(size: 11)).foregroundColor(.orange)
+            case .failed(let message):
+                Text(message).font(.system(size: 11)).foregroundColor(.red)
+            }
         }
     }
 
     @ViewBuilder
     private var updateButton: some View {
-        switch updateChecker.checkState {
-        case .checking:
+        if updater.isBusy {
             ProgressView().controlSize(.small)
-        case .updateAvailable(_, let releaseURL, let downloadURL):
-            Button("更新") {
-                if let downloadURL {
-                    AutoUpdater.shared.start(downloadURL: downloadURL, releaseURL: releaseURL)
-                } else {
-                    NSWorkspace.shared.open(releaseURL)
+        } else {
+            switch updateChecker.checkState {
+            case .checking:
+                ProgressView().controlSize(.small)
+            case .updateAvailable(_, let releaseURL, let downloadURL):
+                Button("更新") {
+                    if let downloadURL {
+                        AutoUpdater.shared.start(downloadURL: downloadURL, releaseURL: releaseURL)
+                    } else {
+                        NSWorkspace.shared.open(releaseURL)
+                    }
                 }
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        default:
-            Button("检查更新") { updateChecker.checkNow() }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+            default:
+                Button("检查更新") {
+                    updater.clearFailure()
+                    updateChecker.checkNow()
+                }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
         }
     }
 
     private func resetAllSettings() {
-        let domain = Bundle.main.bundleIdentifier ?? "com.workview.SuperIsland"
-        UserDefaults.standard.removePersistentDomain(forName: domain)
-        UserDefaults.standard.synchronize()
+        guard let domain = Bundle.main.bundleIdentifier else { return }
+        ApplicationSettingsReset.reset(
+            defaults: .standard,
+            domain: domain,
+            windowPreferences: .shared
+        )
     }
 
     private func diagnosticRow(_ job: EnergyDiagnosticsSnapshot) -> some View {

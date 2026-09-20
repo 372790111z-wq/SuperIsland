@@ -10,6 +10,7 @@ var SETTING_HOOKS_CODEX = "hooksCodex";
 var SETTING_SOUND_ALERT = "soundAlert";
 var SETTING_SOUND_PACK = "soundPack";
 var DEFAULT_SOUND_PACK = "8bit";
+var IS_WE1 = !!(SuperIsland.host && SuperIsland.host.isWE1);
 
 // --- safeFetch -----------------------------------------------------------
 // Host bug (ExtensionJSRuntime.fetchSync): options.method / options.body are
@@ -692,8 +693,12 @@ function reconcileHooks(agent, want) {
 }
 
 function applyAllHooks() {
-  reconcileHooks("claude", settingBool(SETTING_HOOKS_CC, true));
-  reconcileHooks("codex",  settingBool(SETTING_HOOKS_CODEX, true));
+  var wantClaude = settingBool(SETTING_HOOKS_CC, !IS_WE1);
+  var wantCodex = settingBool(SETTING_HOOKS_CODEX, !IS_WE1);
+  // Loading WE1 must not remove hooks installed by another host. A false
+  // setting only uninstalls after an explicit user change below.
+  if (!IS_WE1 || wantClaude) reconcileHooks("claude", wantClaude);
+  if (!IS_WE1 || wantCodex) reconcileHooks("codex", wantCodex);
 }
 
 function startPolling() {
@@ -723,10 +728,10 @@ SuperIsland.registerModule({
       } else {
         activationFailed = true;
         bridgeOnline = false;
-        dlog("ACTIVATION FAILED: bridge unreachable — run Extensions/agents-status/server/install.sh");
+        dlog("ACTIVATION FAILED: bridge unreachable");
         notifyFailure(
           "Agents Status: bridge unreachable",
-          "Disable the extension and run server/install.sh once, then re-enable."
+          "请在扩展设置中点重新加载；若仍失败，请查看日志中的原因。"
         );
       }
       startPolling();
@@ -734,9 +739,11 @@ SuperIsland.registerModule({
   },
 
   onDeactivate: function () {
-    dlog("deactivate requested → pausing bridge");
+    dlog("deactivate requested");
     stopPolling();
-    deactivateBridge();
+    // WE1 owns and stops its process. An asynchronous pause could arrive after
+    // a rapid reload and accidentally pause the replacement server.
+    if (!IS_WE1) deactivateBridge();
     prevSessionStates = {};
     soundsSeeded = false;
   },

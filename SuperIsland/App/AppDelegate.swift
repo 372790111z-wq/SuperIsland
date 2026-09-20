@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateCancellable: AnyCancellable?
     private var statusItem: NSStatusItem?
     private var menuBarDefaultsObserver: NSObjectProtocol?
+    private var settingsResetObservers: [NSObjectProtocol] = []
     private var runtimeDefaultsSnapshot: RuntimeDefaultsSnapshot?
     private var powerStateObserver: NSObjectProtocol?
     private var quitHotkeyMonitor: Any?
@@ -119,11 +120,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if didInitializeNowPlayingManager {
             NowPlayingManager.shared.shutdownExternalProcesses()
         }
-        // Ensure the agents-status Python subprocess exits with us so port 7823
-        // is released cleanly and no orphan is inherited by launchd.
-        if !Self.isWE1DebugBundle {
-            AgentsStatusBridge.shared.stop()
+        if let provider = ExtensionOAuthCoordinator.shared.activeProvider {
+            ExtensionOAuthCoordinator.shared.cancel(provider)
         }
+        ExtensionManager.shared.shutdown()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -343,23 +343,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Keep side-by-side WE1 testing isolated from production extension
-        // subprocesses and update checks. Built-in managers above still run so
-        // the original compact, expanded, and full-expanded island pages are
-        // real and interactive.
-        if !Self.isWE1DebugBundle {
-            let extensions = ExtensionManager.shared
-            extensions.discoverExtensions()
-            extensions.activateDiscoveredExtensions()
-            rebuildStatusMenu()
-        }
+        // WE1 uses its own extension settings and storage. Newly restored
+        // extensions stay off until explicitly enabled in the existing UI.
+        let extensions = ExtensionManager.shared
+        extensions.discoverExtensions()
+        extensions.activateDiscoveredExtensions()
+        rebuildStatusMenu()
+        observeSettingsReset()
         state.refreshEnergyState()
 
-        if !Self.isWE1DebugBundle {
-            UpdateChecker.shared.checkIfDue()
-            observeUpdateState()
-        }
+        UpdateChecker.shared.checkIfDue()
+        observeUpdateState()
         WindowEnhancementController.shared.start()
+    }
+
+    private func observeSettingsReset() {
+        guard settingsResetObservers.isEmpty else { return }
+        settingsResetObservers.append(NotificationCenter.default.addObserver(
+            forName: .superIslandSettingsWillReset, object: nil, queue: .main
+        ) { _ in
+            // Deactivation can save extension state: finish it before the
+            // persistent domain is removed by the confirmed reset action.
+            MainActor.assumeIsolated {
+                if let provider = ExtensionOAuthCoordinator.shared.activeProvider {
+                    ExtensionOAuthCoordinator.shared.cancel(provider)
+                }
+                ExtensionManager.shared.shutdown()
+                let state = AppState.shared
+                if case .extension_ = state.activeModule {
+                    state.dismiss()
+                    state.activeModule = nil
+                    state.previousModule = nil
+                }
+                if case .module(.extension_) = state.fullExpandedSelectedTab {
+                    state.showHomeTab()
+                }
+            }
+        })
+        settingsResetObservers.append(NotificationCenter.default.addObserver(
+            forName: .superIslandSettingsDidReset, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let extensions = ExtensionManager.shared
+                extensions.discoverExtensions()
+                extensions.activateDiscoveredExtensions()
+                self.runtimeDefaultsSnapshot = RuntimeDefaultsSnapshot()
+                self.applyMenuBarVisibility()
+                self.applyVolumeHUDSetting()
+                self.rebuildStatusMenu()
+                AppState.shared.refreshEnergyState()
+                ModuleRefreshScheduler.shared.refreshScheduling()
+            }
+        })
     }
 
     private func observeUpdateState() {
@@ -511,7 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         if let button = item.button {
-            let appName = Self.isWE1DebugBundle ? "SuperIsland WE1 Debug" : "SuperIsland"
+            let appName = Self.isWE1DebugBundle ? "SuperIsland WE1" : "SuperIsland"
             button.image = NSImage(systemSymbolName: Constants.menuBarIconName, accessibilityDescription: appName)
             button.toolTip = appName
         }
@@ -714,7 +750,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hostingController.sizingOptions = []
 
         let window = NSWindow(contentViewController: hostingController)
-        window.title = Self.isWE1DebugBundle ? "SuperIsland WE1 Debug Settings" : "SuperIsland Settings"
+        window.title = Self.isWE1DebugBundle ? "SuperIsland WE1 设置" : "SuperIsland 设置"
         configureSettingsWindow(window, restoreInitialSizeIfNeeded: true)
         window.isReleasedWhenClosed = false
         window.center()

@@ -298,6 +298,31 @@ final class WindowEnhancementPreferences: ObservableObject {
         }
     }
 
+    /// Refresh the existing observable instance after its defaults domain is reset.
+    /// Reconstructing only a separate instance leaves registered shortcuts and
+    /// live monitors using the old values.
+    func reloadFromDefaults() {
+        let restored = WindowEnhancementPreferences(defaults: defaults)
+        pendingShortcutChanges.removeAll()
+        isEnabled = restored.isEnabled
+        edgeSnapEnabled = restored.edgeSnapEnabled
+        snapIslandEnabled = restored.snapIslandEnabled
+        aeroShakeEnabled = restored.aeroShakeEnabled
+        dockPreviewEnabled = restored.dockPreviewEnabled
+        missionControlEnabled = restored.missionControlEnabled
+        dockReverseEnabled = restored.dockReverseEnabled
+        cmdTabPlusEnabled = restored.cmdTabPlusEnabled
+        fileTrashEnabled = restored.fileTrashEnabled
+        reserveStageManagerSpace = restored.reserveStageManagerSpace
+        windowSpacingEnabled = restored.windowSpacingEnabled
+        accentName = restored.accentName
+        excludedBundleIDs = restored.excludedBundleIDs
+        shortcuts = restored.shortcuts
+        disabledActionIDs = restored.disabledActionIDs
+        lastFeedback = nil
+        feedbackEvent = nil
+    }
+
     /// Emits only for persisted window-enhancement configuration. Runtime
     /// feedback intentionally stays out of this stream so showing a HUD does
     /// not tear down and rebuild every hot key and interaction monitor.

@@ -965,6 +965,12 @@ rl.on("line", (line) => {
   void handleCommand(line);
 });
 
+// The host owns stdin. A crash or normal extension shutdown closes the pipe;
+// stop any live socket instead of leaving a provider running without its app.
+rl.on("close", () => {
+  void provider.shutdown().finally(() => process.exit(0));
+});
+
 process.on("SIGINT", () => {
   void provider.shutdown().finally(() => process.exit(0));
 });

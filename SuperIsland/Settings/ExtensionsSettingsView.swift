@@ -240,6 +240,9 @@ struct ExtensionsSettingsView: View {
 
                 if manager.runtimes[manifest.id] != nil {
                     Button("停用") {
+                        if let provider = ExtensionOAuthProvider.allCases.first(where: { $0.extensionID == manifest.id }) {
+                            ExtensionOAuthCoordinator.shared.cancel(provider)
+                        }
                         manager.disableByUser(extensionID: manifest.id)
                     }
                     .buttonStyle(.bordered)
@@ -428,10 +431,10 @@ struct ExtensionsSettingsView: View {
 }
 
 private struct LinearOAuthSettingsView: View {
-    private static let authorizeURLString = "https://api.supercmd.sh/auth/linear/authorize?app=superisland"
     private static let oauthStoreKey = "extensions.\(linearMentionsExtensionID).store.oauth"
 
     @ObservedObject private var manager = ExtensionManager.shared
+    @ObservedObject private var oauthCoordinator = ExtensionOAuthCoordinator.shared
     @State private var session: LinearOAuthSession?
 
     var body: some View {
@@ -454,6 +457,7 @@ private struct LinearOAuthSettingsView: View {
                     openAuthorizeURL()
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(oauthCoordinator.activeProvider != nil)
 
                 if session != nil {
                     Button("断开连接") {
@@ -462,6 +466,12 @@ private struct LinearOAuthSettingsView: View {
                     .buttonStyle(.bordered)
                     .tint(.red)
                 }
+            }
+
+            if let message = oauthCoordinator.messages[.linear] {
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             if let session {
@@ -484,6 +494,9 @@ private struct LinearOAuthSettingsView: View {
             reloadSession()
         }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            reloadSession()
+        }
+        .onChange(of: oauthCoordinator.completedAuthorizationCount) { _, _ in
             reloadSession()
         }
     }
@@ -524,18 +537,22 @@ private struct LinearOAuthSettingsView: View {
     }
 
     private func openAuthorizeURL() {
-        guard let url = URL(string: Self.authorizeURLString) else { return }
-        NSWorkspace.shared.open(url)
+        if ExtensionOAuthCoordinator.usesScopedAuthentication {
+            oauthCoordinator.authorize(.linear)
+        } else {
+            NSWorkspace.shared.open(ExtensionOAuthProvider.linear.authorizeURL)
+        }
     }
 
     private func disconnect() {
+        oauthCoordinator.cancel(.linear)
+        oauthCoordinator.clearMessage(.linear)
         UserDefaults.standard.removeObject(forKey: Self.oauthStoreKey)
         UserDefaults.standard.synchronize()
 
-        if manager.runtimes[linearMentionsExtensionID] == nil {
-            manager.activate(extensionID: linearMentionsExtensionID)
+        if manager.runtimes[linearMentionsExtensionID] != nil {
+            manager.scheduleImmediateRefresh(extensionID: linearMentionsExtensionID)
         }
-        manager.scheduleImmediateRefresh(extensionID: linearMentionsExtensionID)
         reloadSession()
     }
 
@@ -605,10 +622,10 @@ private struct LinearOAuthSession {
 }
 
 private struct LastFmOAuthSettingsView: View {
-    private static let authorizeURLString = "https://api.supercmd.sh/auth/lastfm/authorize?app=superisland"
     private static let oauthStoreKey = "extensions.\(lastFmScrobblerExtensionID).store.oauth"
 
     @ObservedObject private var manager = ExtensionManager.shared
+    @ObservedObject private var oauthCoordinator = ExtensionOAuthCoordinator.shared
     @State private var session: LastFmOAuthSession?
 
     var body: some View {
@@ -631,6 +648,7 @@ private struct LastFmOAuthSettingsView: View {
                     openAuthorizeURL()
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(oauthCoordinator.activeProvider != nil)
 
                 if session != nil {
                     Button("断开连接") {
@@ -639,6 +657,12 @@ private struct LastFmOAuthSettingsView: View {
                     .buttonStyle(.bordered)
                     .tint(.red)
                 }
+            }
+
+            if let message = oauthCoordinator.messages[.lastfm] {
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             if let session {
@@ -667,6 +691,9 @@ private struct LastFmOAuthSettingsView: View {
             reloadSession()
         }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            reloadSession()
+        }
+        .onChange(of: oauthCoordinator.completedAuthorizationCount) { _, _ in
             reloadSession()
         }
     }
@@ -710,18 +737,22 @@ private struct LastFmOAuthSettingsView: View {
     }
 
     private func openAuthorizeURL() {
-        guard let url = URL(string: Self.authorizeURLString) else { return }
-        NSWorkspace.shared.open(url)
+        if ExtensionOAuthCoordinator.usesScopedAuthentication {
+            oauthCoordinator.authorize(.lastfm)
+        } else {
+            NSWorkspace.shared.open(ExtensionOAuthProvider.lastfm.authorizeURL)
+        }
     }
 
     private func disconnect() {
+        oauthCoordinator.cancel(.lastfm)
+        oauthCoordinator.clearMessage(.lastfm)
         UserDefaults.standard.removeObject(forKey: Self.oauthStoreKey)
         UserDefaults.standard.synchronize()
 
-        if manager.runtimes[lastFmScrobblerExtensionID] == nil {
-            manager.activate(extensionID: lastFmScrobblerExtensionID)
+        if manager.runtimes[lastFmScrobblerExtensionID] != nil {
+            manager.scheduleImmediateRefresh(extensionID: lastFmScrobblerExtensionID)
         }
-        manager.scheduleImmediateRefresh(extensionID: lastFmScrobblerExtensionID)
         reloadSession()
     }
 
@@ -794,7 +825,9 @@ private struct LastFmOAuthSession {
 }
 
 private struct WhatsAppWebBridgeSettingsView: View {
+    private static let extensionID = "superisland.whatsapp-web"
     @ObservedObject private var bridge = WhatsAppWebBridge.shared
+    @ObservedObject private var manager = ExtensionManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -820,11 +853,13 @@ private struct WhatsAppWebBridgeSettingsView: View {
                     .tint(.red)
                 } else {
                     Button("开始登录") {
+                        guard prepareForLogin() else { return }
                         bridge.start()
                     }
                     .buttonStyle(.borderedProminent)
 
                     Button("刷新二维码") {
+                        guard prepareForLogin() else { return }
                         bridge.refreshQRCode()
                     }
                     .buttonStyle(.bordered)
@@ -852,7 +887,7 @@ private struct WhatsAppWebBridgeSettingsView: View {
                                 .fill(Color.white)
                         )
                 }
-            } else {
+            } else if bridge.connectionState == .loading {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
@@ -860,6 +895,14 @@ private struct WhatsAppWebBridgeSettingsView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
+            } else if bridge.connectionState == .idle {
+                Text("点击开始登录")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } else if bridge.connectionState == .qrReady {
+                Text("请刷新二维码")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
             }
 
             if let error = bridge.lastError, !error.isEmpty {
@@ -869,8 +912,19 @@ private struct WhatsAppWebBridgeSettingsView: View {
             }
         }
         .onAppear {
-            bridge.start()
+            if !ExtensionHostEnvironment.isWE1 || manager.runtimes[Self.extensionID] != nil {
+                bridge.start()
+            }
         }
+    }
+
+    private func prepareForLogin() -> Bool {
+        guard ExtensionHostEnvironment.isWE1 else { return true }
+        let extensionID = Self.extensionID
+        if manager.runtimes[extensionID] == nil {
+            manager.activate(extensionID: extensionID)
+        }
+        return manager.runtimes[extensionID] != nil
     }
 
     private var stateTitle: String {

@@ -47,10 +47,6 @@ private let settingsDivider = Color(white: 1.0, opacity: 0.10)
 struct SettingsView: View {
     @State private var selectedPane: SettingsPane
 
-    private static var isWE1DebugBundle: Bool {
-        Bundle.main.bundleIdentifier == "com.workview.SuperIsland.WE1Debug"
-    }
-
     init(initialPane: SettingsPane = .general) {
         _selectedPane = State(initialValue: initialPane)
     }
@@ -173,65 +169,10 @@ struct SettingsView: View {
         case .general:    GeneralSettingsView()
         case .modules:    ModuleSettingsView()
         case .appearance: AppearanceSettingsView()
-        case .extensions:
-            if Self.isWE1DebugBundle {
-                unavailableTestPane(
-                    title: "扩展已在 WE1 测试构建中隔离",
-                    message: "此构建不会发现或启动扩展子进程，也不会读取登录状态或打开正式授权页面。请使用正式版管理扩展。"
-                )
-            } else {
-                ExtensionsSettingsView()
-            }
+        case .extensions: ExtensionsSettingsView()
         case .windowEnhancement: WindowEnhancementSettingsView()
-        case .advanced:
-            if Self.isWE1DebugBundle {
-                isolatedTestPane(
-                    message: "WE1 测试构建已隔离正式版更新与生产状态写入；高级页在此构建中仅供查看。"
-                ) {
-                    AdvancedSettingsView()
-                }
-            } else {
-                AdvancedSettingsView()
-            }
+        case .advanced: AdvancedSettingsView()
         }
-    }
-
-    private func isolatedTestPane<Content: View>(
-        message: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(message, systemImage: "lock.shield")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.orange)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
-
-            content()
-                .disabled(true)
-                .opacity(0.62)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private func unavailableTestPane(title: String, message: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "lock.shield")
-                .font(.system(size: 30, weight: .medium))
-                .foregroundStyle(.orange)
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
-            Text(message)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 460)
-        }
-        .padding(28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .background(Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

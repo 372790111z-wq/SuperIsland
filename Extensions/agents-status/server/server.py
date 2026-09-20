@@ -45,6 +45,8 @@ import urllib.parse
 import uuid
 
 PORT = int(os.environ.get("AGENTS_STATUS_PORT") or os.environ.get("CC_STATUS_PORT", "7823"))
+OWNER_TOKEN = os.environ.get("AGENTS_STATUS_OWNER_TOKEN", "")
+PARENT_PID = int(os.environ.get("AGENTS_STATUS_PARENT_PID", "0"))
 WORKING_TIMEOUT = float(
     os.environ.get("AGENTS_STATUS_WORKING_TIMEOUT") or
     os.environ.get("CC_STATUS_WORKING_TIMEOUT", "30")
@@ -2471,7 +2473,7 @@ def _route_get(path):
     if path_only == "/state":
         return _build_response(200, "OK", _snapshot(_ttl_param(params)))
     if path_only == "/health":
-        return _build_response(200, "OK", {"ok": True, "port": PORT, "paused": _paused, "pid": os.getpid()})
+        return _build_response(200, "OK", {"ok": True, "port": PORT, "paused": _paused, "pid": os.getpid(), "ownerToken": OWNER_TOKEN})
     if path_only == "/control/status":
         return _build_response(200, "OK", {"paused": _paused})
     if path_only == "/hooks/status":
@@ -2624,13 +2626,24 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", PORT))
     srv.listen(16)
+    if PARENT_PID > 0:
+        srv.settimeout(1.0)
     sys.stderr.write(
         f"agents-status bridge on 127.0.0.1:{PORT} "
         f"(claude_hook={CC_HOOK_SCRIPT or 'unset'} codex_hook={CODEX_HOOK_SCRIPT or 'unset'})\n"
     )
     sys.stderr.flush()
     while True:
-        conn, _addr = srv.accept()
+        # App-hosted instances must not survive a crash/force-quit and keep
+        # holding the fixed hook port. Standalone legacy instances retain their
+        # original lifecycle (no parent passed).
+        if PARENT_PID > 0 and os.getppid() != PARENT_PID:
+            srv.close()
+            return
+        try:
+            conn, _addr = srv.accept()
+        except socket.timeout:
+            continue
         t = threading.Thread(target=_handle_client, args=(conn,), daemon=True)
         t.start()
 
