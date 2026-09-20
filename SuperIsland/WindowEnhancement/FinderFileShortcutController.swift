@@ -97,7 +97,7 @@ final class FinderFileShortcutController {
             if let shortcut = preferences.shortcut(for: FinderFileShortcut.id) {
                 _ = preferences.rollbackShortcutRegistration(shortcut, for: FinderFileShortcut.id)
             }
-            feedback("文件快捷键被系统或其他 App 占用，请重新设置")
+            feedback("文件快捷键不可用，请重新设置")
         } else if let shortcut = preferences.shortcut(for: FinderFileShortcut.id) {
             preferences.finishShortcutRegistration(shortcut, for: FinderFileShortcut.id)
         }

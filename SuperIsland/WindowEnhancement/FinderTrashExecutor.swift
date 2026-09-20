@@ -16,16 +16,16 @@ enum FinderTrashFailure: String, Error, Equatable {
 
     var message: String {
         switch self {
-        case .accessibilityUnavailable: return "请先允许 WE1 使用辅助功能"
-        case .finderNotFrontmost: return "仅在 Finder 或桌面选中文件时可用"
-        case .unsafeFocus: return "当前正在输入、显示对话框，或无法确认文件选择区域"
-        case .commandUnavailable: return "无法确认 Finder 的“移到废纸篓”命令，未执行操作"
-        case .ambiguousCommand: return "Finder 命令不唯一，未执行操作"
-        case .commandDisabled: return "Finder 当前无法移到废纸篓，请先选中可移除的文件"
-        case .commandNotPressable: return "Finder 当前不允许执行“移到废纸篓”"
-        case .contextChanged: return "Finder 焦点或操作上下文已变化，请重新触发"
-        case .timedOut: return "Finder 响应超时，未继续执行操作"
-        case .requestUnconfirmed: return "无法确认 Finder 是否已接收命令，请先检查文件状态"
+        case .accessibilityUnavailable: return "请在系统设置中开启本应用的辅助功能权限"
+        case .finderNotFrontmost: return "请先在 Finder 或桌面选中文件"
+        case .unsafeFocus: return "无法确认文件选择，请检查是否正在输入或有对话框打开"
+        case .commandUnavailable: return "无法确认删除命令，未执行操作"
+        case .ambiguousCommand: return "无法确认删除命令，未执行操作"
+        case .commandDisabled: return "所选文件暂无法移到废纸篓"
+        case .commandNotPressable: return "暂无法移到废纸篓，未执行操作"
+        case .contextChanged: return "操作对象已变化，请重新选中文件"
+        case .timedOut: return "Finder 响应超时，未继续执行"
+        case .requestUnconfirmed: return "删除结果暂无法确认，请先检查文件状态"
         }
     }
 }
@@ -316,7 +316,7 @@ final class FinderTrashExecutor {
 
         var message: String {
             switch self {
-            case .requested: return "已请求 Finder 移到废纸篓"
+            case .requested: return "已请求移到废纸篓"
             case let .rejected(reason): return reason.message
             }
         }

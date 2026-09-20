@@ -444,10 +444,10 @@ struct WindowEnhancementSettingsView: View {
 
         if granted {
             if !wasGranted && !permissions.screenRecordingGrantedAtProcessLaunch {
-                preferences.publishFeedback("屏幕录制权限已授权，需完全退出并重新打开 SuperIsland 后生效")
+                preferences.publishFeedback("已授权，请完全退出并重新打开应用")
             }
         } else {
-            preferences.publishFeedback("请在“系统设置 > 隐私与安全性 > 屏幕与系统音频录制”中允许 SuperIsland；授权后需重新启动 App")
+            preferences.publishFeedback("请开启屏幕录制权限，然后重启应用")
             permissions.openScreenRecordingSettings()
         }
 

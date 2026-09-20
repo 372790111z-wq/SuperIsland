@@ -402,7 +402,7 @@ final class WindowCommandTabMonitor {
             if !reportedAccessibilityUnavailable {
                 reportedAccessibilityUnavailable = true
                 logger.notice("Cmd-Tab Plus is disabled because live Accessibility trust is unavailable")
-                preferences.publishFeedback("Cmd-Tab Plus 未启动：请为当前 SuperIsland 测试版重新开启辅助功能权限")
+                preferences.publishFeedback("Cmd-Tab 未启动，请检查辅助功能权限并重启 WE1")
             }
             scheduleAccessibilityTrustRetryIfNeeded()
             return
@@ -512,7 +512,7 @@ final class WindowCommandTabMonitor {
 
         if !reportedEventTapFailure {
             reportedEventTapFailure = true
-            preferences.publishFeedback("Cmd-Tab Plus 未能启动：系统拒绝键盘事件监听，请重新授权辅助功能并重启 SuperIsland")
+            preferences.publishFeedback("Cmd-Tab 未启动，请检查辅助功能权限并重启 WE1")
         }
 
         guard eventTapInstallAttempts < 3,
@@ -2050,7 +2050,7 @@ final class WindowCommandTabMonitor {
     private func closeSelectedWindow() {
         guard isPresenting, !nativeSelectionPending, candidates.indices.contains(selectedIndex) else { return }
         guard !candidates[selectedIndex].isSharedWeChat || hasExplicitWindowSelection else {
-            preferences.publishFeedback("请先选择要关闭的微信窗口")
+            preferences.publishFeedback("请先选择要关闭的窗口")
             return
         }
         let windowIndex = candidates[selectedIndex].windows.indices.contains(selectedWindowIndex)
@@ -2070,19 +2070,19 @@ final class WindowCommandTabMonitor {
         guard isPresenting,
               candidates.indices.contains(applicationIndex),
               candidates[applicationIndex].windows.indices.contains(windowIndex) else {
-            preferences.publishFeedback("当前预览没有可关闭的窗口")
+            preferences.publishFeedback("暂无可关闭窗口")
             return
         }
         let candidate = candidates[applicationIndex]
         let window = candidate.windows[windowIndex]
         guard window.element != nil else {
-            preferences.publishFeedback("当前预览窗口暂不可操作，请先切换到该 App")
+            preferences.publishFeedback("窗口暂不可操作，请先切换到该应用")
             return
         }
         guard let applicationIdentity = WindowThumbnailApplicationIdentity(
             application: window.application
         ) else {
-            preferences.publishFeedback("当前预览 App 状态已变化，请重新选择")
+            preferences.publishFeedback("应用状态已变化，请重新选择")
             return
         }
         closeWindowRetryTask?.cancel()
@@ -2117,7 +2117,7 @@ final class WindowCommandTabMonitor {
                   matching: expectedWindow,
                   application: expectedWindow.application
               ) else {
-            preferences.publishFeedback("当前预览窗口状态已变化，请重新选择")
+            preferences.publishFeedback("窗口状态已变化，请重新选择")
             return
         }
         guard currentWindow.canClose,
@@ -2126,7 +2126,7 @@ final class WindowCommandTabMonitor {
                   kAXCloseButtonAttribute,
                   of: currentElement
               ) else {
-            preferences.publishFeedback("当前预览窗口没有可用的关闭按钮")
+            preferences.publishFeedback("窗口暂无法关闭")
             return
         }
 
@@ -2166,7 +2166,7 @@ final class WindowCommandTabMonitor {
         logger.error(
             "Failed to close selected preview window after fresh resolution: AX error \(result.rawValue, privacy: .public)"
         )
-        preferences.publishFeedback("关闭预览窗口失败")
+        preferences.publishFeedback("关闭结果未确认，请检查窗口状态")
     }
 
     private func finishClosingWindow(
@@ -2200,7 +2200,7 @@ final class WindowCommandTabMonitor {
             return matches.count == 1 ? matches[0] : nil
         }()
         guard let windowIndex = currentWindowIndex else {
-            preferences.publishFeedback("窗口已关闭，预览正在刷新")
+            preferences.publishFeedback("已请求关闭，正在刷新预览")
             refreshCandidatesAfterClosing(
                 selectedApplicationPID: closedWindow.application.processIdentifier,
                 applicationIdentity: expectedApplicationIdentity
@@ -2266,7 +2266,7 @@ final class WindowCommandTabMonitor {
             application = candidate.windows[selectedWindowIndex].application
         } else {
             cancel()
-            preferences.publishFeedback("这个 App 有多个运行实例，请先选择具体窗口再退出")
+            preferences.publishFeedback("应用有多个运行实例，请先选择具体窗口再退出")
             return
         }
         if candidate.isSharedWeChat {
@@ -2281,7 +2281,7 @@ final class WindowCommandTabMonitor {
             application: application
         ) else {
             cancel()
-            preferences.publishFeedback("所选 App 状态已变化，请重新打开 Cmd-Tab Plus")
+            preferences.publishFeedback("应用状态已变化，请重新打开 Cmd-Tab")
             return
         }
 
@@ -2293,7 +2293,7 @@ final class WindowCommandTabMonitor {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "退出“\(applicationName)”？"
-        alert.informativeText = "只会退出当前在 Cmd-Tab Plus 中选中的 App。"
+        alert.informativeText = "将退出所选应用，请先确认未保存内容。"
         alert.addButton(withTitle: "退出")
         alert.addButton(withTitle: "取消")
         alert.buttons.last?.keyEquivalent = "\u{1b}"
@@ -2672,7 +2672,7 @@ final class WindowCommandTabMonitor {
             hasExplicitWindowSelection = false
             recordNativeCommit("commitRejected", reason: "invalidTargetOrContext", window: window)
             scheduleNativeSessionReconciliation(reason: "invalidTargetOrContext")
-            preferences.publishFeedback("所选窗口状态已变化，请重新选择")
+            preferences.publishFeedback("窗口状态已变化，请重新选择")
             return
         }
         let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -2685,7 +2685,7 @@ final class WindowCommandTabMonitor {
               Self.mousePressCounts() == mouseInputCounts,
               nativeWindowCommit.isCurrent(ticket, sequenceID: eventSequenceID) else {
             abortNativeWindowCommit(reason: "initialVisibilityOrInput")
-            preferences.publishFeedback("系统切换器状态暂不可确认，请重试")
+            preferences.publishFeedback("无法确认系统 Cmd-Tab 状态，请重试")
             return
         }
         if initialVisibility == .visible {
@@ -2704,7 +2704,7 @@ final class WindowCommandTabMonitor {
             })
             guard dismissal != .rejected else {
                 abortNativeWindowCommit(reason: "dismissRejected")
-                preferences.publishFeedback("系统切换器尚未退出，请重试")
+                preferences.publishFeedback("系统 Cmd-Tab 尚未关闭，请重试")
                 return
             }
             recordNativeCommit("commitDismissRequested", ticket: ticket,
@@ -2762,7 +2762,7 @@ final class WindowCommandTabMonitor {
                         reason: reason.rawValue)
                     self.abortNativeWindowCommit(reason: reason.rawValue)
                     if reason != .stateChanged {
-                        self.preferences.publishFeedback("系统切换器尚未退出，可继续选择窗口")
+                        self.preferences.publishFeedback("系统 Cmd-Tab 尚未关闭，可继续选择窗口")
                     }
                 }
             )
@@ -5713,7 +5713,7 @@ private struct CommandTabPreviewView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                Text(item.isLoading ? "正在读取窗口预览…" : "没有可预览的窗口")
+                Text(item.isLoading ? "正在读取预览…" : "暂无可预览窗口")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
             } else if item.windows.count == 1, let window = item.windows.first {
@@ -5905,7 +5905,7 @@ private struct CommandTabWindowPreviewTile: View {
                 )
             case .restartRequired:
                 previewFailure(
-                    title: "重启 SuperIsland 后显示",
+                    title: "重启 WE1 后显示",
                     symbol: "arrow.clockwise"
                 )
             case .notEnumerated:
@@ -5915,19 +5915,19 @@ private struct CommandTabWindowPreviewTile: View {
                 )
             case .ambiguous:
                 previewFailure(
-                    title: "无法唯一匹配窗口",
+                    title: "无法确定对应窗口",
                     symbol: "questionmark.square"
                 )
             case .captureFailed:
                 previewFailure(
-                    title: "窗口预览暂不可用",
+                    title: "预览暂不可用",
                     symbol: "exclamationmark.triangle"
                 )
             }
         } else {
             VStack(spacing: 7) {
                 ProgressView().controlSize(.small)
-                Text("正在生成预览")
+                Text("正在生成预览…")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }

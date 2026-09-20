@@ -247,7 +247,7 @@ struct ShortcutRecorderButton: View {
                         let previous = preferences.shortcut(for: targetID)
                         guard preferences.setShortcut(shortcut, for: targetID) else {
                             setFeedback(
-                                preferences.lastFeedback ?? "快捷键不可用，已保留原设置",
+                                preferences.lastFeedback ?? "快捷键不可用，原设置已保留",
                                 tone: .error
                             )
                             NSSound.beep()
@@ -323,7 +323,7 @@ struct ShortcutRecorderButton: View {
     private func verifyRegistration(of shortcut: WindowShortcut, previous: WindowShortcut?) {
         let currentAttemptID = UUID()
         attemptID = currentAttemptID
-        setFeedback("正在注册…", tone: .success)
+        setFeedback("正在设置…", tone: .success)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
             guard attemptID == currentAttemptID else { return }
@@ -339,8 +339,8 @@ struct ShortcutRecorderButton: View {
             let preserved = preferences.shortcut(for: targetID) == previous
             setFeedback(
                 preserved
-                    ? (preferences.lastFeedback ?? "注册失败，已保留原设置")
-                    : "注册失败，请重新设置",
+                    ? (preferences.lastFeedback ?? "设置失败，原设置已保留")
+                    : "设置失败，请重新设置",
                 tone: .error
             )
         }
@@ -359,7 +359,7 @@ struct ShortcutRecorderButton: View {
             kVK_RightArrow
         ]
         guard highRiskKeys.contains(Int(shortcut.keyCode)) else { return nil }
-        return "会覆盖普通 App 的 \(shortcut.formattedDisplay)"
+        return "会覆盖应用内的 \(shortcut.formattedDisplay) 操作"
     }
 
     private func setFeedback(_ text: String, tone: FeedbackTone) {

@@ -273,7 +273,7 @@ final class WindowEnhancementController {
         guard windowMutationResolved, recoveryComplete else {
             preparingForTermination = false
             start()
-            feedback("窗口操作尚未安全收敛，已取消退出；请确认窗口状态后重试")
+            feedback("窗口操作尚未结束，已取消退出，请检查窗口后重试")
             return false
         }
         feedbackPresenter.hide()
@@ -311,15 +311,15 @@ final class WindowEnhancementController {
             let sourceDisplayID = displayID(forAXFrame: context.frame)
             let intendedDisplayID = targetDisplayID ?? sourceDisplayID
             guard let sourceDisplayID, let intendedDisplayID else {
-                feedback("找不到全屏窗口所在显示器")
+                feedback("无法定位窗口所在屏幕")
                 return
             }
             if targetDisplayID != nil, screen(withDisplayID: intendedDisplayID) == nil {
-                feedback("目标显示器已断开，请重新选择布局")
+                feedback("目标屏幕已断开，请重新选择")
                 return
             }
             guard let identity = WindowIdentity(context: context) else {
-                feedback("当前全屏窗口缺少稳定标识，已取消操作以避免影响错误窗口")
+                feedback("无法确认窗口，操作已取消")
                 return
             }
             beginWindowMutation { [weak self] generation in
@@ -363,7 +363,7 @@ final class WindowEnhancementController {
               application.activationPolicy == .regular,
               !preferences.isExcluded(application),
               let currentFrame = frame(of: window) else {
-            feedback("拖动的窗口已变化，已取消布局")
+            feedback("窗口状态已变化，布局已取消")
             return
         }
         let context = FocusedWindowContext(
@@ -416,7 +416,7 @@ final class WindowEnhancementController {
             generation: generation
         ) else {
             if isWindowMutationCurrent(generation) {
-                feedback("窗口仍在变化，已取消布局，请重试")
+                feedback("窗口仍在变化，布局已取消，请重试")
             }
             return .safeWindowed
         }
@@ -426,7 +426,7 @@ final class WindowEnhancementController {
             frame(of: window).flatMap(displayID(forAXFrame:))
         guard let resolvedDisplayID,
               let targetScreen = screen(withDisplayID: resolvedDisplayID) else {
-            feedback(targetDisplayID == nil ? "找不到窗口所在显示器" : "目标显示器已断开，请重新选择布局")
+            feedback(targetDisplayID == nil ? "无法定位窗口所在屏幕" : "目标屏幕已断开，请重新选择")
             return .safeWindowed
         }
         let usable = usableAXFrame(for: targetScreen)
@@ -443,7 +443,7 @@ final class WindowEnhancementController {
         guard !shouldRecoverWindowMutation(generation) else { return .safeWindowed }
         guard let outcome = commit else {
             if isWindowMutationCurrent(generation) {
-                feedback("窗口位置未能稳定，布局未完成")
+                feedback("窗口位置不稳定，布局未完成")
             }
             return .safeWindowed
         }
@@ -507,7 +507,7 @@ final class WindowEnhancementController {
         }
         guard !didReportAccessibilityRequirement else { return }
         didReportAccessibilityRequirement = true
-        feedback("需要辅助功能权限才能管理窗口，请在系统设置中允许 SuperIsland")
+        feedback("请在系统设置中开启本应用的辅助功能权限")
     }
 
     private func reconfigureHotKeys() {
@@ -573,14 +573,14 @@ final class WindowEnhancementController {
             let restoredOnly = rolledBackSet.subtracting(unresolvedSet).sorted()
             if unresolvedSet.isEmpty {
                 let names = rolledBackSet.sorted().map(targetDisplayName).joined(separator: "、")
-                feedback("快捷键冲突：\(names)。已保留原设置")
+                feedback("快捷键冲突：\(names)，原设置已保留")
             } else if !restoredOnly.isEmpty {
                 let restoredNames = restoredOnly.map(targetDisplayName).joined(separator: "、")
                 let unresolvedNames = unresolvedSet.sorted().map(targetDisplayName).joined(separator: "、")
-                feedback("快捷键冲突：\(restoredNames) 已保留原设置；\(unresolvedNames) 注册失败")
+                feedback("快捷键冲突：\(restoredNames) 原设置已保留；\(unresolvedNames) 设置失败")
             } else {
                 let names = unresolvedSet.sorted().map(targetDisplayName).joined(separator: "、")
-                feedback("快捷键注册失败：\(names)。可能已被系统或其他 App 占用")
+                feedback("快捷键设置失败：\(names)，请检查是否被占用")
             }
         } else if signature.isEmpty {
             lastHotKeyFailureSignature = nil
@@ -604,11 +604,11 @@ final class WindowEnhancementController {
         guard AXUIElementCopyAttributeValue(context.window, kAXCloseButtonAttribute as CFString, &closeButtonValue) == .success,
               let closeButtonValue,
               CFGetTypeID(closeButtonValue) == AXUIElementGetTypeID() else {
-            feedback("当前窗口没有可用的关闭按钮")
+            feedback("窗口暂无法关闭")
             return
         }
         let result = AXUIElementPerformAction(unsafeBitCast(closeButtonValue, to: AXUIElement.self), kAXPressAction as CFString)
-        feedback(result == .success ? "已关闭当前窗口" : "关闭窗口失败")
+        feedback(result == .success ? "已请求关闭" : "关闭结果未确认，请检查窗口状态")
     }
 
     private func confirmQuitFrontmostApp() {
@@ -622,13 +622,13 @@ final class WindowEnhancementController {
         guard let application = NSWorkspace.shared.frontmostApplication,
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               !preferences.isExcluded(application) else {
-            feedback("没有可退出的前台 App")
+            feedback("当前没有可退出应用")
             return
         }
         let name = application.localizedName ?? "当前 App"
         let alert = NSAlert()
-        alert.messageText = "退出 \(name)？"
-        alert.informativeText = "这会退出整个 App。未保存内容是否可恢复由 \(name) 决定。"
+        alert.messageText = "退出“\(name)”？"
+        alert.informativeText = "将退出所选应用，请先确认未保存内容。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "退出")
         alert.addButton(withTitle: "取消")
@@ -653,29 +653,29 @@ final class WindowEnhancementController {
             if succeeded + pending == 0 {
                 feedback("当前窗口暂不可收起")
             } else if pending > 0 {
-                let failureNote = failed > 0 ? "，\(failed) 个暂不可收起" : ""
-                feedback("已请求收起 \(succeeded + pending) 个窗口\(failureNote)；再按一次打开本批窗口")
+                let failureNote = failed > 0 ? "，\(failed) 个未能收起" : ""
+                feedback("已请求收起 \(succeeded + pending) 个窗口\(failureNote)")
             } else if failed > 0 {
-                feedback("已收起 \(succeeded) 个窗口，\(failed) 个窗口不允许最小化；再按一次打开本批窗口")
+                feedback("已收起 \(succeeded) 个窗口，\(failed) 个未能收起")
             } else {
-                feedback("已收起 \(succeeded) 个窗口；再按一次打开本批窗口")
+                feedback("已收起 \(succeeded) 个窗口")
             }
         case let .restored(_, succeeded, pending, failed, missing):
             let unresolved = failed + missing
             if pending > 0 {
-                let failureNote = unresolved > 0 ? "，\(unresolved) 个已关闭或暂不可恢复" : ""
-                feedback("已请求恢复 \(succeeded + pending) 个窗口\(failureNote)")
+                let failureNote = unresolved > 0 ? "，\(unresolved) 个已关闭或无法展开" : ""
+                feedback("已请求展开 \(succeeded + pending) 个窗口\(failureNote)")
             } else if unresolved > 0 {
-                feedback("已恢复 \(succeeded) 个窗口，\(unresolved) 个窗口已关闭或不允许恢复")
+                feedback("已展开 \(succeeded) 个窗口，\(unresolved) 个已关闭或无法展开")
             } else {
-                feedback("已恢复 \(succeeded) 个窗口")
+                feedback("已展开 \(succeeded) 个窗口")
             }
         case let .nothingToMinimize(outcomeMode):
             feedback(outcomeMode == .others ? "没有其他可收起窗口" : "没有可收起窗口")
         case .nothingToRestore:
-            feedback("没有由 SuperIsland 收起的窗口可恢复")
+            feedback("没有待展开窗口")
         case .missingFocusedWindow:
-            feedback("当前 App 没有可保留的窗口")
+            feedback("当前应用没有可保留窗口")
         }
     }
 
@@ -694,17 +694,17 @@ final class WindowEnhancementController {
         guard ensureAccessibility(), guardWindowMutationIsIdle() else { return }
         guard let context = standardFocusedWindowContext() else { return }
         guard !preferences.isExcluded(context.application) else {
-            feedback("当前 App 已被排除")
+            feedback("当前应用已被排除")
             return
         }
 
         if axBoolAttribute("AXFullScreen", of: context.window) == true {
             guard let sourceDisplayID = displayID(forAXFrame: context.frame) else {
-                feedback("找不到全屏窗口所在显示器")
+                feedback("无法定位窗口所在屏幕")
                 return
             }
             guard let identity = WindowIdentity(context: context) else {
-                feedback("当前全屏窗口缺少稳定标识，已取消操作以避免影响错误窗口")
+                feedback("无法确认窗口，操作已取消")
                 return
             }
             beginWindowMutation { [weak self] generation in
@@ -725,7 +725,7 @@ final class WindowEnhancementController {
 
     private func performWindowedCenter(context: FocusedWindowContext) {
         guard let screen = screen(containingAXFrame: context.frame) ?? NSScreen.main else {
-            feedback("找不到窗口所在显示器")
+            feedback("无法定位窗口所在屏幕")
             return
         }
         let usable = usableAXFrame(for: screen)
@@ -737,7 +737,7 @@ final class WindowEnhancementController {
             abs(desiredSize.height - context.frame.height) > 0.5
         if wasSizeClamped { _ = setSize(desiredSize, for: context.window) }
         guard let effectiveFrame = frame(of: context.window) else {
-            feedback("无法验证窗口调整结果")
+            feedback("无法确认调整结果")
             return
         }
         let centeredOrigin = clampedOrigin(
@@ -750,7 +750,7 @@ final class WindowEnhancementController {
         )
         let positionResult = setPosition(centeredOrigin, for: context.window)
         guard positionResult != .failed, let finalFrame = frame(of: context.window) else {
-            feedback("窗口居中失败")
+            feedback("无法确认居中结果，请检查窗口状态")
             return
         }
         // Position is judged against the final size, since an app may resize
@@ -771,7 +771,7 @@ final class WindowEnhancementController {
         guard ensureAccessibility(), guardWindowMutationIsIdle() else { return }
         guard let context = standardFocusedWindowContext() else { return }
         guard !preferences.isExcluded(context.application) else {
-            feedback("当前 App 已被排除")
+            feedback("当前应用已被排除")
             return
         }
 
@@ -779,11 +779,11 @@ final class WindowEnhancementController {
             guard let sourceDisplayID = displayID(forAXFrame: context.frame),
                   let targetScreen = adjacentScreen(from: sourceDisplayID, offset: displayOffset),
                   let targetDisplayID = displayID(for: targetScreen) else {
-                feedback("没有可移动到的其他显示器")
+                feedback("没有可用的其他显示器")
                 return
             }
             guard let identity = WindowIdentity(context: context) else {
-                feedback("当前全屏窗口缺少稳定标识，已取消操作以避免影响错误窗口")
+                feedback("无法确认窗口，操作已取消")
                 return
             }
             beginWindowMutation { [weak self] generation in
@@ -811,7 +811,7 @@ final class WindowEnhancementController {
         let screens = orderedScreens()
         guard screens.count > 1,
               let current = screens.firstIndex(where: { cgBounds(for: $0).contains(CGPoint(x: context.frame.midX, y: context.frame.midY)) }) else {
-            feedback("没有可移动到的其他显示器")
+            feedback("没有可用的其他显示器")
             return
         }
         let next = (current + displayOffset + screens.count) % screens.count
@@ -827,7 +827,7 @@ final class WindowEnhancementController {
             abs(desiredSize.height - context.frame.height) > 0.5
         if wasSizeClamped { _ = setSize(desiredSize, for: context.window) }
         guard let effectiveFrame = frame(of: context.window) else {
-            feedback("无法验证窗口调整结果")
+            feedback("无法确认调整结果")
             return
         }
         let targetOrigin = CGPoint(
@@ -837,14 +837,14 @@ final class WindowEnhancementController {
         let positionResult = setPosition(targetOrigin, for: context.window)
         guard positionResult != .failed,
               let finalFrame = frame(of: context.window) else {
-            feedback("跨屏移动失败")
+            feedback("无法确认移屏结果，请检查窗口状态")
             return
         }
         // A corner crossing the edge is not enough to report a completed move.
         guard cgBounds(for: screens[next]).contains(
             CGPoint(x: finalFrame.midX, y: finalFrame.midY)
         ) else {
-            feedback("未能移至目标屏幕")
+            feedback("未能移到目标屏幕")
             return
         }
         let finalTargetOrigin = CGPoint(
@@ -939,11 +939,11 @@ final class WindowEnhancementController {
 
     private func guardWindowMutationIsIdle() -> Bool {
         guard !preparingForTermination else {
-            feedback("正在安全结束窗口操作，暂不接受新操作")
+            feedback("正在结束窗口操作，请稍候")
             return false
         }
         guard activeWindowMutationTask == nil else {
-            feedback("窗口操作正在进行，请稍候")
+            feedback("正在操作，请稍候")
             return false
         }
         return true
@@ -1005,7 +1005,7 @@ final class WindowEnhancementController {
         guard isWindowMutationCurrent(generation) else { return .unresolved }
         if shouldRecoverWindowMutation(generation) {
             return await reportFullScreenFailure(
-                "窗口增强已关闭或应用正在退出，已取消布局",
+                "窗口增强关闭或应用退出，布局已取消",
                 identity: identity,
                 preferredElement: context.window,
                 sourceDisplayID: sourceDisplayID,
@@ -1044,7 +1044,7 @@ final class WindowEnhancementController {
             guard isWindowMutationCurrent(generation) else { return .unresolved }
             if shouldRecoverWindowMutation(generation) {
                 return await reportFullScreenFailure(
-                    "窗口增强已关闭或应用正在退出，已取消布局",
+                    "窗口增强关闭或应用退出，布局已取消",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1065,7 +1065,7 @@ final class WindowEnhancementController {
                 targetScreen = replacement
             } else {
                 return await reportFullScreenFailure(
-                    "目标显示器已断开",
+                    "目标屏幕已断开",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1081,7 +1081,7 @@ final class WindowEnhancementController {
             guard let finalFrame = frame(of: activeWindow),
                   axBoolAttribute("AXFullScreen", of: activeWindow) == false else {
                 return await reportFullScreenFailure(
-                    "无法验证布局结果",
+                    "无法确认布局结果",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1096,7 +1096,7 @@ final class WindowEnhancementController {
                         screen(withDisplayID: sourceDisplayID) ?? NSScreen.main,
                       let replacementID = displayID(for: replacement) else {
                     return await reportFullScreenFailure(
-                        "目标显示器在布局过程中断开",
+                        "布局时目标屏幕已断开",
                         identity: identity,
                         preferredElement: activeWindow,
                         sourceDisplayID: sourceDisplayID,
@@ -1115,7 +1115,7 @@ final class WindowEnhancementController {
                 .insetBy(dx: -Self.geometryTolerance, dy: -Self.geometryTolerance)
                 .contains(CGPoint(x: finalFrame.midX, y: finalFrame.midY)) else {
                 return await reportFullScreenFailure(
-                    "窗口布局未落在目标显示器",
+                    "窗口未在目标屏幕完成布局",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1136,7 +1136,7 @@ final class WindowEnhancementController {
                 )
                 if shouldRecoverWindowMutation(generation) {
                     return await reportFullScreenFailure(
-                        "窗口增强已关闭或应用正在退出，已回滚布局",
+                        "窗口增强关闭或应用退出，布局已取消",
                         identity: identity,
                         preferredElement: activeWindow,
                         sourceDisplayID: sourceDisplayID,
@@ -1154,7 +1154,7 @@ final class WindowEnhancementController {
                     return .unresolved
                 case let .failed(reason):
                     return await reportFullScreenFailure(
-                        "布局结果未稳定：\(reason)",
+                        "布局未稳定：\(reason)",
                         identity: identity,
                         preferredElement: activeWindow,
                         sourceDisplayID: sourceDisplayID,
@@ -1220,7 +1220,7 @@ final class WindowEnhancementController {
         guard isWindowMutationCurrent(generation) else { return .unresolved }
         if shouldRecoverWindowMutation(generation) {
             return await reportFullScreenFailure(
-                "窗口增强已关闭或应用正在退出，已取消居中",
+                "窗口增强关闭或应用退出，居中已取消",
                 identity: identity,
                 preferredElement: context.window,
                 sourceDisplayID: sourceDisplayID,
@@ -1260,7 +1260,7 @@ final class WindowEnhancementController {
                   let currentFrame = frame(of: activeWindow) else { return .unresolved }
             if shouldRecoverWindowMutation(generation) {
                 return await reportFullScreenFailure(
-                    "窗口增强已关闭或应用正在退出，已取消居中",
+                    "窗口增强关闭或应用退出，居中已取消",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1280,7 +1280,7 @@ final class WindowEnhancementController {
                 targetScreen = replacement
             } else {
                 return await reportFullScreenFailure(
-                    "显示器变化后找不到可用的居中区域",
+                    "屏幕变化后没有可用的居中区域",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1295,7 +1295,7 @@ final class WindowEnhancementController {
                 on: targetScreen
             ), axBoolAttribute("AXFullScreen", of: activeWindow) == false else {
                 return await reportFullScreenFailure(
-                    "退出全屏后窗口居中失败",
+                    "退出全屏后居中失败",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1309,7 +1309,7 @@ final class WindowEnhancementController {
                       let replacement = screen(containingAXFrame: centerOutcome.finalFrame) ?? NSScreen.main,
                       let replacementID = displayID(for: replacement) else {
                     return await reportFullScreenFailure(
-                        "显示器在居中过程中断开",
+                        "居中时屏幕已断开",
                         identity: identity,
                         preferredElement: activeWindow,
                         sourceDisplayID: sourceDisplayID,
@@ -1345,7 +1345,7 @@ final class WindowEnhancementController {
             )
             if shouldRecoverWindowMutation(generation) {
                 return await reportFullScreenFailure(
-                    "窗口增强已关闭或应用正在退出，已回滚居中",
+                    "窗口增强关闭或应用退出，居中已取消",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1363,7 +1363,7 @@ final class WindowEnhancementController {
                 return .unresolved
             case let .failed(reason):
                 return await reportFullScreenFailure(
-                    "居中结果未稳定：\(reason)",
+                    "居中未稳定：\(reason)",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1399,7 +1399,7 @@ final class WindowEnhancementController {
         guard isWindowMutationCurrent(generation) else { return .unresolved }
         if shouldRecoverWindowMutation(generation) {
             return await reportFullScreenFailure(
-                "窗口增强已关闭或应用正在退出，已取消跨屏移动",
+                "窗口增强关闭或应用退出，移屏已取消",
                 identity: identity,
                 preferredElement: context.window,
                 sourceDisplayID: sourceDisplayID,
@@ -1430,7 +1430,7 @@ final class WindowEnhancementController {
         )
         if shouldRecoverWindowMutation(generation) {
             return await reportFullScreenFailure(
-                "窗口增强已关闭或应用正在退出，已取消跨屏移动",
+                "窗口增强关闭或应用退出，移屏已取消",
                 identity: identity, preferredElement: window,
                 sourceDisplayID: sourceDisplayID, originalWindowedFrame: nil,
                 generation: generation
@@ -1439,7 +1439,7 @@ final class WindowEnhancementController {
         guard case let .stable(windowedWindow) = exitReadiness else {
             if case let .failed(reason) = exitReadiness {
                 return await reportFullScreenFailure(
-                    "退出全屏后窗口尚未稳定：\(reason)",
+                    "退出全屏后窗口未稳定：\(reason)",
                     identity: identity, preferredElement: window,
                     sourceDisplayID: sourceDisplayID, originalWindowedFrame: nil,
                     generation: generation
@@ -1468,7 +1468,7 @@ final class WindowEnhancementController {
                     screen(withDisplayID: sourceDisplayID) ?? NSScreen.main else { return .unresolved }
             if shouldRecoverWindowMutation(generation) {
                 return await reportFullScreenFailure(
-                    "窗口增强已关闭或应用正在退出，已取消跨屏移动",
+                    "窗口增强关闭或应用退出，移屏已取消",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1489,7 +1489,7 @@ final class WindowEnhancementController {
                 destinationScreen = replacement
             } else {
                 return await reportFullScreenFailure(
-                    "目标显示器已断开",
+                    "目标屏幕已断开",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1515,7 +1515,7 @@ final class WindowEnhancementController {
                     continue
                 }
                 return await reportFullScreenFailure(
-                    "全屏窗口退出后无法跨屏移动",
+                    "退出全屏后无法移屏",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1528,7 +1528,7 @@ final class WindowEnhancementController {
             if screen(withDisplayID: activeTargetDisplayID) == nil {
                 guard !didRecomputeTarget else {
                     return await reportFullScreenFailure(
-                        "目标显示器在移动过程中断开",
+                        "移屏时目标屏幕已断开",
                         identity: identity,
                         preferredElement: activeWindow,
                         sourceDisplayID: sourceDisplayID,
@@ -1541,7 +1541,7 @@ final class WindowEnhancementController {
                       let replacement = adjacentScreen(from: movedDisplayID, offset: displayOffset),
                       let replacementID = displayID(for: replacement) else {
                     return await reportFullScreenFailure(
-                        "显示器变化后没有其他可用显示器",
+                        "屏幕变化后没有其他可用显示器",
                         identity: identity,
                         preferredElement: activeWindow,
                         sourceDisplayID: sourceDisplayID,
@@ -1563,7 +1563,7 @@ final class WindowEnhancementController {
             )
             if shouldRecoverWindowMutation(generation) {
                 return await reportFullScreenFailure(
-                    "窗口增强已关闭或应用正在退出，已回滚跨屏移动",
+                    "窗口增强关闭或应用退出，移屏已取消",
                     identity: identity, preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
                     originalWindowedFrame: originalWindowedFrame, generation: generation
@@ -1581,7 +1581,7 @@ final class WindowEnhancementController {
                     continue
                 }
                 return await reportFullScreenFailure(
-                    "窗口化跨屏位置未稳定：\(reason)",
+                    "移屏后窗口位置未稳定：\(reason)",
                     identity: identity, preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
                     originalWindowedFrame: originalWindowedFrame, generation: generation
@@ -1603,7 +1603,7 @@ final class WindowEnhancementController {
             guard isWindowMutationCurrent(generation) else { return .unresolved }
             if shouldRecoverWindowMutation(generation) {
                 return await reportFullScreenFailure(
-                    "窗口增强已关闭或应用正在退出，已回滚跨屏移动",
+                    "窗口增强关闭或应用退出，移屏已取消",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1638,7 +1638,7 @@ final class WindowEnhancementController {
                 )
                 if shouldRecoverWindowMutation(generation) {
                     return await reportFullScreenFailure(
-                        "窗口增强已关闭或应用正在退出，已回滚跨屏移动",
+                        "窗口增强关闭或应用退出，移屏已取消",
                         identity: identity,
                         preferredElement: activeWindow,
                         sourceDisplayID: sourceDisplayID,
@@ -1659,7 +1659,7 @@ final class WindowEnhancementController {
                         break
                     }
                     return await reportFullScreenFailure(
-                        "跨屏全屏结果未稳定：\(reason)",
+                        "移屏后全屏状态未稳定：\(reason)",
                         identity: identity,
                         preferredElement: activeWindow,
                         sourceDisplayID: sourceDisplayID,
@@ -1672,7 +1672,7 @@ final class WindowEnhancementController {
             guard !didRecomputeTarget,
                   screen(withDisplayID: activeTargetDisplayID) == nil else {
                 return await reportFullScreenFailure(
-                    "窗口重新进入全屏后未落在目标显示器",
+                    "重新全屏后窗口未在目标屏幕",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1690,7 +1690,7 @@ final class WindowEnhancementController {
             )
             if shouldRecoverWindowMutation(generation) {
                 return await reportFullScreenFailure(
-                    "窗口增强已关闭或应用正在退出，已回滚跨屏移动",
+                    "窗口增强关闭或应用退出，移屏已取消",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1700,7 +1700,7 @@ final class WindowEnhancementController {
             }
             guard case let .success(windowedAgain) = secondExit else {
                 return await reportFullScreenFailure(
-                    "显示器变化后无法退出全屏",
+                    "屏幕变化后无法退出全屏",
                     identity: identity, preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
                     originalWindowedFrame: originalWindowedFrame, generation: generation
@@ -1721,7 +1721,7 @@ final class WindowEnhancementController {
                   let replacement = adjacentScreen(from: currentDisplayID, offset: displayOffset),
                   let replacementID = displayID(for: replacement) else {
                 return await reportFullScreenFailure(
-                    "显示器变化后无法重新计算目标",
+                    "屏幕变化后无法确定目标",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1784,8 +1784,8 @@ final class WindowEnhancementController {
         switch result {
         case .ready: return .stable(preferred)
         case .interrupted, .recoveryRequested: return .interrupted
-        case .targetUnavailable: return .failed("目标显示器已断开")
-        case .timedOut: return .failed("窗口位置或全屏状态在等待期间未能稳定")
+        case .targetUnavailable: return .failed("目标屏幕已断开")
+        case .timedOut: return .failed("窗口位置或全屏状态未稳定")
         }
     }
 
@@ -1833,22 +1833,22 @@ final class WindowEnhancementController {
         guard isWindowMutationCurrent(generation) else { return .cancelled }
         guard let window = resolveExactWindow(identity, preferredElement: preferredElement),
               let currentState = axBoolAttribute("AXFullScreen", of: window) else {
-            return .failure("无法确认当前窗口的全屏状态")
+            return .failure("无法确认窗口全屏状态")
         }
 
         if currentState != desiredState {
             if isAttributeSettable("AXFullScreen", of: window) {
                 let value: CFBoolean = desiredState ? kCFBooleanTrue : kCFBooleanFalse
                 guard AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, value) == .success else {
-                    return .failure(desiredState ? "当前 App 拒绝进入全屏" : "当前 App 拒绝退出全屏")
+                    return .failure(desiredState ? "未能确认进入全屏" : "未能确认退出全屏")
                 }
             } else {
                 guard let button = axElementAttribute("AXFullScreenButton", of: window),
                       axBoolAttribute(kAXEnabledAttribute, of: button) != false,
                       AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else {
                     return .failure(desiredState
-                        ? "当前 App 没有可用的全屏控制"
-                        : "当前 App 不允许退出全屏")
+                        ? "暂无法操作全屏"
+                        : "暂无法退出全屏")
                 }
             }
         }
@@ -1871,8 +1871,8 @@ final class WindowEnhancementController {
             }
         }
         return .failure(desiredState
-            ? "进入全屏超时，未能确认最终状态"
-            : "退出全屏超时，窗口尚未恢复为可调整状态")
+            ? "进入全屏超时，状态未确认"
+            : "退出全屏超时，窗口暂无法调整")
     }
 
     /// A first AX readback is not a committed result: AppKit may still finish a
@@ -1904,7 +1904,7 @@ final class WindowEnhancementController {
                 return .interrupted
             }
             guard let expectedScreen = screen(withDisplayID: expectedDisplayID) else {
-                return .failed("目标显示器已断开")
+                return .failed("目标屏幕已断开")
             }
 
             guard let resolved = resolveExactWindow(identity, preferredElement: preferred),
@@ -1954,7 +1954,7 @@ final class WindowEnhancementController {
                 return .interrupted
             }
         }
-        return .failed("窗口状态未能连续稳定 4 秒")
+        return .failed("窗口状态未稳定，操作未完成")
     }
 
     private func waitForSettledFullScreenState(
@@ -2015,13 +2015,13 @@ final class WindowEnhancementController {
         guard isWindowMutationCurrent(generation) else { return .unresolved }
         switch restoreOutcome {
         case .restoredFullScreen:
-            feedback("\(reason)；已恢复原全屏状态")
+            feedback("\(reason)；已恢复原全屏")
             return .restored
         case .safeWindowed:
-            feedback("\(reason)；原显示器已不可用或无法恢复全屏，窗口已安全保留在可用显示器")
+            feedback("\(reason)；窗口已保留在可用屏幕，未恢复全屏")
             return .safeWindowed
         case .failed:
-            feedback("\(reason)；未能完全恢复原全屏状态")
+            feedback("\(reason)；未能完全恢复原全屏")
             return .unresolved
         }
     }
@@ -2857,7 +2857,7 @@ final class WindowEnhancementController {
     private func focusedWindowContext() -> FocusedWindowContext? {
         guard let application = NSWorkspace.shared.frontmostApplication,
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-            feedback("请先切换到要管理的窗口")
+            feedback("请先选择窗口")
             return nil
         }
         let appElement = AXUIElementCreateApplication(application.processIdentifier)
@@ -2865,12 +2865,12 @@ final class WindowEnhancementController {
         guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
               let windowValue,
               CFGetTypeID(windowValue) == AXUIElementGetTypeID() else {
-            feedback("当前 App 没有可管理窗口")
+            feedback("当前没有可操作窗口")
             return nil
         }
         let window = unsafeBitCast(windowValue, to: AXUIElement.self)
         guard let frame = frame(of: window) else {
-            feedback("无法读取当前窗口位置")
+            feedback("无法读取窗口位置")
             return nil
         }
         return FocusedWindowContext(application: application, window: window, frame: frame)
@@ -2879,7 +2879,7 @@ final class WindowEnhancementController {
     private func standardFocusedWindowContext() -> FocusedWindowContext? {
         guard let context = focusedWindowContext() else { return nil }
         guard context.application.activationPolicy == .regular else {
-            feedback("系统窗口不支持布局操作")
+            feedback("系统窗口不支持此操作")
             return nil
         }
 
@@ -2888,7 +2888,7 @@ final class WindowEnhancementController {
         guard role == kAXWindowRole as String,
               subrole == kAXStandardWindowSubrole as String,
               axBoolAttribute("AXModal", of: context.window) != true else {
-            feedback("当前窗口不是可管理的标准窗口")
+            feedback("此窗口暂不支持此操作")
             return nil
         }
         return context
@@ -2899,7 +2899,7 @@ final class WindowEnhancementController {
         requirement: WindowMutationRequirement
     ) -> FocusedWindowContext? {
         guard axBoolAttribute("AXFullScreen", of: context.window) != true else {
-            feedback("全屏状态正在变化，请稍后重试")
+            feedback("全屏状态正在变化，请稍候")
             return nil
         }
         let canMove = isAttributeSettable(kAXPositionAttribute, of: context.window)
@@ -2907,12 +2907,12 @@ final class WindowEnhancementController {
         switch requirement {
         case .moveOrResize:
             guard canMove || canResize else {
-                feedback("当前窗口不允许移动或缩放")
+                feedback("窗口暂不支持移动或缩放")
                 return nil
             }
         case .move:
             guard canMove else {
-                feedback("当前窗口不允许移动")
+                feedback("窗口暂不支持移动")
                 return nil
             }
         }

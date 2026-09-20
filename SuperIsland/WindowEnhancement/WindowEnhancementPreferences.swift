@@ -187,7 +187,7 @@ struct WindowEnhancementFeedbackEvent: Equatable, Identifiable {
 @MainActor
 final class WindowEnhancementPreferences: ObservableObject {
     static let shared = WindowEnhancementPreferences()
-    static let islandReadyMessage = "窗口中心 · 已就绪"
+    static let islandReadyMessage = "已就绪"
 
     private struct PendingShortcutChange {
         let previous: WindowShortcut?
@@ -350,7 +350,7 @@ final class WindowEnhancementPreferences: ObservableObject {
         }
         if let shortcut,
            let conflict = shortcuts.first(where: { $0.key != id && $0.value.keyCode == shortcut.keyCode && $0.value.modifiers == shortcut.modifiers }) {
-            publishFeedback("快捷键与 \(displayName(for: conflict.key)) 冲突")
+            publishFeedback("与“\(displayName(for: conflict.key))”冲突，请换一组快捷键")
             return false
         }
         if let shortcut,
@@ -358,12 +358,12 @@ final class WindowEnhancementPreferences: ObservableObject {
                guard $0.key != id, let previous = $0.value.previous else { return false }
                return sameChord(previous, shortcut)
            }) {
-            publishFeedback("\(displayName(for: reserved.key)) 的原快捷键正在更新，请稍后重试")
+            publishFeedback("“\(displayName(for: reserved.key))”快捷键正在更新，请稍后重试")
             return false
         }
 
         if let shortcut, !canTemporarilyRegister(shortcut) {
-            publishFeedback("快捷键已被系统或其他 App 占用，已保留原设置")
+            publishFeedback("快捷键不可用，原设置已保留")
             return false
         }
 
@@ -384,9 +384,9 @@ final class WindowEnhancementPreferences: ObservableObject {
         shortcuts[id] = shortcut
         persistShortcuts()
         if let shortcut, let warning = shortcutSafetyWarning(for: id) {
-            publishFeedback("已设置快捷键 \(shortcut.formattedDisplay)。注意：\(warning)")
+            publishFeedback("已设置 \(shortcut.formattedDisplay)。\(warning)")
         } else {
-            publishFeedback(shortcut == nil ? "已清除快捷键" : "已设置快捷键 \(shortcut?.formattedDisplay ?? "")")
+            publishFeedback(shortcut == nil ? "已清除快捷键" : "已设置 \(shortcut?.formattedDisplay ?? "")")
         }
         return true
     }
@@ -407,17 +407,17 @@ final class WindowEnhancementPreferences: ObservableObject {
         guard shortcut.modifiers == UInt32(cmdKey) else { return nil }
         switch Int(shortcut.keyCode) {
         case kVK_ANSI_D:
-            return "⌘D 常用于收藏、复制或其他 App 内操作，全局注册会优先截获它"
+            return "会覆盖应用内的 ⌘D 操作"
         case kVK_ANSI_W:
-            return "⌘W 是标准关闭窗口快捷键，全局注册会改变所有 App 的原生行为"
+            return "会接管应用原有的关闭窗口快捷键"
         case kVK_LeftArrow, kVK_RightArrow:
-            return "⌘←／⌘→ 常用于页面、历史和文本导航，全局注册会优先截获它"
+            return "会覆盖应用内的 ⌘←／⌘→ 操作"
         case kVK_ANSI_Q:
-            return "⌘Q 是标准退出 App 快捷键，全局注册会改变所有 App 的原生行为"
+            return "会接管应用原有的退出快捷键"
         case kVK_ANSI_H, kVK_ANSI_M:
-            return "这个组合是常用的 macOS 窗口快捷键，全局注册会改变所有 App 的原生行为"
+            return "会接管应用原有的隐藏或最小化快捷键"
         case kVK_Tab, kVK_Space:
-            return "这个组合通常由 macOS 管理，全局注册可能与系统切换或搜索冲突"
+            return "可能与系统快捷键冲突"
         default:
             return nil
         }
