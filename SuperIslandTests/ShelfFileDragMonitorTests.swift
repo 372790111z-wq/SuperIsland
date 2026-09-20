@@ -66,14 +66,14 @@ final class ShelfFileDragMonitorTests: XCTestCase {
     func testApproachUsesActualPanelFrameAndAllowsCoalescedCrossing() {
         let frame = CGRect(x: 616, y: 950, width: 280, height: 32)
         XCTAssertEqual(ShelfFileDragGeometry.approachBand(below: frame),
-                       CGRect(x: 616, y: 918, width: 280, height: 32))
+                       CGRect(x: 616, y: 854, width: 280, height: 96))
         XCTAssertTrue(ShelfFileDragGeometry.approaches(frame, from: nil, to: CGPoint(x: 700, y: 930)))
-        XCTAssertTrue(ShelfFileDragGeometry.approaches(frame, from: CGPoint(x: 700, y: 900),
+        XCTAssertTrue(ShelfFileDragGeometry.approaches(frame, from: CGPoint(x: 700, y: 830),
                                                       to: CGPoint(x: 700, y: 960)))
         XCTAssertFalse(ShelfFileDragGeometry.approaches(frame, from: CGPoint(x: 600, y: 900),
                                                        to: CGPoint(x: 600, y: 960)))
         XCTAssertFalse(ShelfFileDragGeometry.approaches(frame, from: CGPoint(x: 700, y: 800),
-                                                       to: CGPoint(x: 700, y: 900)))
+                                                       to: CGPoint(x: 700, y: 840)))
     }
 
     func testApproachOnOtherDisplayUsesItsOwnOrigin() {

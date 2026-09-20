@@ -44,7 +44,7 @@ struct ShelfFileDragState {
 
 enum ShelfFileDragGeometry {
     static func approachBand(below frame: CGRect) -> CGRect {
-        CGRect(x: frame.minX, y: frame.minY - 32, width: frame.width, height: 32)
+        CGRect(x: frame.minX, y: frame.minY - 96, width: frame.width, height: 96)
     }
 
     /// Include a segment crossing so a coalesced drag event cannot simply skip

@@ -1619,11 +1619,14 @@ final class AppState: ObservableObject {
         cancelFullExpandedDismiss()
         cancelHoverActivation()
 
-        previousModule = activeModule
-        activeModule = .builtIn(.shelf)
-        fullExpandedSelectedTab = .module(.builtIn(.shelf))
-
-        withAnimation(currentState == .compact ? notchAnimation : contentSwapAnimation) {
+        // A native file drag needs its destination ready before it reaches the
+        // system top-edge trigger; do not wait for a presentation animation.
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            previousModule = activeModule
+            activeModule = .builtIn(.shelf)
+            fullExpandedSelectedTab = .module(.builtIn(.shelf))
             currentState = .fullExpanded
         }
     }
