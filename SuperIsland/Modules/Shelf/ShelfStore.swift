@@ -336,6 +336,7 @@ final class ShelfStore: ObservableObject {
         providers: [NSItemProvider],
         completion: (@MainActor (_ addedCount: Int) -> Void)? = nil
     ) -> Bool {
+        ShelfDropDiagnostics.record("receive", destination: "tray", values: ["providers": Int64(providers.count)])
         guard !providers.isEmpty else { return false }
 
         Task {
@@ -344,6 +345,9 @@ final class ShelfStore: ObservableObject {
                 add(droppedItems)
             }
             await MainActor.run {
+                ShelfDropDiagnostics.record("receive.complete", destination: "tray", values: [
+                    "extracted": Int64(droppedItems.count), "added": Int64(addedCount)
+                ])
                 NSLog("[ShelfDrop] receive=tray providers=%ld extracted=%ld added=%ld",
                       providers.count, droppedItems.count, addedCount)
                 completion?(addedCount)
@@ -492,11 +496,14 @@ final class ShelfStore: ObservableObject {
     }
 
     func handleAirDropDrop(providers: [NSItemProvider]) -> Bool {
+        ShelfDropDiagnostics.record("receive", destination: "airDrop", values: ["providers": Int64(providers.count)])
         guard !providers.isEmpty else { return false }
 
         Task {
             let droppedItems = await Self.extractItems(from: providers)
             await MainActor.run {
+                ShelfDropDiagnostics.record("receive.complete", destination: "airDrop",
+                                            values: ["extracted": Int64(droppedItems.count)])
                 NSLog("[ShelfDrop] receive=airDrop providers=%ld extracted=%ld",
                       providers.count, droppedItems.count)
                 shareViaAirDrop(items: droppedItems)
@@ -519,6 +526,9 @@ final class ShelfStore: ObservableObject {
 
     func shareViaAirDrop(items: [ShelfItem]) {
         let rawItems = items.compactMap(airDropPayload(for:))
+        ShelfDropDiagnostics.record("share.payload", destination: "airDrop", values: [
+            "items": Int64(items.count), "payloads": Int64(rawItems.count)
+        ])
         shareViaAirDrop(rawItems: rawItems)
         items.forEach(touch)
     }
@@ -615,15 +625,20 @@ final class ShelfStore: ObservableObject {
         guard !rawItems.isEmpty,
               let service = NSSharingService(named: .sendViaAirDrop),
               service.canPerform(withItems: rawItems) else {
+            ShelfDropDiagnostics.record("share.unavailable", destination: "airDrop",
+                                        values: ["payloads": Int64(rawItems.count)])
             NSSound.beep()
             return
         }
 
         activeAirDropService = service
+        ShelfDropDiagnostics.record("share.perform", destination: "airDrop",
+                                    values: ["payloads": Int64(rawItems.count)])
         service.perform(withItems: rawItems)
     }
 
     static func extractItems(from providers: [NSItemProvider]) async -> [ShelfItem] {
+        ShelfDropDiagnostics.record("extract.begin", values: ["providers": Int64(providers.count)])
         var extracted: [ShelfItem] = []
 
         for provider in providers {
@@ -632,6 +647,7 @@ final class ShelfStore: ObservableObject {
             }
         }
 
+        ShelfDropDiagnostics.record("extract.complete", values: ["count": Int64(extracted.count)])
         return extracted
     }
 
@@ -837,8 +853,16 @@ final class ShelfStore: ObservableObject {
     }
 
     private static func loadItem(from provider: NSItemProvider, typeIdentifier: String) async -> NSSecureCoding? {
-        await withCheckedContinuation { continuation in
+        let typeCode = typeIdentifier == UTType.fileURL.identifier ? "fileURL"
+            : typeIdentifier == UTType.url.identifier ? "url" : "text"
+        ShelfDropDiagnostics.record("load.begin", code: typeCode)
+        return await withCheckedContinuation { continuation in
             provider.loadItem(forTypeIdentifier: typeIdentifier, options: nil) { item, error in
+                let kind = item is URL || item is NSURL ? 1 : item is Data ? 2
+                    : item is String || item is NSString ? 3 : item == nil ? 0 : 4
+                ShelfDropDiagnostics.record("load.complete", values: [
+                    "kind": Int64(kind), "error": Int64((error as NSError?)?.code ?? 0)
+                ], code: typeCode)
                 guard error == nil else {
                     continuation.resume(returning: nil)
                     return

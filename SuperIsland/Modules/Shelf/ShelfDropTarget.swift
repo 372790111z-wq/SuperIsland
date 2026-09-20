@@ -55,7 +55,12 @@ private struct ShelfDropTargetModifier: ViewModifier {
                 isTargeted: $isTargeted, enabled: enabled,
                 inputGeneration: appState.islandInputGeneration, perform: perform
             ))
+            .onAppear {
+                ShelfDropDiagnostics.record("target.appear", destination: destination.rawValue,
+                                            values: ["enabled": enabled ? 1 : 0])
+            }
             .onDisappear {
+                ShelfDropDiagnostics.record("target.disappear", destination: destination.rawValue)
                 appState.setShelfDropTarget(targetID, inside: false)
             }
             .onChange(of: enabled) { _, enabled in
@@ -82,38 +87,57 @@ private struct ShelfDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        canReceive && info.hasItemsConforming(to: ShelfStore.acceptedDropTypes)
+        let permitted = canReceive
+        let accepted = permitted && info.hasItemsConforming(to: ShelfStore.acceptedDropTypes)
+        ShelfDropDiagnostics.record("validate", destination: destination.rawValue, values: [
+            "permitted": permitted ? 1 : 0, "accepted": accepted ? 1 : 0,
+            "enabled": enabled ? 1 : 0, "shelf": appState.shelfEnabled ? 1 : 0,
+            "generation": Int64(clamping: inputGeneration),
+            "currentGeneration": Int64(clamping: appState.islandInputGeneration)
+        ])
+        return accepted
     }
 
     func dropEntered(info: DropInfo) {
         guard validateDrop(info: info) else { return }
         isTargeted = true
         appState.setShelfDropTarget(targetID, inside: true)
+        ShelfDropDiagnostics.record("entered", destination: destination.rawValue)
         NSLog("[ShelfDrop] target=%@ enter", destination.rawValue)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         // Staging and sharing leave the Finder source in place.
-        DropProposal(operation: canReceive ? .copy : .cancel)
+        let permitted = canReceive
+        ShelfDropDiagnostics.record("updated", destination: destination.rawValue,
+                                    values: ["copy": permitted ? 1 : 0])
+        return DropProposal(operation: permitted ? .copy : .cancel)
     }
 
     func dropExited(info: DropInfo) {
         isTargeted = false
         appState.setShelfDropTarget(targetID, inside: false)
+        ShelfDropDiagnostics.record("exited", destination: destination.rawValue)
         NSLog("[ShelfDrop] target=%@ exit", destination.rawValue)
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        ShelfDropDiagnostics.record("perform.begin", destination: destination.rawValue)
         guard validateDrop(info: info) else {
             isTargeted = false
             appState.setShelfDropTarget(targetID, inside: false)
+            ShelfDropDiagnostics.record("perform.rejected", destination: destination.rawValue)
             NSLog("[ShelfDrop] target=%@ rejected", destination.rawValue)
             return false
         }
         let providers = info.itemProviders(for: ShelfStore.acceptedDropTypes)
+        ShelfDropDiagnostics.record("perform.providers", destination: destination.rawValue,
+                                    values: ["count": Int64(providers.count)])
         let accepted = perform(providers)
         isTargeted = false
         appState.completeShelfDropTargets()
+        ShelfDropDiagnostics.record("perform.return", destination: destination.rawValue,
+                                    values: ["accepted": accepted ? 1 : 0])
         NSLog("[ShelfDrop] target=%@ drop providers=%ld accepted=%d",
               destination.rawValue, providers.count, accepted)
         return accepted

@@ -167,6 +167,7 @@ struct IslandContainerView: View {
             LongPressGesture(minimumDuration: 0.5)
                 .onEnded { _ in
                     guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
+                    ShelfDropDiagnostics.record("gesture.longpress", values: ["shelfActive": appState.isShelfDragActive ? 1 : 0])
                     AppDelegate.showSettingsWindow(
                         initialPane: contentMode == .windowEnhancementShell
                             ? .windowEnhancement
