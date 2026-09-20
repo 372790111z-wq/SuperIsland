@@ -2119,16 +2119,16 @@ final class MissionControlInteractionMonitor {
 
     func closeTargetedWindow() -> TargetedActionResult {
         guard preferences.isActionEnabled(.closeWindow) else {
-            return .failed("调度中心关闭窗口已关闭")
+            return .failed("关闭窗口功能已关闭")
         }
         let actionTarget: ActionTarget
         switch resolveTarget(for: .closeWindow) {
         case .absent:
             return missionControlRootIsCurrentlyPresent()
-                ? .failed("请先将鼠标移入要关闭的 Mission Control 窗口")
+                ? .failed("请先移入要关闭的窗口")
                 : .noTarget
         case .stale:
-            return .failed("Mission Control 目标已变化，请重新选择")
+            return .failed("窗口状态已变化，请重新选择")
         case let .valid(resolvedTarget):
             actionTarget = resolvedTarget
         }
@@ -2141,7 +2141,7 @@ final class MissionControlInteractionMonitor {
         guard revalidatedTarget(actionTarget) != nil,
               let dockPID = resolvedDockPID() else {
             clearTarget(clearPendingKeyboardTarget: true)
-            return .failed("Mission Control 目标已变化，请重新选择")
+            return .failed("窗口状态已变化，请重新选择")
         }
         closeValidationGeneration &+= 1
         let generation = closeValidationGeneration
@@ -2169,7 +2169,7 @@ final class MissionControlInteractionMonitor {
                 )
             }
         }
-        return .completed("正在验证 Mission Control 目标")
+        return .completed("正在确认窗口…")
     }
 
     private func handleInterceptedCloseClick() {
@@ -2199,7 +2199,7 @@ final class MissionControlInteractionMonitor {
                 "Mission Control close rejected windowID=\(expected.windowNumber, privacy: .public) resolution=\(resolution.diagnosticCode, privacy: .public) elapsedMs=\(Double(elapsedNanoseconds) / 1_000_000, privacy: .public)"
             )
             clearTarget(clearPendingKeyboardTarget: true)
-            preferences.publishFeedback("Mission Control 目标已变化，未执行关闭")
+            preferences.publishFeedback("窗口状态已变化，未执行关闭")
             return
         }
         guard let closeButton = elementAttribute(
@@ -2210,7 +2210,7 @@ final class MissionControlInteractionMonitor {
                 "Mission Control close unavailable windowID=\(expected.windowNumber, privacy: .public)"
             )
             clearTarget(clearPendingKeyboardTarget: true)
-            preferences.publishFeedback("当前 Mission Control 窗口没有可用的关闭按钮")
+            preferences.publishFeedback("窗口暂无法关闭")
             return
         }
         let result = AXUIElementPerformAction(
@@ -2221,7 +2221,7 @@ final class MissionControlInteractionMonitor {
             logger.error(
                 "Mission Control close AXPress failed windowID=\(expected.windowNumber, privacy: .public) error=\(result.rawValue, privacy: .public)"
             )
-            preferences.publishFeedback("关闭 Mission Control 中的窗口失败")
+            preferences.publishFeedback("关闭结果未确认，请检查窗口状态")
             return
         }
         logger.notice(
@@ -2229,31 +2229,31 @@ final class MissionControlInteractionMonitor {
         )
         clearTarget(clearPendingKeyboardTarget: true)
         schedulePostActionInspection()
-        preferences.publishFeedback("已关闭 Mission Control 中的窗口")
+        preferences.publishFeedback("已请求关闭")
     }
 
     func quitTargetedApplication() -> TargetedActionResult {
         guard preferences.isActionEnabled(.quitApp) else {
-            return .failed("调度中心退出程序已关闭")
+            return .failed("退出应用功能已关闭")
         }
         let actionTarget: ActionTarget
         switch resolveTarget(for: .quitApplication) {
         case .absent:
             return missionControlRootIsCurrentlyPresent()
-                ? .failed("请先将鼠标移入要管理的 Mission Control 窗口")
+                ? .failed("请先移入要管理的窗口")
                 : .noTarget
         case .stale:
-            return .failed("Mission Control 目标已变化，请重新选择")
+            return .failed("窗口状态已变化，请重新选择")
         case let .valid(resolvedTarget):
             actionTarget = resolvedTarget
         }
         guard let target = revalidatedTarget(actionTarget) else {
             clearTarget(clearPendingKeyboardTarget: true)
-            return .failed("Mission Control 目标已变化，请重新选择")
+            return .failed("窗口状态已变化，请重新选择")
         }
         let alert = NSAlert()
-        alert.messageText = "退出 \(target.applicationName)？"
-        alert.informativeText = "这会退出当前 Mission Control 缩略图所属的整个 App。未保存内容是否可恢复由 \(target.applicationName) 决定。"
+        alert.messageText = "退出“\(target.applicationName)”？"
+        alert.informativeText = "将退出“\(target.applicationName)”，请先确认未保存内容。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "退出")
         alert.addButton(withTitle: "取消")
@@ -2264,7 +2264,7 @@ final class MissionControlInteractionMonitor {
         }
         guard isApplicationIdentityCurrent(target) else {
             clearTarget(clearPendingKeyboardTarget: true)
-            return .failed("Mission Control 目标 App 已变化，未执行退出")
+            return .failed("应用状态已变化，未执行退出")
         }
         guard target.application.terminate() else {
             return .failed("无法退出 \(target.applicationName)")
@@ -2323,7 +2323,7 @@ final class MissionControlInteractionMonitor {
             logger.info("Mission Control mouse event tap installed")
         } else {
             logger.error("Mission Control mouse event tap installation failed")
-            preferences.publishFeedback("调度中心 Pro 无法监听鼠标，请检查辅助功能权限")
+            preferences.publishFeedback("调度中心未启动，请检查辅助功能权限")
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.mouseMoved, .leftMouseDragged, .keyDown]
@@ -2673,7 +2673,7 @@ final class MissionControlInteractionMonitor {
             logger.error(
                 "Mission Control AX resolver paused after repeated slow queries; lastMs=\(Double(elapsedNanoseconds) / 1_000_000, privacy: .public)"
             )
-            preferences.publishFeedback("调度中心 Pro 已因系统响应缓慢暂停 60 秒")
+            preferences.publishFeedback("预览响应较慢，调度中心已暂停 60 秒")
             return
         }
 
@@ -2775,7 +2775,7 @@ final class MissionControlInteractionMonitor {
                 )
                 switch self.requestValidatedClose(actionTarget) {
                 case .noTarget:
-                    self.preferences.publishFeedback("Mission Control 目标已变化，请重新选择")
+                    self.preferences.publishFeedback("窗口状态已变化，请重新选择")
                 case let .completed(message), let .failed(message):
                     self.preferences.publishFeedback(message)
                 }

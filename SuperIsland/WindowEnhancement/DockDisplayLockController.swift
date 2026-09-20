@@ -262,11 +262,11 @@ final class DockDisplayLockController {
         var message: String {
             switch self {
             case .multipleDisplays:
-                return "至少需要连接两台显示器"
+                return "请连接第二台显示器"
             case .accessibility:
-                return "请在系统设置中允许 SuperIsland 使用辅助功能"
+                return "请在系统设置中开启本应用的辅助功能权限"
             case .separateSpaces:
-                return "请在桌面与程序坞设置中开启“显示器具有单独的空间”"
+                return "请开启“显示器具有单独的空间”"
             case .autoHideDisabled:
                 return "请关闭 Dock 自动隐藏"
             case .dockAtBottom:
@@ -392,9 +392,9 @@ final class DockDisplayLockController {
             // An action that was switched off while the App was not running
             // must not silently restore an earlier lock request at launch.
             deactivate(clearTarget: false, report: false)
-            publishStatus(.disabled, message: "开启此能力后再选择固定目标")
+            publishStatus(.disabled, message: "请先开启 Dock 固定")
         } else if requested {
-            publishStatus(.paused, message: "正在确认上次已验证的固定目标")
+            publishStatus(.paused, message: "正在确认 Dock 位置…")
             scheduleReadback(after: 0.6, reason: "启动确认")
         } else {
             publishStatus(.idle, message: "点击“固定到鼠标所在显示器”选择目标")
@@ -428,7 +428,7 @@ final class DockDisplayLockController {
         } else {
             deactivate(clearTarget: false, report: requested)
             refreshActualDisplay()
-            publishStatus(.disabled, message: "固定请求已解除")
+            publishStatus(.disabled, message: "Dock 固定已关闭")
         }
     }
 
@@ -437,12 +437,12 @@ final class DockDisplayLockController {
     /// target; it never toggles or locks the macOS login session.
     func moveAndLockToPointerDisplay() {
         guard featureEnabled else {
-            publishStatus(.disabled, message: "请先开启 Dock 固定能力")
-            feedback("Dock 固定到显示器已关闭")
+            publishStatus(.disabled, message: "请先开启 Dock 固定")
+            feedback("Dock 固定已关闭")
             return
         }
         guard relocationTask == nil, pointerTransaction == nil else {
-            feedback("Dock 固定操作正在进行，请完成后再试")
+            feedback("正在固定…")
             return
         }
         let unmet = unmetPrerequisites()
@@ -461,7 +461,7 @@ final class DockDisplayLockController {
         // synthetic edge point as a new target.
         guard let originalPoint = currentPointerLocation(),
               let target = displayTarget(containing: originalPoint) else {
-            let reason = "无法确定鼠标所在显示器，Dock 未移动"
+            let reason = "无法确定目标屏幕，Dock 未移动"
             lastFailureReason = reason
             publishStatus(.failed, message: reason)
             feedback(reason)
@@ -470,7 +470,7 @@ final class DockDisplayLockController {
 
         lastReportedCondition = nil
         refreshActualDisplay()
-        publishStatus(.moving, target: target, message: "正在验证 Dock 位置")
+        publishStatus(.moving, target: target, message: "正在确认 Dock 位置…")
         beginRelocation(
             to: target,
             originalPoint: originalPoint,
@@ -492,7 +492,7 @@ final class DockDisplayLockController {
         }
         lastReportedCondition = nil
         if report, wasRequested {
-            feedback("Dock 显示器固定已关闭，已恢复 macOS 原生行为")
+            feedback("Dock 固定已关闭")
         }
     }
 
@@ -532,7 +532,7 @@ final class DockDisplayLockController {
                 self.invalidatePendingWork()
                 self.refreshActualDisplay()
                 if self.requested {
-                    self.publishStatus(.paused, message: "显示器配置已变化，正在重新确认目标")
+                    self.publishStatus(.paused, message: "正在确认 Dock 位置…")
                 }
                 self.scheduleReadback(after: 0.8, reason: "显示器配置变化")
             }
@@ -565,7 +565,7 @@ final class DockDisplayLockController {
                 self.updateGuardTimerState()
                 self.refreshActualDisplay()
                 if self.requested {
-                    self.publishStatus(.paused, message: "睡眠唤醒后正在重新确认目标")
+                    self.publishStatus(.paused, message: "正在确认 Dock 位置…")
                 }
                 self.scheduleReadback(after: 1.2, reason: "睡眠唤醒")
             }
@@ -589,7 +589,7 @@ final class DockDisplayLockController {
                     self.invalidatePendingWork()
                     self.refreshActualDisplay()
                     if self.requested {
-                        self.publishStatus(.paused, message: "Dock 已重新启动，正在重新确认目标")
+                        self.publishStatus(.paused, message: "正在确认 Dock 位置…")
                     }
                     self.scheduleReadback(after: 0.8, reason: "Dock 重新启动")
                 }
@@ -631,7 +631,7 @@ final class DockDisplayLockController {
         guard started, featureEnabled, requested, !suspendedForSleep,
               targetUUID == target.uuid else {
             deactivateEdgeProtection(resetVerification: true)
-            return .unavailable("Dock 持续固定条件已失效")
+            return .unavailable("Dock 固定条件已变化")
         }
 
         if isEdgeProtectionActive(for: target.uuid) {
@@ -655,7 +655,7 @@ final class DockDisplayLockController {
         }
         if let retryAfter = edgeProtectionInstallRetryAfter,
            retryAfter > Date() {
-            return .unavailable("Dock 已在目标显示器，但持续底边保护正在等待安全重试")
+            return .unavailable("Dock 已到目标屏幕，正在等待固定重试")
         }
         if let failure = installEdgeProtectionEventTap(for: target) {
             return .unavailable(failure)
@@ -670,10 +670,10 @@ final class DockDisplayLockController {
         guard started, featureEnabled, requested, !suspendedForSleep,
               targetUUID == target.uuid,
               displayTarget(uuid: target.uuid) != nil else {
-            return "Dock 持续固定条件已失效"
+            return "Dock 固定条件已变化"
         }
         guard AXIsProcessTrusted() else {
-            return "持续底边保护未启用：辅助功能权限未生效"
+            return "Dock 固定未生效，请开启辅助功能权限"
         }
         if isEdgeProtectionActive(for: target.uuid) { return nil }
 
@@ -689,7 +689,7 @@ final class DockDisplayLockController {
         }
         guard displays.count >= 2,
               displays.contains(where: { $0.uuid == target.uuid }) else {
-            return "持续底边保护未启用：目标显示器已断开"
+            return "Dock 固定未生效，请检查显示器连接"
         }
 
         let mask = CGEventMask(1) << CGEventType.mouseMoved.rawValue
@@ -704,7 +704,7 @@ final class DockDisplayLockController {
             edgeProtectionInstallRetryAfter = Date().addingTimeInterval(
                 Self.edgeProtectionInstallRetryInterval
             )
-            return "Dock 已在目标显示器，但持续底边保护无法启动；请确认辅助功能权限"
+            return "Dock 已到目标屏幕，固定未生效，请检查辅助功能权限"
         }
         guard let runLoopSource = CFMachPortCreateRunLoopSource(
             kCFAllocatorDefault,
@@ -715,7 +715,7 @@ final class DockDisplayLockController {
             edgeProtectionInstallRetryAfter = Date().addingTimeInterval(
                 Self.edgeProtectionInstallRetryInterval
             )
-            return "Dock 已在目标显示器，但持续底边保护初始化失败"
+            return "Dock 已到目标屏幕，固定未生效"
         }
 
         let snapshot = DockEdgeProtectionSnapshot(
@@ -733,7 +733,7 @@ final class DockDisplayLockController {
             edgeProtectionInstallRetryAfter = Date().addingTimeInterval(
                 Self.edgeProtectionInstallRetryInterval
             )
-            return "Dock 已在目标显示器，但持续底边保护未能启用"
+            return "Dock 已到目标屏幕，固定未生效"
         }
         edgeProtectionInstallRetryAfter = nil
         return nil
@@ -782,7 +782,7 @@ final class DockDisplayLockController {
         switch recovery {
         case .disabledByUserInput:
             deactivateEdgeProtection(resetVerification: true)
-            let reason = "Dock 持续固定已暂停：系统停用了鼠标事件保护，请确认辅助功能权限"
+            let reason = "Dock 固定已暂停，请检查辅助功能权限"
             lastFailureReason = reason
             let target = targetUUID.flatMap(displayTarget(uuid:))
             publishStatus(.paused, target: target, message: reason)
@@ -800,7 +800,7 @@ final class DockDisplayLockController {
                   unmetPrerequisites().isEmpty,
                   case .onDisplay(target.uuid) = dockReadback() else {
                 deactivateEdgeProtection(resetVerification: true)
-                let reason = "Dock 持续固定已暂停：事件保护超时后无法安全确认目标"
+                let reason = "Dock 固定已暂停，无法确认目标"
                 lastFailureReason = reason
                 publishStatus(.paused, message: reason)
                 reportConditionOnce("edge-protection-timeout-unverified", reason)
@@ -826,7 +826,7 @@ final class DockDisplayLockController {
         guard let targetUUID,
               let target = displayTarget(uuid: targetUUID) else {
             deactivateEdgeProtection(resetVerification: true)
-            let reason = "Dock 固定目标显示器已断开；重新连接后会重新确认，如有偏离需手动固定"
+            let reason = "目标屏幕已断开，Dock 固定已暂停"
             lastFailureReason = reason
             publishStatus(.paused, message: reason)
             reportConditionOnce("target-unavailable", reason)
@@ -851,7 +851,7 @@ final class DockDisplayLockController {
                 publishStatus(
                     .paused,
                     target: target,
-                    message: "Dock 已在目标显示器，正在进行持续固定复核"
+                    message: "正在确认固定状态…"
                 )
             case .active:
                 lastReportedCondition = nil
@@ -865,7 +865,7 @@ final class DockDisplayLockController {
         case let .onDisplay(actualUUID):
             deactivateEdgeProtection(resetVerification: true)
             let actualName = displayTarget(uuid: actualUUID)?.name ?? "其他显示器"
-            let reason = "Dock 当前在“\(actualName)”；请把鼠标移到目标显示器并点击“固定到鼠标所在显示器”"
+            let reason = "Dock 位于“\(actualName)”，请将鼠标移到目标屏幕后重新固定"
             lastFailureReason = reason
             publishStatus(.paused, target: target, message: reason)
             reportConditionOnce("dock-drift-\(actualUUID)", reason)
@@ -896,7 +896,7 @@ final class DockDisplayLockController {
             guard let uuid = self.targetUUID,
                   let target = self.displayTarget(uuid: uuid) else {
                 self.deactivateEdgeProtection(resetVerification: true)
-                let reason = "Dock 固定目标显示器已断开；重新连接后会重新确认，如有偏离需手动固定"
+                let reason = "目标屏幕已断开，Dock 固定已暂停"
                 self.lastFailureReason = reason
                 self.publishStatus(.paused, message: reason)
                 self.reportConditionOnce("target-unavailable", reason)
@@ -921,7 +921,7 @@ final class DockDisplayLockController {
                     self.publishStatus(
                         .paused,
                         target: target,
-                        message: "Dock 已在目标显示器，正在进行持续固定复核"
+                        message: "正在确认固定状态…"
                     )
                 case .active:
                     self.lastReportedCondition = nil
@@ -936,7 +936,7 @@ final class DockDisplayLockController {
             case let .onDisplay(actualUUID):
                 self.deactivateEdgeProtection(resetVerification: true)
                 let actualName = self.displayTarget(uuid: actualUUID)?.name ?? "其他显示器"
-                let message = "\(reason)后检测到 Dock 位于“\(actualName)”；请把鼠标移到目标显示器并点击“固定到鼠标所在显示器”"
+                let message = "Dock 位于“\(actualName)”，请将鼠标移到目标屏幕后重新固定"
                 self.lastFailureReason = message
                 self.publishStatus(.paused, target: target, message: message)
                 self.reportConditionOnce("dock-drift-\(actualUUID)", message)
@@ -998,7 +998,7 @@ final class DockDisplayLockController {
                 case .active:
                     self.publishStatus(.locked, target: target, message: nil)
                     if reportSuccess {
-                        self.feedback("Dock 已移动并固定到“\(target.name)”")
+                        self.feedback("Dock 已固定到“\(target.name)”")
                     }
                 case .awaitingSecondReadback:
                     // relocateAndVerify already performed two post-restore
@@ -1006,14 +1006,14 @@ final class DockDisplayLockController {
                     self.publishStatus(
                         .paused,
                         target: target,
-                        message: "Dock 已移动，正在确认持续固定"
+                        message: "正在确认固定状态…"
                     )
                 case let .unavailable(failure):
                     self.lastFailureReason = failure
                     self.publishStatus(.paused, target: target, message: failure)
                     self.reportConditionOnce("edge-protection-install", failure)
                     if reportSuccess {
-                        self.feedback("Dock 已移动到“\(target.name)”，但\(failure)")
+                        self.feedback("Dock 已到“\(target.name)”，固定未生效")
                     }
                 }
             } else {
@@ -1025,23 +1025,23 @@ final class DockDisplayLockController {
                    failedSelection.previousRequested,
                    let previousTargetUUID = failedSelection.previousTargetUUID {
                     let previousTarget = self.displayTarget(uuid: previousTargetUUID)
-                    let failure = self.lastFailureReason ?? "新目标未通过位置回读"
-                    let reason = "\(failure)；已保留此前固定目标"
+                    let failure = self.lastFailureReason ?? "新位置未确认"
+                    let reason = "\(failure)；已保留原目标设置"
                     self.lastFailureReason = reason
                     self.publishStatus(.paused, target: previousTarget, message: reason)
                     self.reportConditionOnce(
                         "target-switch-failed-\(target.uuid)",
-                        "Dock 未通过新目标位置回读验证，已保留此前固定目标；请将鼠标移到该显示器后手动恢复"
+                        "新位置未确认，已保留原目标设置；请将鼠标移到原屏幕后重新固定"
                     )
                 } else {
-                    let failureReason = self.lastFailureReason ?? "Dock 未通过位置回读验证（\(reason)）"
+                    let failureReason = self.lastFailureReason ?? "无法确认 Dock 位置，固定未完成"
                     self.lastFailureReason = failureReason
                     if targetSelection {
                         self.publishStatus(.failed, target: target, message: failureReason)
                     }
                     self.reportConditionOnce(
                         "relocate-failed-\(target.uuid)",
-                        "Dock 未通过位置回读验证，未报告为固定成功（\(reason)）"
+                        "无法确认 Dock 位置，固定未完成"
                     )
                 }
             }
@@ -1066,12 +1066,12 @@ final class DockDisplayLockController {
     ) async -> Bool {
         guard isCurrent(generation, allowsUncommittedTarget: allowsUncommittedTarget),
               displayTarget(uuid: target.uuid) != nil else {
-            return failRelocation("固定操作已取消或目标显示器已断开")
+            return failRelocation("固定已取消或目标屏幕已断开")
         }
         if case .onDisplay(target.uuid) = dockReadback() { return true }
         guard let pointerBeforeFirstSyntheticMove = currentPointerLocation(),
               distance(pointerBeforeFirstSyntheticMove, originalPoint) <= 16 else {
-            return failRelocation("目标确认期间鼠标已移动，未执行 Dock 固定")
+            return failRelocation("鼠标位置已变化或无法确认，未执行固定")
         }
 
         pointerTransaction = PointerTransaction(
@@ -1089,11 +1089,11 @@ final class DockDisplayLockController {
         let edgeOffsets: [CGFloat] = [24, 18, 13, 9, 6, 3, 1]
         for offset in edgeOffsets {
             guard isCurrent(generation, allowsUncommittedTarget: allowsUncommittedTarget) else {
-                return failRelocation("固定操作已取消")
+                return failRelocation("固定已取消")
             }
             let point = CGPoint(x: edgeX, y: target.bounds.maxY - offset)
             guard postSyntheticPointerMove(to: point, generation: generation) else {
-                return failRelocation("无法将鼠标安全移动到目标显示器底边")
+                return failRelocation("无法移动鼠标到屏幕底部，固定已中止")
             }
             try? await Task.sleep(nanoseconds: Self.edgeDriveIntervalNanoseconds)
             guard let transaction = pointerTransaction,
@@ -1103,7 +1103,7 @@ final class DockDisplayLockController {
                   distance(current, syntheticPoint) <= 16 else {
                 // The user moved during the operation. Abort instead of taking
                 // the cursor back or competing with their Dock choice.
-                return failRelocation("检测到用户正在移动鼠标，已中止 Dock 固定")
+                return failRelocation("鼠标位置已变化或无法确认，已取消固定")
             }
         }
         // Hold at the activation edge without emitting duplicate zero-delta
@@ -1114,7 +1114,7 @@ final class DockDisplayLockController {
               let heldPoint = heldTransaction.lastSyntheticPoint,
               let pointerAfterHold = currentPointerLocation(),
               distance(pointerAfterHold, heldPoint) <= 16 else {
-            return failRelocation("检测到用户正在移动鼠标，已中止 Dock 固定")
+            return failRelocation("鼠标位置已变化或无法确认，已取消固定")
         }
 
         var verified = false
@@ -1125,7 +1125,7 @@ final class DockDisplayLockController {
                   let syntheticPoint = transaction.lastSyntheticPoint,
                   let current = currentPointerLocation(),
                   distance(current, syntheticPoint) <= 16 else {
-                return failRelocation("检测到用户正在移动鼠标，已中止 Dock 固定")
+                return failRelocation("鼠标位置已变化或无法确认，已取消固定")
             }
             if case .onDisplay(target.uuid) = dockReadback() {
                 verified = true
@@ -1135,13 +1135,13 @@ final class DockDisplayLockController {
         }
 
         guard verified else {
-            return failRelocation("Dock 未出现在目标显示器，位置回读未通过")
+            return failRelocation("无法确认 Dock 位置，固定未完成")
         }
         guard finishPointerTransaction(generation: generation) else {
-            return failRelocation("Dock 已移动，但鼠标位置未能安全恢复")
+            return failRelocation("Dock 已移动，鼠标未能恢复原位")
         }
         guard isCurrent(generation, allowsUncommittedTarget: allowsUncommittedTarget) else {
-            return failRelocation("固定操作已取消")
+            return failRelocation("固定已取消")
         }
         // Two consecutive readbacks after pointer restoration prevent a
         // transient intermediate Dock frame from being accepted as success.
@@ -1149,7 +1149,7 @@ final class DockDisplayLockController {
             try? await Task.sleep(nanoseconds: Self.verificationIntervalNanoseconds)
             guard isCurrent(generation, allowsUncommittedTarget: allowsUncommittedTarget),
                   case .onDisplay(target.uuid) = dockReadback() else {
-                return failRelocation("恢复鼠标后 Dock 位置回读不稳定，未确认固定成功")
+                return failRelocation("Dock 位置未确认，固定未完成")
             }
         }
         return true
@@ -1210,7 +1210,7 @@ final class DockDisplayLockController {
             distanceToRect(transaction.originalPoint, $0.bounds) <
                 distanceToRect(transaction.originalPoint, $1.bounds)
         }) else {
-            feedback("Dock 迁移已结束，但当前没有可用显示器可恢复鼠标位置")
+            feedback("Dock 移动已结束，无可用显示器，鼠标未能恢复原位")
             return false
         }
 
@@ -1231,7 +1231,7 @@ final class DockDisplayLockController {
         guard postPointerMove(to: safePoint),
               let restoredPoint = currentPointerLocation(),
               distance(restoredPoint, safePoint) <= 16 else {
-            feedback("Dock 迁移已结束，但鼠标位置未能安全恢复")
+            feedback("Dock 移动已结束，鼠标未能恢复原位")
             return false
         }
         return true
@@ -1382,13 +1382,13 @@ final class DockDisplayLockController {
     private func dockReadback() -> DockReadback {
         guard AXIsProcessTrusted() else {
             lastReadbackWasAvailable = false
-            return .unavailable("暂时无法验证 Dock：辅助功能权限未生效")
+            return .unavailable("无法定位 Dock，请开启辅助功能权限")
         }
         guard let dock = NSRunningApplication.runningApplications(
             withBundleIdentifier: Self.dockBundleIdentifier
         ).first else {
             lastReadbackWasAvailable = false
-            return .unavailable("暂时无法验证 Dock：Dock 进程正在重新启动")
+            return .unavailable("暂未检测到 Dock，请稍候")
         }
         let application = AXUIElementCreateApplication(dock.processIdentifier)
         var candidates: [DockFrameCandidate] = []
@@ -1413,7 +1413,7 @@ final class DockDisplayLockController {
         guard let candidate = pool.sorted(by: candidateSortsBefore).first,
               let target = displayTarget(forDockFrame: candidate.frame) else {
             lastReadbackWasAvailable = false
-            return .unavailable("暂时无法验证 Dock 所在显示器，固定已暂停而不是假定成功")
+            return .unavailable("暂时无法定位 Dock，固定已暂停")
         }
         lastActualDisplayUUID = target.uuid
         lastReadbackWasAvailable = true

@@ -2402,11 +2402,11 @@ final class WindowDockInteractionMonitor {
         identity: WindowThumbnailApplicationIdentity?
     ) {
         guard AXIsProcessTrusted() else {
-            preferences.publishFeedback("需要辅助功能权限才能关闭 Dock 预览窗口")
+            preferences.publishFeedback("请在系统设置中开启本应用的辅助功能权限")
             return
         }
         guard isCurrentPreviewAction(window: window, application: application, identity: identity) else {
-            preferences.publishFeedback("Dock 预览窗口状态已变化，请重新悬停后再试")
+            preferences.publishFeedback("窗口状态已变化，请重新悬停")
             return
         }
         let applicationPID = application.processIdentifier
@@ -2419,7 +2419,7 @@ final class WindowDockInteractionMonitor {
             // The row was closable when enumerated, but its AX hierarchy may
             // have changed while the pointer travelled to the button. Do not
             // fall back to quitting or hiding the App.
-            preferences.publishFeedback("当前 Dock 预览窗口已不可关闭，请重新悬停后再试")
+            preferences.publishFeedback("窗口暂无法关闭，请重新悬停")
             return
         }
 
@@ -2430,7 +2430,7 @@ final class WindowDockInteractionMonitor {
             closeButton,
             kAXPressAction as CFString
         ) == .success else {
-            preferences.publishFeedback("关闭 Dock 预览窗口失败")
+            preferences.publishFeedback("关闭结果未确认，请检查窗口状态")
             return
         }
 
@@ -3274,12 +3274,12 @@ private struct DockWindowPreviewView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
             }
             if !canManageWindows {
-                Label("授予辅助功能权限后显示窗口", systemImage: "figure.stand")
+                Label("请开启辅助功能权限以显示窗口", systemImage: "figure.stand")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .padding(.vertical, 8)
             } else if rows.isEmpty {
-                Text("没有可选择的窗口")
+                Text("暂无可选择窗口")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .padding(.vertical, 8)
@@ -3355,7 +3355,7 @@ private struct DockPreviewCard: View {
                 cardContent
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(row.title)
-                    .accessibilityHint("该应用未公开可控制窗口，仅提供预览")
+                    .accessibilityHint("仅可预览，暂无法操作")
             }
 
             if isHovering, row.canClose {
@@ -3450,23 +3450,23 @@ private struct DockPreviewCard: View {
             case .permissionRequired:
                 previewFailure(title: "需要屏幕录制权限", symbol: "record.circle")
             case .restartRequired:
-                previewFailure(title: "重启 SuperIsland 后显示", symbol: "arrow.clockwise")
+                previewFailure(title: "重启 WE1 后显示", symbol: "arrow.clockwise")
             case .notEnumerated:
                 previewFailure(
                     title: row.isPreviewOnly
-                        ? "窗口预览暂不可用"
+                        ? "预览暂不可用"
                         : "全屏预览暂不可用",
                     symbol: "rectangle.on.rectangle"
                 )
             case .ambiguous:
-                previewFailure(title: "无法唯一匹配窗口", symbol: "questionmark.square")
+                previewFailure(title: "无法确定对应窗口", symbol: "questionmark.square")
             case .captureFailed:
-                previewFailure(title: "窗口预览暂不可用", symbol: "exclamationmark.triangle")
+                previewFailure(title: "预览暂不可用", symbol: "exclamationmark.triangle")
             }
         } else {
             VStack(spacing: 7) {
                 ProgressView().controlSize(.small)
-                Text("正在生成预览")
+                Text("正在生成预览…")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }
