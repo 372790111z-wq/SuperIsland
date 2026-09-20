@@ -450,15 +450,11 @@ final class WindowEnhancementController {
 
         switch outcome.result {
         case .complete:
-            feedback("已应用：\(layout.title)")
-        case .movedOnly:
-            feedback("窗口已移动，但当前 App 不允许缩放")
-        case .resizedOnly:
-            feedback("窗口已缩放，但当前 App 不允许移动")
-        case .constrained:
-            feedback("窗口已按当前 App 限制调整，未达到完整目标布局")
+            feedback("已调整")
+        case .movedOnly, .resizedOnly, .constrained:
+            feedback(adjustmentFeedback(final: outcome.finalFrame, target: target))
         case .failed:
-            feedback("窗口不允许移动或缩放")
+            feedback("未能调整窗口")
         }
         switch outcome.result {
         case .complete:
@@ -739,9 +735,7 @@ final class WindowEnhancementController {
         )
         let wasSizeClamped = abs(desiredSize.width - context.frame.width) > 0.5 ||
             abs(desiredSize.height - context.frame.height) > 0.5
-        let sizeResult: GeometryUpdateResult = wasSizeClamped
-            ? setSize(desiredSize, for: context.window)
-            : .exact
+        if wasSizeClamped { _ = setSize(desiredSize, for: context.window) }
         guard let effectiveFrame = frame(of: context.window) else {
             feedback("无法验证窗口调整结果")
             return
@@ -759,15 +753,18 @@ final class WindowEnhancementController {
             feedback("窗口居中失败")
             return
         }
-        let fitsUsableArea = finalFrame.width <= usable.width + Self.geometryTolerance &&
-            finalFrame.height <= usable.height + Self.geometryTolerance
-        if positionResult == .exact, sizeResult == .exact, fitsUsableArea, !wasSizeClamped {
-            feedback("窗口已居中")
-        } else if positionResult == .exact, fitsUsableArea {
-            feedback("窗口已居中，尺寸按当前 App 约束")
-        } else {
-            feedback("窗口已移动，但当前 App 限制了精确居中")
-        }
+        // Position is judged against the final size, since an app may resize
+        // while accepting the move. Normal screen fitting is not a failure.
+        let finalCenteredOrigin = clampedOrigin(
+            CGPoint(x: usable.midX - finalFrame.width / 2, y: usable.midY - finalFrame.height / 2),
+            size: finalFrame.size, within: usable
+        )
+        feedback(adjustmentFeedback(
+            final: finalFrame,
+            target: CGRect(origin: finalCenteredOrigin, size: desiredSize),
+            success: "已居中",
+            partial: frameMatches(finalFrame, context.frame) ? "未能调整" : "已调整"
+        ))
     }
 
     private func moveFocusedWindow(displayOffset: Int) {
@@ -828,9 +825,7 @@ final class WindowEnhancementController {
         )
         let wasSizeClamped = abs(desiredSize.width - context.frame.width) > 0.5 ||
             abs(desiredSize.height - context.frame.height) > 0.5
-        let sizeResult: GeometryUpdateResult = wasSizeClamped
-            ? setSize(desiredSize, for: context.window)
-            : .exact
+        if wasSizeClamped { _ = setSize(desiredSize, for: context.window) }
         guard let effectiveFrame = frame(of: context.window) else {
             feedback("无法验证窗口调整结果")
             return
@@ -845,24 +840,22 @@ final class WindowEnhancementController {
             feedback("跨屏移动失败")
             return
         }
-        let destinationWithTolerance = destination.insetBy(
-            dx: -Self.geometryTolerance,
-            dy: -Self.geometryTolerance
-        )
-        guard destinationWithTolerance.contains(finalFrame.origin) ||
-                destination.contains(CGPoint(x: finalFrame.midX, y: finalFrame.midY)) else {
-            feedback("跨屏移动未完成，当前 App 限制了窗口位置")
+        // A corner crossing the edge is not enough to report a completed move.
+        guard cgBounds(for: screens[next]).contains(
+            CGPoint(x: finalFrame.midX, y: finalFrame.midY)
+        ) else {
+            feedback("未能移至目标屏幕")
             return
         }
-        let fitsDestination = destinationWithTolerance.contains(finalFrame)
-        if positionResult == .exact,
-           sizeResult == .exact,
-           !wasSizeClamped,
-           fitsDestination {
-            feedback("窗口已移动到其他显示器")
-        } else {
-            feedback("窗口已移动到其他显示器，但尺寸或位置受当前 App 限制")
-        }
+        let finalTargetOrigin = CGPoint(
+            x: destination.minX + max(0, min(1, relativeX)) * max(0, destination.width - finalFrame.width),
+            y: destination.minY + max(0, min(1, relativeY)) * max(0, destination.height - finalFrame.height)
+        )
+        feedback(adjustmentFeedback(
+            final: finalFrame,
+            target: CGRect(origin: finalTargetOrigin, size: desiredSize),
+            success: "已移屏", partial: "已移屏"
+        ))
     }
 
     private struct WindowIdentity {
@@ -1001,7 +994,7 @@ final class WindowEnhancementController {
         intendedDisplayID: CGDirectDisplayID,
         generation: UInt64
     ) async -> WindowMutationCompletion {
-        feedback("正在退出全屏并应用：\(layout.title)")
+        feedback("正在调整…")
         let exitOutcome = await transitionFullScreen(
             to: false,
             identity: identity,
@@ -1154,8 +1147,8 @@ final class WindowEnhancementController {
                 switch stability {
                 case .stable:
                     feedback(didRecomputeTarget
-                        ? "目标显示器已变化，已在可用显示器应用：\(layout.title)"
-                        : "已退出全屏并应用：\(layout.title)")
+                        ? "已调整，目标屏幕已变化"
+                        : "已调整")
                     return .committed
                 case .interrupted:
                     return .unresolved
@@ -1171,7 +1164,7 @@ final class WindowEnhancementController {
                 }
             case .movedOnly:
                 return await reportFullScreenFailure(
-                    "退出全屏后仅移动了窗口，未完成布局",
+                    "大小未达预期",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1180,7 +1173,7 @@ final class WindowEnhancementController {
                 )
             case .resizedOnly:
                 return await reportFullScreenFailure(
-                    "退出全屏后仅缩放了窗口，未完成布局",
+                    "位置未达预期",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1189,7 +1182,7 @@ final class WindowEnhancementController {
                 )
             case .constrained:
                 return await reportFullScreenFailure(
-                    "退出全屏后窗口受 App 限制，未完成精确布局",
+                    "布局未达预期",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1198,7 +1191,7 @@ final class WindowEnhancementController {
                 )
             case .failed:
                 return await reportFullScreenFailure(
-                    "退出全屏后，窗口仍不允许移动或缩放",
+                    "未能调整窗口",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1216,7 +1209,7 @@ final class WindowEnhancementController {
         sourceDisplayID: CGDirectDisplayID,
         generation: UInt64
     ) async -> WindowMutationCompletion {
-        feedback("正在退出全屏并居中窗口")
+        feedback("正在居中…")
         let exitOutcome = await transitionFullScreen(
             to: false,
             identity: identity,
@@ -1334,7 +1327,7 @@ final class WindowEnhancementController {
 
             guard centerOutcome.exact else {
                 return await reportFullScreenFailure(
-                    "退出全屏后 App 限制了精确居中",
+                    "未能居中",
                     identity: identity,
                     preferredElement: activeWindow,
                     sourceDisplayID: sourceDisplayID,
@@ -1363,8 +1356,8 @@ final class WindowEnhancementController {
             switch stability {
             case .stable:
                 feedback(didRecomputeTarget
-                    ? "显示器列表已变化；已退出全屏并在可用显示器居中窗口"
-                    : "已退出全屏并居中窗口")
+                    ? "已居中，目标屏幕已变化"
+                    : "已居中")
                 return .committed
             case .interrupted:
                 return .unresolved
@@ -1390,7 +1383,7 @@ final class WindowEnhancementController {
         displayOffset: Int,
         generation: UInt64
     ) async -> WindowMutationCompletion {
-        feedback("正在将全屏窗口移动到其他显示器")
+        feedback("正在移屏…")
         recordFullScreenDisplayStage(
             "exit_requested", identity: identity, window: context.window,
             sourceDisplayID: sourceDisplayID, targetDisplayID: initialTargetDisplayID,
@@ -1594,9 +1587,6 @@ final class WindowEnhancementController {
                     originalWindowedFrame: originalWindowedFrame, generation: generation
                 )
             }
-            let movedExactly = frame(of: activeWindow).map {
-                frameMatches($0, moveOutcome.requestedFrame)
-            } ?? false
 
             recordFullScreenDisplayStage(
                 "enter_requested", identity: identity, window: activeWindow,
@@ -1659,10 +1649,8 @@ final class WindowEnhancementController {
                 switch stability {
                 case .stable:
                     feedback(didRecomputeTarget
-                        ? "显示器列表已变化；全屏窗口已移动到另一可用显示器"
-                        : (movedExactly
-                            ? "全屏窗口已移动到其他显示器"
-                            : "全屏窗口已移动到其他显示器；窗口化过渡位置受 App 限制"))
+                        ? "已移屏，目标屏幕已变化"
+                        : "已移屏")
                     return .committed
                 case .interrupted:
                     return .unresolved
@@ -2575,8 +2563,8 @@ final class WindowEnhancementController {
 
     /// Commits a non-full-screen layout only after its readback has remained
     /// quiet. One retry covers Apps that accept the AX request but overwrite it
-    /// once while completing mouse-up. A stable non-exact readback is the only
-    /// state classified as an App constraint.
+    /// once while completing mouse-up. A stable non-exact readback establishes
+    /// the remaining geometry difference, but not its cause.
     private func commitWindowedFrame(
         _ target: CGRect,
         within safeBounds: CGRect,
@@ -3353,6 +3341,22 @@ final class WindowEnhancementController {
             feedbackPresenter.hide()
         } else {
             feedbackPresenter.show(message)
+        }
+    }
+
+    /// Describe the measured difference, not an unverified application limit.
+    /// The caller establishes whether the adjustment actually took place.
+    private func adjustmentFeedback(
+        final: CGRect,
+        target: CGRect,
+        success: String = "已调整",
+        partial: String = "已调整"
+    ) -> String {
+        switch (originMatches(final.origin, target.origin), sizeMatches(final.size, target.size)) {
+        case (true, true): return success
+        case (true, false): return "\(partial)，大小未达预期"
+        case (false, true): return "\(partial)，位置未达预期"
+        case (false, false): return "\(partial)，大小和位置未达预期"
         }
     }
 
