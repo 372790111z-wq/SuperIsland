@@ -131,13 +131,22 @@ struct UpdateDialogView: View {
             EmptyView()
 
         case .failed:
-            Button("打开发布页面") {
-                NSWorkspace.shared.open(releaseURL)
-                onDismiss()
+            HStack(spacing: 20) {
+                Button("稍后") { onDismiss() }
+                if let downloadURL {
+                    Button("重试") {
+                        updater.start(downloadURL: downloadURL, releaseURL: releaseURL)
+                    }
+                } else {
+                    Button("打开发布页面") {
+                        NSWorkspace.shared.open(releaseURL)
+                        onDismiss()
+                    }
+                }
             }
             .buttonStyle(.plain)
             .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(Color.white.opacity(0.55))
+            .foregroundStyle(Color.white.opacity(0.65))
         }
     }
 }

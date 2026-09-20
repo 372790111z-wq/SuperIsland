@@ -20,14 +20,17 @@ final class AgentsStatusBridge {
     private var didWarnPortConflict = false
     private var adoptedExternalServer = false
     private var adoptedServerPID: pid_t?
+    private let ownerToken = UUID().uuidString
+    private var extensionDirectory: URL?
 
     private init() {}
 
     // MARK: - Public lifecycle
 
-    func start() {
+    func start(extensionDirectory: URL? = nil) {
+        self.extensionDirectory = extensionDirectory
         shouldKeepRunning = true
-        cleanupLegacyLaunchdOnce()
+        if !ExtensionHostEnvironment.isWE1 { cleanupLegacyLaunchdOnce() }
         startServerIfNeeded()
     }
 
@@ -36,12 +39,19 @@ final class AgentsStatusBridge {
     /// JS `onActivate` talks to the bridge via synchronous fetch, so the socket
     /// has to be live or the very first /control/resume + /hooks/install burst
     /// will fail and the extension will mark itself "setup required".
-    func waitForListening(timeout: TimeInterval = 2.0) {
+    @discardableResult
+    func waitForListening(timeout: TimeInterval = 2.0) -> Bool {
+        if ExtensionHostEnvironment.isWE1 && serverProcess == nil { return false }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if isServerListening() { return }
+            if isServerListening() {
+                if !ExtensionHostEnvironment.isWE1 { return true }
+                if let process = serverProcess, process.isRunning,
+                   let pid = probeOwnedHealth(), pid == process.processIdentifier { return true }
+            }
             Thread.sleep(forTimeInterval: 0.05)
         }
+        return false
     }
 
     private func isServerListening() -> Bool {
@@ -64,9 +74,8 @@ final class AgentsStatusBridge {
     }
 
     /// Quick synchronous probe of the server's `/health` endpoint. Returns the
-    /// server's PID when the response looks like our bridge (matching port), or
-    /// nil otherwise. The PID lets us terminate an adopted external server on
-    /// app shutdown, so a previously-orphaned instance doesn't survive forever.
+    /// server's PID when the response matches the bridge. WE1 additionally
+    /// requires this launch's token; a matching service name is not ownership.
     private func probeOwnedHealth(timeout: TimeInterval = 0.5) -> pid_t? {
         guard let url = URL(string: "http://127.0.0.1:\(Self.port)/health") else { return nil }
         var request = URLRequest(url: url)
@@ -76,13 +85,15 @@ final class AgentsStatusBridge {
         let semaphore = DispatchSemaphore(value: 0)
         var resolvedPID: pid_t?
         var matched = false
+        let requiredOwnerToken = ExtensionHostEnvironment.isWE1 ? ownerToken : nil
         let task = URLSession.shared.dataTask(with: request) { data, response, _ in
             defer { semaphore.signal() }
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
                   let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   (json["ok"] as? Bool) == true,
-                  (json["port"] as? Int) == Self.port
+                  (json["port"] as? Int) == Self.port,
+                  requiredOwnerToken == nil || (json["ownerToken"] as? String) == requiredOwnerToken
             else { return }
             matched = true
             if let pid = json["pid"] as? Int, pid > 0 {
@@ -107,43 +118,33 @@ final class AgentsStatusBridge {
             adoptedExternalServer = false
             guard process.isRunning else { return }
             process.terminate()
-            // Give the server a moment to shut down cleanly, then SIGKILL if needed
-            // so we don't leave port 7823 occupied.
+            // Reload starts another instance immediately. Release this owned
+            // process's port before returning, rather than mistaking it for a
+            // foreign service during the next activation.
             let pid = process.processIdentifier
-            DispatchQueue.global(qos: .utility).async {
-                let deadline = Date().addingTimeInterval(1.0)
-                while process.isRunning && Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                if process.isRunning {
-                    kill(pid, SIGKILL)
-                }
+            let deadline = Date().addingTimeInterval(0.5)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            if process.isRunning {
+                kill(pid, SIGKILL)
             }
             return
         }
 
-        // No owned Process handle — we adopted an externally-spawned server
-        // (typically a leftover from a previously crashed app run). Terminate
-        // it by PID so the port is released and no orphan survives us.
-        guard let adoptedPID = adoptedServerPID else { return }
+        // An external server can belong to another running host. Its PID is
+        // useful for diagnostics, never authority to terminate that process.
         adoptedServerPID = nil
         adoptedExternalServer = false
-        guard kill(adoptedPID, 0) == 0 else { return }  // already gone
-        kill(adoptedPID, SIGTERM)
-        DispatchQueue.global(qos: .utility).async {
-            let deadline = Date().addingTimeInterval(1.0)
-            while kill(adoptedPID, 0) == 0 && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-            if kill(adoptedPID, 0) == 0 {
-                kill(adoptedPID, SIGKILL)
-            }
-        }
     }
 
     // MARK: - Path resolution
 
     private func serverScriptURL() -> URL? {
+        if let extensionDirectory {
+            let script = extensionDirectory.appendingPathComponent("server/server.py")
+            return fileManager.fileExists(atPath: script.path) ? script : nil
+        }
         if let bundleResources = Bundle.main.resourceURL {
             let bundled = bundleResources.appendingPathComponent(
                 "BundledExtensions/agents-status/server/server.py", isDirectory: false)
@@ -151,6 +152,7 @@ final class AgentsStatusBridge {
                 return bundled
             }
         }
+        if ExtensionHostEnvironment.isWE1 { return nil }
         let sourceFileURL = URL(fileURLWithPath: #filePath)
         let repoRoot = sourceFileURL.deletingLastPathComponent().deletingLastPathComponent()
         let repoScript = repoRoot.appendingPathComponent(
@@ -169,6 +171,9 @@ final class AgentsStatusBridge {
     }
 
     private func hookScriptPath(_ filename: String) -> String {
+        if let extensionDirectory {
+            return extensionDirectory.appendingPathComponent("hooks/\(filename)").path
+        }
         if let bundleResources = Bundle.main.resourceURL {
             let bundled = bundleResources.appendingPathComponent(
                 "BundledExtensions/agents-status/hooks/\(filename)", isDirectory: false)
@@ -176,6 +181,7 @@ final class AgentsStatusBridge {
                 return bundled.path
             }
         }
+        if ExtensionHostEnvironment.isWE1 { return "" }
         let sourceFileURL = URL(fileURLWithPath: #filePath)
         let repoRoot = sourceFileURL.deletingLastPathComponent().deletingLastPathComponent()
         let repoPath = repoRoot.appendingPathComponent(
@@ -217,6 +223,12 @@ final class AgentsStatusBridge {
         guard shouldKeepRunning, serverProcess == nil else { return }
 
         if isServerListening() {
+            if ExtensionHostEnvironment.isWE1 {
+                ExtensionLogger.shared.log(Self.managedExtensionID, .error,
+                    "Agent 状态端口 \(Self.port) 正被其他进程使用；请先退出另一套 Agent 状态服务，再点重新加载。")
+                showPortConflictAlertOnce()
+                return
+            }
             if let pid = probeOwnedHealth() {
                 adoptedServerPID = pid
                 if !adoptedExternalServer {
@@ -250,8 +262,10 @@ final class AgentsStatusBridge {
         let ccHookPath = hookScriptPath("cc-event-hook.sh")
         let codexHookPath = hookScriptPath("codex-notify-hook.sh")
         // Bundle resources lose +x through rsync in some setups; re-assert it.
-        try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ccHookPath)
-        try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHookPath)
+        if !ExtensionHostEnvironment.isWE1 {
+            try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ccHookPath)
+            try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHookPath)
+        }
 
         let process = Process()
         process.executableURL = pythonURL
@@ -259,6 +273,8 @@ final class AgentsStatusBridge {
 
         var env = ProcessInfo.processInfo.environment
         env["AGENTS_STATUS_PORT"] = String(Self.port)
+        env["AGENTS_STATUS_OWNER_TOKEN"] = ownerToken
+        env["AGENTS_STATUS_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         env["AGENTS_STATUS_CC_HOOK_SCRIPT"] = ccHookPath
         env["AGENTS_STATUS_CODEX_HOOK_SCRIPT"] = codexHookPath
         env["PYTHONUNBUFFERED"] = "1"
@@ -314,10 +330,7 @@ final class AgentsStatusBridge {
     }
 
     private func handleTermination(_ process: Process) {
-        if let current = serverProcess, current !== process {
-            // An old process we already replaced — ignore.
-            return
-        }
+        guard serverProcess === process else { return }
         serverProcess = nil
 
         let reason = process.terminationReason == .exit ? "exit" : "uncaught signal"
@@ -379,8 +392,8 @@ final class AgentsStatusBridge {
         didWarnPortConflict = true
         DispatchQueue.main.async {
             let alert = NSAlert()
-            alert.messageText = "Agents Status port \(Self.port) is in use"
-            alert.informativeText = "Another process on this Mac is already listening on 127.0.0.1:\(Self.port). A leftover agents-status server from a previous Super Island run is the most common cause. Open Terminal and run `lsof -iTCP:\(Self.port) -sTCP:LISTEN` to find it, then quit that process (or reboot) and relaunch Super Island."
+            alert.messageText = "Agent 状态服务启动失败"
+            alert.informativeText = "端口 \(Self.port) 正被其他进程使用。请先退出另一套 Agent 状态服务，再点重新加载。"
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Got it")
             _ = alert.runModal()

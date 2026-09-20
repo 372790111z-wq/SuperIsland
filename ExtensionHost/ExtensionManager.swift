@@ -26,20 +26,14 @@ final class ExtensionManager: ObservableObject {
     private let fallbackRepoExtensionsDirectory: URL?
 
     var discoveryDirectories: [URL] {
-        var orderedPaths: [URL] = []
-        var seen = Set<String>()
-        for directory in [
-            installedExtensionsDirectory,
-            developmentExtensionsDirectory,
-            localExtensionsDirectory,
-            fallbackRepoExtensionsDirectory,
-            bundledExtensionsDirectory
-        ].compactMap({ $0 }) {
-            if seen.insert(directory.path).inserted {
-                orderedPaths.append(directory)
-            }
-        }
-        return orderedPaths
+        ExtensionHostEnvironment.discoveryDirectories(
+            isWE1: ExtensionHostEnvironment.isWE1,
+            installed: installedExtensionsDirectory,
+            development: developmentExtensionsDirectory,
+            local: localExtensionsDirectory,
+            repository: fallbackRepoExtensionsDirectory,
+            bundled: bundledExtensionsDirectory
+        )
     }
 
     var availableModules: [ActiveModule] {
@@ -68,9 +62,9 @@ final class ExtensionManager: ObservableObject {
 
         let appSupportBase = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        let appSupportDirectoryName = Bundle.main.bundleIdentifier == "com.workview.SuperIsland.WE1Debug"
-            ? "SuperIsland-WE1-Debug"
-            : "SuperIsland"
+        let appSupportDirectoryName = ExtensionHostEnvironment.applicationSupportDirectoryName(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        )
         installedExtensionsDirectory = appSupportBase
             .appendingPathComponent(appSupportDirectoryName, isDirectory: true)
             .appendingPathComponent("Extensions", isDirectory: true)
@@ -118,6 +112,7 @@ final class ExtensionManager: ObservableObject {
                             "ignoring \(manifest.version) at \(manifest.bundleURL.path))"
                         )
                     }
+                    continue
                 } else {
                     discovered[manifest.id] = manifest
                 }
@@ -134,6 +129,7 @@ final class ExtensionManager: ObservableObject {
         }
         installed = manifests
         settingsSchemas = discoveredSchemas
+        registerNewlyDiscoveredExtensions()
 
         // Deactivate runtimes that are no longer present.
         let activeIDs = Set(runtimes.keys)
@@ -146,8 +142,7 @@ final class ExtensionManager: ObservableObject {
 
     // MARK: - User-disabled persistence
 
-    private static let userDisabledExtensionsKey = "extensions.userDisabled"
-    private static let seenExtensionsKey = "extensions.seenIDs"
+    private static let userDisabledExtensionsKey = ExtensionActivationPolicy.disabledKey
 
     private func userDisabledIDs() -> Set<String> {
         let array = UserDefaults.standard.stringArray(forKey: Self.userDisabledExtensionsKey) ?? []
@@ -179,39 +174,12 @@ final class ExtensionManager: ObservableObject {
     /// that appears in a later update is genuinely new and lands in
     /// userDisabled until the user opts in via Settings.
     private func registerNewlyDiscoveredExtensions() {
-        let installedIDs = Set(installed.map(\.id))
-        let optOutIDs = Set(installed.filter { !$0.defaultEnabled }.map(\.id))
-        let defaults = UserDefaults.standard
-        let storedSeen = defaults.array(forKey: Self.seenExtensionsKey) as? [String]
-
-        guard let storedSeen else {
-            defaults.set(Array(installedIDs), forKey: Self.seenExtensionsKey)
-            if !optOutIDs.isEmpty {
-                var disabled = userDisabledIDs()
-                for id in optOutIDs {
-                    disabled.insert(id)
-                    ExtensionLogger.shared.log(id, .info, "First-run seed: defaultEnabled=false, leaving disabled until user opts in.")
-                }
-                persistUserDisabledIDs(disabled)
-            }
-            return
-        }
-
-        let seen = Set(storedSeen)
-        let newIDs = installedIDs.subtracting(seen)
-        if !newIDs.isEmpty {
-            var disabled = userDisabledIDs()
-            for id in newIDs {
-                disabled.insert(id)
-                ExtensionLogger.shared.log(id, .info, "New extension discovered; defaulting to disabled until user opts in.")
-            }
-            persistUserDisabledIDs(disabled)
-        }
-
-        let updatedSeen = seen.union(installedIDs)
-        if updatedSeen != seen {
-            defaults.set(Array(updatedSeen), forKey: Self.seenExtensionsKey)
-        }
+        ExtensionActivationPolicy.register(
+            installedIDs: Set(installed.map(\.id)),
+            defaultDisabledIDs: Set(installed.filter { !$0.defaultEnabled }.map(\.id)),
+            defaults: .standard,
+            isWE1: ExtensionHostEnvironment.isWE1
+        )
     }
 
     func activateDiscoveredExtensions() {
@@ -223,28 +191,29 @@ final class ExtensionManager: ObservableObject {
     }
 
     func activate(extensionID: String) {
-        // When a user explicitly activates an extension, clear any persisted disabled state.
-        var ids = userDisabledIDs()
-        if ids.remove(extensionID) != nil {
-            persistUserDisabledIDs(ids)
-        }
-
         guard runtimes[extensionID] == nil else { return }
         guard let manifest = installed.first(where: { $0.id == extensionID }) else { return }
 
         do {
             let runtime = try ExtensionJSRuntime(manifest: manifest, manager: self)
-            runtimes[extensionID] = runtime
 
             // Spin up the Python bridge BEFORE firing the JS onActivate hook —
             // the extension's onActivate issues synchronous fetches against
             // 127.0.0.1:7823 to install hooks, so the socket must be live.
             if extensionID == AgentsStatusBridge.managedExtensionID {
-                AgentsStatusBridge.shared.start()
-                AgentsStatusBridge.shared.waitForListening()
+                AgentsStatusBridge.shared.start(extensionDirectory: manifest.bundleURL)
+                guard AgentsStatusBridge.shared.waitForListening() else {
+                    AgentsStatusBridge.shared.stop()
+                    ExtensionLogger.shared.log(extensionID, .error, "Agent 状态服务未就绪，请查看扩展日志后重试。")
+                    return
+                }
             }
 
+            runtimes[extensionID] = runtime
             runtime.activate()
+            // Persist an explicit opt-in only after a usable runtime exists.
+            var ids = userDisabledIDs()
+            if ids.remove(extensionID) != nil { persistUserDisabledIDs(ids) }
 
             startRefreshTimer(for: manifest)
             syncRuntimeEnergyState()
@@ -273,8 +242,25 @@ final class ExtensionManager: ObservableObject {
         if extensionID == AgentsStatusBridge.managedExtensionID {
             AgentsStatusBridge.shared.stop()
         }
+        if extensionID == "superisland.whatsapp-web" {
+            WhatsAppWebBridge.shared.stop()
+        }
 
         ExtensionLogger.shared.log(extensionID, .info, "Deactivated extension")
+    }
+
+    /// Stop owned providers and timers without changing the user's enable choices.
+    /// Call before resetting preferences, so onDeactivate cannot repopulate a
+    /// freshly cleared defaults domain with stale extension state.
+    func shutdown() {
+        for extensionID in Array(runtimes.keys) {
+            deactivate(extensionID: extensionID)
+        }
+        for workItem in immediateRefreshWorkItems.values { workItem.cancel() }
+        immediateRefreshWorkItems.removeAll()
+        presentedInteractionContexts.removeAll()
+        WhatsAppWebBridge.shared.stop()
+        AgentsStatusBridge.shared.stop()
     }
 
     func refreshState(extensionID: String) {
@@ -550,7 +536,10 @@ final class WhatsAppWebBridge: ObservableObject {
     private var appSupportDirectory: URL {
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        return base.appendingPathComponent("SuperIsland", isDirectory: true)
+        return base.appendingPathComponent(
+            ExtensionHostEnvironment.applicationSupportDirectoryName(bundleIdentifier: Bundle.main.bundleIdentifier),
+            isDirectory: true
+        )
     }
 
     private var authDirectory: URL {
@@ -571,6 +560,11 @@ final class WhatsAppWebBridge: ObservableObject {
             if FileManager.default.fileExists(atPath: bundled.path) {
                 return bundled
             }
+        }
+        if ExtensionHostEnvironment.isWE1 {
+            // A packaged WE1 must never run the source tree's older provider.
+            return (Bundle.main.resourceURL ?? Bundle.main.bundleURL)
+                .appendingPathComponent("BundledExtensions/whatsapp-web/provider", isDirectory: true)
         }
         // Dev fallback: resolve relative to source file (only valid on the original dev machine)
         let sourceFileURL = URL(fileURLWithPath: #filePath)
@@ -616,6 +610,36 @@ final class WhatsAppWebBridge: ObservableObject {
         startProviderIfNeeded()
         if providerReady && (connectionState == .idle || connectionState == .error) {
             sendProviderCommand(["command": "start", "requestId": nextRequestID()])
+        }
+    }
+
+    func stop() {
+        shouldKeepProviderRunning = false
+        providerRestartWorkItem?.cancel()
+        providerRestartWorkItem = nil
+        pendingCommands.removeAll()
+        pendingCommandKeys.removeAll()
+        providerOutputHandle?.readabilityHandler = nil
+        providerErrorHandle?.readabilityHandler = nil
+        try? providerInputHandle?.close()
+        providerInputHandle = nil
+        providerOutputHandle = nil
+        providerErrorHandle = nil
+        let process = providerProcess
+        providerProcess = nil
+        providerReady = false
+        providerRestartAttempts = 0
+        providerOutputBuffer.removeAll()
+        providerErrorBuffer.removeAll()
+        if let process, process.isRunning {
+            process.terminate()
+        }
+        performBridgeUpdate {
+            connectionState = .idle
+            statusText = "Not connected"
+            qrCodeDataURL = nil
+            lastError = nil
+            recentMessages.removeAll()
         }
     }
 
@@ -782,25 +806,27 @@ final class WhatsAppWebBridge: ObservableObject {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
             let data = handle.availableData
             guard !data.isEmpty else {
                 handle.readabilityHandler = nil
                 return
             }
-            Task { @MainActor [weak self] in
-                self?.consumeProviderOutput(data)
+            Task { @MainActor [weak self, weak process] in
+                guard let self, let process, self.providerProcess === process else { return }
+                self.consumeProviderOutput(data)
             }
         }
 
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
             let data = handle.availableData
             guard !data.isEmpty else {
                 handle.readabilityHandler = nil
                 return
             }
-            Task { @MainActor [weak self] in
-                self?.consumeProviderError(data)
+            Task { @MainActor [weak self, weak process] in
+                guard let self, let process, self.providerProcess === process else { return }
+                self.consumeProviderError(data)
             }
         }
 
@@ -1272,6 +1298,7 @@ final class WhatsAppWebBridge: ObservableObject {
     }
 
     private func handleProviderTermination(_ terminatedProcess: Process) {
+        guard providerProcess === terminatedProcess else { return }
         providerOutputHandle?.readabilityHandler = nil
         providerErrorHandle?.readabilityHandler = nil
         providerInputHandle = nil

@@ -4,6 +4,12 @@ import AppKit
 @preconcurrency import UserNotifications
 
 final class ExtensionJSRuntime {
+    enum WhatsAppCommand: Equatable {
+        case start
+        case refreshQRCode
+        case sendMessage(recipient: String, body: String)
+    }
+
     enum RuntimeError: LocalizedError {
         case contextInitializationFailed
         case scriptReadFailed(URL)
@@ -31,14 +37,20 @@ final class ExtensionJSRuntime {
     private var timers: [Int: Timer] = [:]
     private var nextTimerID: Int = 1
     private var didActivate = false
+    private var lifecycleGeneration: UInt64 = 0
     private var timersSuspended = false
+    private let performWhatsAppCommand: @MainActor (WhatsAppCommand) -> [String: Any]
 
     private let defaults = UserDefaults.standard
     private var islandActivationModule: ActiveModule {
         manifest.capabilities.notificationFeed ? .builtIn(.notifications) : .extension_(extensionID)
     }
 
-    init(manifest: ExtensionManifest, manager: ExtensionManager) throws {
+    init(
+        manifest: ExtensionManifest,
+        manager: ExtensionManager?,
+        whatsAppCommand: (@MainActor (WhatsAppCommand) -> [String: Any])? = nil
+    ) throws {
         guard let context = JSContext() else {
             throw RuntimeError.contextInitializationFailed
         }
@@ -47,6 +59,18 @@ final class ExtensionJSRuntime {
         self.manifest = manifest
         self.extensionID = manifest.id
         self.manager = manager
+        self.performWhatsAppCommand = whatsAppCommand ?? { command in
+            switch command {
+            case .start:
+                WhatsAppWebBridge.shared.start()
+                return [:]
+            case .refreshQRCode:
+                WhatsAppWebBridge.shared.refreshQRCode()
+                return [:]
+            case .sendMessage(let recipient, let body):
+                return WhatsAppWebBridge.shared.sendMessage(to: recipient, body: body)
+            }
+        }
 
         ExtensionSandbox.configureContext(context, extensionID: manifest.id, permissions: manifest.permissions)
 
@@ -99,14 +123,16 @@ final class ExtensionJSRuntime {
 
     func activate() {
         guard !didActivate else { return }
+        lifecycleGeneration &+= 1
         didActivate = true
         callLifecycleHook(named: "onActivate")
     }
 
     func deactivate() {
+        lifecycleGeneration &+= 1
+        didActivate = false
         callLifecycleHook(named: "onDeactivate")
         invalidateAllTimers()
-        didActivate = false
     }
 
     func cleanup() {
@@ -183,9 +209,24 @@ final class ExtensionJSRuntime {
         }
     }
 
+    @discardableResult
+    private func enqueueWhatsAppCommand(_ command: WhatsAppCommand) -> Bool {
+        guard didActivate else { return false }
+        let generation = lifecycleGeneration
+        Task { @MainActor [weak self] in
+            guard let self, self.didActivate, self.lifecycleGeneration == generation else { return }
+            _ = self.performWhatsAppCommand(command)
+        }
+        return true
+    }
+
     private func injectAPI() {
         let superIsland = JSValue(newObjectIn: context)!
         context.setObject(superIsland, forKeyedSubscript: "SuperIsland" as NSString)
+        superIsland.setObject(
+            ["isWE1": ExtensionHostEnvironment.isWE1],
+            forKeyedSubscript: "host" as NSString
+        )
 
         injectModuleRegistration(into: superIsland)
         injectStore(into: superIsland)
@@ -363,6 +404,7 @@ final class ExtensionJSRuntime {
             let headers = options?.forProperty("headers")?.toDictionary() as? [String: String]
             let hasPermission = self.manifest.permissions.contains("network")
             let ctx = self.context
+            let generation = self.lifecycleGeneration
 
             DispatchQueue.global(qos: .userInitiated).async {
                 let result = AsyncFetchResult.perform(
@@ -372,7 +414,8 @@ final class ExtensionJSRuntime {
                     headers: headers,
                     hasPermission: hasPermission
                 )
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.didActivate, self.lifecycleGeneration == generation else { return }
                     let js = JSValue(object: result.asDictionary(), in: ctx) ?? JSValue(nullIn: ctx)
                     callback.call(withArguments: [js as Any])
                 }
@@ -499,17 +542,13 @@ final class ExtensionJSRuntime {
         let startWhatsAppWeb: @convention(block) () -> Void = { [weak self] in
             guard let self else { return }
             guard self.manifest.permissions.contains("network") else { return }
-            Task { @MainActor in
-                WhatsAppWebBridge.shared.start()
-            }
+            self.enqueueWhatsAppCommand(.start)
         }
 
         let refreshWhatsAppWebQR: @convention(block) () -> Void = { [weak self] in
             guard let self else { return }
             guard self.manifest.permissions.contains("network") else { return }
-            Task { @MainActor in
-                WhatsAppWebBridge.shared.refreshQRCode()
-            }
+            self.enqueueWhatsAppCommand(.refreshQRCode)
         }
 
         let sendWhatsAppWebMessage: @convention(block) (String, String) -> JSValue? = { [weak self] recipient, message in
@@ -520,9 +559,12 @@ final class ExtensionJSRuntime {
             guard Thread.isMainThread else {
                 return JSValue(object: ["ok": false, "queued": false, "error": "main_thread_required"], in: self.context)
             }
+            guard self.didActivate else {
+                return JSValue(object: ["ok": false, "queued": false, "error": "extension_inactive"], in: self.context)
+            }
 
             let payload = MainActor.assumeIsolated {
-                WhatsAppWebBridge.shared.sendMessage(to: recipient, body: message)
+                self.performWhatsAppCommand(.sendMessage(recipient: recipient, body: message))
             }
             return JSValue(object: payload, in: self.context)
         }
@@ -531,10 +573,7 @@ final class ExtensionJSRuntime {
             guard let self else { return false }
             guard self.manifest.permissions.contains("network") else { return false }
 
-            Task { @MainActor in
-                _ = WhatsAppWebBridge.shared.sendMessage(to: recipient, body: message)
-            }
-            return true
+            return self.enqueueWhatsAppCommand(.sendMessage(recipient: recipient, body: message))
         }
 
         let dismissNotification: @convention(block) (String) -> Bool = { sourceID in

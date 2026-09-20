@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import json
 import pathlib
 import tempfile
 import time
@@ -15,6 +16,26 @@ SPEC.loader.exec_module(server)
 
 
 class AgentsStatusServerTests(unittest.TestCase):
+    def test_health_identifies_launch_owner_without_reading_sessions(self):
+        with mock.patch.object(server, "OWNER_TOKEN", "fixture-owner"), \
+             mock.patch.object(server, "_snapshot", side_effect=AssertionError("must not scan sessions")):
+            response = server._route_get("/health")
+        chunked = response.split(b"\r\n\r\n", 1)[1]
+        size, body = chunked.split(b"\r\n", 1)
+        payload = json.loads(body[:int(size, 16)])
+        self.assertEqual(payload["ownerToken"], "fixture-owner")
+        self.assertEqual(payload["port"], server.PORT)
+
+    def test_app_hosted_server_stops_when_parent_is_gone(self):
+        listener = mock.Mock()
+        with mock.patch.object(server, "PARENT_PID", 42424), \
+             mock.patch.object(server.os, "getppid", return_value=1), \
+             mock.patch.object(server.socket, "socket", return_value=listener), \
+             mock.patch.object(server.sys, "stderr"):
+            server.main()
+        listener.accept.assert_not_called()
+        listener.close.assert_called_once()
+
     def setUp(self):
         self._sessions = copy.deepcopy(server._sessions)
         self._recently_ended = copy.deepcopy(server._recently_ended_pids)

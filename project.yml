@@ -62,7 +62,15 @@ targets:
 
           # Pre-bundle WhatsApp provider with esbuild so node_modules aren't needed at runtime
           WA_PROVIDER="${SRCROOT}/Extensions/whatsapp-web/provider"
-          if [ -d "${WA_PROVIDER}/node_modules" ]; then
+          if [ "${PRODUCT_BUNDLE_IDENTIFIER}" = "com.workview.SuperIsland.WE1Debug" ]; then
+            # Prepared explicitly from the pinned lockfile; a successful app
+            # build must not silently ship an unusable provider.
+            if [ ! -f "${WE1_WHATSAPP_PROVIDER_DIR}/bundle.cjs" ] || [ ! -f "${WE1_WHATSAPP_PROVIDER_DIR}/build.json" ]; then
+              echo "error: Prepare WhatsApp with scripts/prepare-we1-whatsapp-provider.py and set WE1_WHATSAPP_PROVIDER_DIR."
+              exit 1
+            fi
+            /usr/bin/python3 "${SRCROOT}/scripts/prepare-we1-whatsapp-provider.py" --output-dir "${WE1_WHATSAPP_PROVIDER_DIR}" --verify-only || exit 1
+          elif [ -d "${WA_PROVIDER}/node_modules" ]; then
             echo "Bundling WhatsApp provider with esbuild..."
             npx --yes esbuild \
               "${WA_PROVIDER}/index.mjs" \
@@ -82,6 +90,14 @@ targets:
                 "${SRC}/" "${DEST}/${ext}/"
             fi
           done
+
+          if [ "${PRODUCT_BUNDLE_IDENTIFIER}" = "com.workview.SuperIsland.WE1Debug" ]; then
+            cp "${WE1_WHATSAPP_PROVIDER_DIR}/bundle.cjs" "${DEST}/whatsapp-web/provider/bundle.cjs"
+            cp "${WE1_WHATSAPP_PROVIDER_DIR}/build.json" "${DEST}/whatsapp-web/provider/build.json"
+            if [ -d "${WE1_WHATSAPP_PROVIDER_DIR}/licenses" ]; then
+              rsync -a "${WE1_WHATSAPP_PROVIDER_DIR}/licenses/" "${DEST}/whatsapp-web/provider/licenses/"
+            fi
+          fi
   SuperIslandWindowEnhancementTests:
     type: bundle.unit-test
     platform: macOS
