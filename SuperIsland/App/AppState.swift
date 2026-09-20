@@ -359,6 +359,24 @@ final class AppState: ObservableObject {
 
     private func suppressHoverForHeldPointer() -> Bool {
         guard !isShelfDragActive, NSEvent.pressedMouseButtons & 1 != 0 else { return false }
+        @MainActor enum DiagnosticState {
+            static let bypass = Bundle.main.bundleIdentifier == ShelfDropDiagnostics.debugBundleIdentifier &&
+                ProcessInfo.processInfo.environment["WE1_SHELF_ALLOW_HELD_HOVER"] == "1"
+            static var reportedBypass = false
+            static var reportedBlock = false
+        }
+        // Candidate-only A/B: leave the real window-drag gate at the callers intact.
+        if DiagnosticState.bypass {
+            if !DiagnosticState.reportedBypass {
+                DiagnosticState.reportedBypass = true
+                ShelfDropDiagnostics.record("held.hover.bypassed")
+            }
+            return false
+        }
+        if !DiagnosticState.reportedBlock {
+            DiagnosticState.reportedBlock = true
+            ShelfDropDiagnostics.record("held.hover.blocked")
+        }
         windowDragHoverGate.suppressUntilPointerExit()
         cancelHoverActivation()
         return true
