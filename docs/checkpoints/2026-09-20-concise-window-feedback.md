@@ -34,3 +34,11 @@
 - `build/WE1-Debug/SuperIsland-WE1-Debug.app` 已使用原稳定证书签名并通过严格校验，101项文件/链接/权限记录于 `build/ConciseFeedback/candidate-manifest.json`。
 - 原191657诊断候选自动归档到 `build/WE1-Debug/backups/SuperIsland-WE1-Debug-20260920-102600.app`，全部101项与旧清单核对一致，旧清单已指向此真实路径；打包编号与归档目录时间相差1秒，未凭名称推断内部版本。
 - Applications 的171124也与原101项清单完全一致，PID4851仍在运行。本次未安装、未退出应用、未做实机布局验收。
+
+## 102559 已安装
+
+- 用户对安装本次文案修正版并仅正常重启WE1的明确问题答复“确认”。重新核对候选、原171124和稳定签名后，先完整备份原安装及stage，再按精确PID4851、bundle路径、版本与launchDate请求正常退出。
+- 正常Quit返回accepted=true，约0.256秒后旧进程实际结束，未发送强制结束信号。该结果只说明本次正常退出成功，不据此关闭之前的长时运行退出问题。
+- Applications 已替换为 `20260920102559`，101项清单和稳定签名核对通过。后台启动为PID46221，实际加载安装路径下的 `SuperIsland.debug.dylib`；源码仍为 `7f489e9`。
+- 旧171124保留两份完整备份：`build/WE1-Debug/backups/Installed-SuperIsland-WE1-Debug-171124-before-20260920102559.app` 和 `build/WE1-Debug/backups/Previous-installed-20260918171124-during-20260920102559.app`。191657诊断候选及其分支/标签继续保留。
+- 安装证据在 `build/ConciseFeedback/Install/`，候选清单已回写安装状态。未操作用户其他应用、鼠标、窗口布局或文件；新文案尚无安装后的实机反馈，不扩大为所有布局场景已验收。
