@@ -252,6 +252,8 @@ final class AppState: ObservableObject {
     }
     @Published private(set) var isAppActive: Bool = true
     @Published private(set) var isShelfDragActive = false
+    private var shelfDropTargets = ShelfDropTargetState()
+    private var shelfDragEndWorkItem: DispatchWorkItem?
     @Published private(set) var zilanSuppressionRequestID: String?
     @Published private(set) var islandInputGeneration: UInt64 = 0
     var isZilanInteractionSuppressed: Bool { zilanSuppressionRequestID != nil }
@@ -1558,9 +1560,38 @@ final class AppState: ObservableObject {
         }
     }
 
+    func setShelfDropTarget(_ id: UUID, inside: Bool) {
+        if inside {
+            guard shelfEnabled, !isZilanInteractionSuppressed else { return }
+        }
+        shelfDropTargets.setTarget(id, inside: inside)
+        shelfDragEndWorkItem?.cancel()
+        shelfDragEndWorkItem = nil
+        if shelfDropTargets.isActive {
+            if !isShelfDragActive { beginShelfDragPresentation() }
+            return
+        }
+
+        let token = shelfDropTargets.generation
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.shelfDropTargets.canEnd(generation: token) else { return }
+            self.shelfDragEndWorkItem = nil
+            self.endShelfDragPresentation()
+        }
+        shelfDragEndWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    func completeShelfDropTargets() {
+        shelfDropTargets.completeDrop()
+        shelfDragEndWorkItem?.cancel()
+        shelfDragEndWorkItem = nil
+        endShelfDragPresentation()
+    }
+
     func presentShelfAfterDrop() {
         guard !isZilanInteractionSuppressed else { return }
-        isShelfDragActive = false
+        isShelfDragActive = shelfDropTargets.isActive
         rememberShelfAsDefault()
         guard shelfEnabled, shelfAutoOpenOnDrop else { return }
 

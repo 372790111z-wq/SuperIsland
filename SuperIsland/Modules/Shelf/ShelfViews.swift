@@ -167,7 +167,7 @@ private struct AirDropDropPane: View {
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .onDrop(of: ShelfStore.acceptedDropTypes, isTargeted: $isTargeted) { providers in
+        .shelfDropTarget(.airDrop, isTargeted: $isTargeted) { providers in
             shelf.handleAirDropDrop(providers: providers)
         }
     }
@@ -302,7 +302,7 @@ private struct TrayDropPane: View {
             }
         }
         .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .onDrop(of: ShelfStore.acceptedDropTypes, isTargeted: $isTargeted) { providers in
+        .shelfDropTarget(.tray, isTargeted: $isTargeted) { providers in
             shelf.handleDrop(providers: providers) { addedCount in
                 guard addedCount > 0 else { return }
                 appState.presentShelfAfterDrop()
