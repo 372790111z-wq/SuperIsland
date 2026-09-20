@@ -69,6 +69,7 @@ final class IslandWindowController {
     private var isShowing = false
     private let contentMode: IslandContentMode
     private let zilanInputSuppression = IslandPanelInputSuppression()
+    private var shelfFileDragMonitor: ShelfFileDragMonitor?
 
     init(contentMode: IslandContentMode = .production) {
         self.contentMode = contentMode
@@ -77,6 +78,19 @@ final class IslandWindowController {
     func showIsland() {
         isShowing = true
         syncPanels(display: true)
+        if contentMode == .production {
+            if shelfFileDragMonitor == nil {
+                shelfFileDragMonitor = ShelfFileDragMonitor(appState: appState) { [weak self] in
+                    guard let self, self.isShowing else { return [] }
+                    return self.panels.compactMap { id, panel in
+                        guard !self.hiddenForFullscreen.contains(id), panel.isVisible,
+                              panel.isOnActiveSpace, !panel.ignoresMouseEvents else { return nil }
+                        return panel
+                    }
+                }
+            }
+            shelfFileDragMonitor?.start()
+        }
 
         // The WE1 harness presents a fixed compact shell. Do not install the
         // production state-transition hooks: those size through AppState's
@@ -101,6 +115,7 @@ final class IslandWindowController {
 
     func hideIsland() {
         isShowing = false
+        shelfFileDragMonitor?.stop()
         for panel in panels.values {
             panel.orderOut(nil)
         }
@@ -300,14 +315,6 @@ final class IslandWindowController {
     }
 
     private func targetFrame(size: CGSize, screen: NSScreen) -> NSRect {
-        @MainActor enum DiagnosticState {
-            static let topOffset: CGFloat = {
-                guard Bundle.main.bundleIdentifier == ShelfDropDiagnostics.debugBundleIdentifier,
-                      ProcessInfo.processInfo.environment["WE1_SHELF_PANEL_OFFSET"] == "48" else { return 0 }
-                ShelfDropDiagnostics.record("panel.offset", values: ["points": 48])
-                return 48
-            }()
-        }
         let screenFrame = screen.frame
         let hasNotch = ScreenDetector.hasNotch(screen: screen)
         let notchRect = ScreenDetector.notchRect(screen: screen)
@@ -323,8 +330,7 @@ final class IslandWindowController {
         }
 
         let x = anchorX - size.width / 2
-        // Candidate-only A/B: keep every presentation state below the screen's top edge.
-        let y = anchorY - size.height - DiagnosticState.topOffset
+        let y = anchorY - size.height
         return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
 
@@ -748,6 +754,8 @@ final class IslandWindowController {
     }
 
     deinit {
+        let dragMonitor = shelfFileDragMonitor
+        Task { @MainActor in dragMonitor?.stop() }
         windowEnhancementFeedbackShrinkWorkItem?.cancel()
         if let observer = screenObserver {
             NotificationCenter.default.removeObserver(observer)
