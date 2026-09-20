@@ -693,10 +693,17 @@ final class ShelfStore: ObservableObject {
 
         for type in [UTType.utf8PlainText, .plainText, .text] {
             guard provider.hasItemConformingToTypeIdentifier(type.identifier),
-                  let string = await loadString(from: provider, type: type) else {
+                  let payload = await loadItem(from: provider, typeIdentifier: type.identifier) else {
                 continue
             }
 
+            // Finder can advertise a file's text content type while delivering
+            // its URL. Preserve that file identity instead of treating it as text.
+            if let url = payload as? URL, url.isFileURL {
+                return .file(from: url)
+            }
+
+            guard let string = string(from: payload) else { continue }
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
 
@@ -788,11 +795,7 @@ final class ShelfStore: ObservableObject {
         return nil
     }
 
-    private static func loadString(from provider: NSItemProvider, type: UTType) async -> String? {
-        guard let item = await loadItem(from: provider, typeIdentifier: type.identifier) else {
-            return nil
-        }
-
+    private static func string(from item: NSSecureCoding) -> String? {
         if let string = item as? String {
             return string
         }

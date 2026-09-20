@@ -39,6 +39,73 @@ final class ShelfDropProviderTests: XCTestCase {
         XCTAssertFalse(item.isMissing)
     }
 
+    func testPlainTextTypedProviderReturningNSURLStillResolvesToFile() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = try makeFile(named: "Finder 文本.txt", in: directory)
+        // Finder can advertise the document content type yet return its URL.
+        let provider = NSItemProvider(item: fileURL as NSURL, typeIdentifier: UTType.plainText.identifier)
+
+        let items = await ShelfStore.extractItems(from: [provider])
+
+        let item = try XCTUnwrap(items.first)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(item.kind, .file)
+        XCTAssertEqual(item.displayName, fileURL.lastPathComponent)
+        assertFileURL(item, equals: fileURL)
+        XCTAssertFalse(item.isMissing)
+        XCTAssertNil(item.textValue)
+    }
+
+    func testUTF8AndRichTextTypedURLProvidersPreserveFileIdentity() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let plainURL = try makeFile(named: "plain.txt", in: directory)
+        let richTextURL = directory.appendingPathComponent("rich.rtf")
+        try Data("{\\rtf1\\ansi WE1 fixture}".utf8).write(to: richTextURL)
+        let providers = [
+            NSItemProvider(item: plainURL as NSURL, typeIdentifier: UTType.utf8PlainText.identifier),
+            NSItemProvider(item: richTextURL as NSURL, typeIdentifier: UTType.rtf.identifier)
+        ]
+
+        let items = await ShelfStore.extractItems(from: providers)
+
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items.map(\.kind), [.file, .file])
+        XCTAssertEqual(items.map(\.displayName), ["plain.txt", "rich.rtf"])
+        XCTAssertEqual(
+            items.compactMap { $0.resolvedFileURL?.resolvingSymlinksInPath().path },
+            [plainURL, richTextURL].map { $0.resolvingSymlinksInPath().path }
+        )
+        XCTAssertTrue(items.allSatisfy { !$0.isMissing && $0.textValue == nil })
+    }
+
+    func testActualStringProviderRemainsTextWithoutCreatingAFile() async throws {
+        let provider = NSItemProvider(object: "  普通文本\n第二行  " as NSString)
+
+        let items = await ShelfStore.extractItems(from: [provider])
+
+        let item = try XCTUnwrap(items.first)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(item.kind, .text)
+        XCTAssertEqual(item.textValue, "普通文本\n第二行")
+        XCTAssertNil(item.path)
+        XCTAssertNil(item.resolvedFileURL)
+    }
+
+    func testURLLookingStringProviderKeepsExistingLinkBehavior() async throws {
+        let provider = NSItemProvider(object: "  https://example.invalid/shelf?q=1  " as NSString)
+
+        let items = await ShelfStore.extractItems(from: [provider])
+
+        let item = try XCTUnwrap(items.first)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(item.kind, .link)
+        XCTAssertEqual(item.urlString, "https://example.invalid/shelf?q=1")
+        XCTAssertNil(item.path)
+        XCTAssertNil(item.textValue)
+    }
+
     func testFolderIsKeptAsFolderRatherThanTextOrLink() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
