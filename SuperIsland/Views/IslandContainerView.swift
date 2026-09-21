@@ -177,8 +177,9 @@ struct IslandContainerView: View {
         )
         .shelfDropTarget(.surface, isTargeted: $isShelfDropTargeted,
                          enabled: contentMode == .production && appState.shelfEnabled
+                            && !appState.isShelfPanesVisible
                             && !appState.isZilanInteractionSuppressed) { providers in
-            guard contentMode == .production, appState.shelfEnabled,
+            guard contentMode == .production, appState.shelfEnabled, !appState.isShelfPanesVisible,
                   appState.canHandleIslandInput(generation: inputGeneration) else { return false }
             return ShelfStore.shared.handleDrop(providers: providers) { addedCount in
                 guard addedCount > 0,

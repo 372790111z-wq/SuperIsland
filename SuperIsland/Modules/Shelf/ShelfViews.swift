@@ -96,19 +96,27 @@ struct ShelfFullExpandedView: View {
     @State private var searchText = ""
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: ShelfLayoutMetrics.paneSpacing) {
             AirDropDropPane()
-                .frame(width: 142)
+                .frame(width: sidePaneWidth)
 
             TrayDropPane(
                 items: filteredItems,
                 totalCount: orderedItems.count,
                 isFiltering: !trimmedSearchText.isEmpty,
+                compactLayout: appState.currentContentSize.width < ShelfLayoutMetrics.preferredContentWidth,
                 searchText: $searchText
             )
                 .environmentObject(appState)
+
+            ZIPDropPane()
+                .frame(width: sidePaneWidth)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var sidePaneWidth: CGFloat {
+        ShelfLayoutMetrics.sidePaneWidth(contentWidth: appState.currentContentSize.width)
     }
 
     private var orderedItems: [ShelfItem] {
@@ -186,10 +194,95 @@ private struct AirDropDropPane: View {
     }
 }
 
+private struct ZIPDropPane: View {
+    @ObservedObject private var zip = ShelfZIPCoordinator.shared
+    @State private var isTargeted = false
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Image(systemName: zip.isBusy ? "archivebox" : "archivebox.fill")
+                .font(.system(size: 21, weight: .medium))
+                .foregroundStyle(isTargeted ? Color.accentColor : .white.opacity(0.86))
+                .frame(height: 30)
+
+            Text(zip.title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+
+            Text(isTargeted && zip.isBusy ? "正在处理，请稍后再拖入" : zip.detail)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.white.opacity(0.55))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .help(zip.detail)
+
+            if zip.isBusy {
+                if let progress = zip.progress {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                } else {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+            }
+
+            if zip.canCancel || zip.canRetryFailed || zip.canChooseOutputDirectory {
+                actions
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(isTargeted ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.03))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(
+                    isTargeted ? Color.accentColor.opacity(0.92) : Color.white.opacity(0.12),
+                    style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [8])
+                )
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("ZIP 压缩")
+        // Keep the destination active when busy: it must acknowledge/refuse
+        // this action itself, never bubble into the outer staging receiver.
+        .shelfDropTarget(.zip, isTargeted: $isTargeted) { providers in
+            zip.handleDrop(providers: providers)
+        }
+    }
+
+    private var actions: some View {
+        HStack(spacing: 6) {
+            if zip.canCancel {
+                Button("取消") { zip.cancel() }
+            }
+            if zip.canRetryFailed {
+                Button("重试") { zip.retryFailed() }
+            }
+            if zip.canChooseOutputDirectory {
+                Button { zip.chooseOutputDirectory() } label: {
+                    Image(systemName: "folder")
+                }
+                .help("选择保存位置")
+                .accessibilityLabel("选择保存位置")
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+        .font(.system(size: 10, weight: .medium))
+    }
+}
+
 private struct TrayDropPane: View {
     let items: [ShelfItem]
     let totalCount: Int
     let isFiltering: Bool
+    let compactLayout: Bool
     @Binding var searchText: String
 
     @ObservedObject private var shelf = ShelfStore.shared
@@ -226,9 +319,11 @@ private struct TrayDropPane: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.72))
 
-                        Text(totalCount == 1 ? "1 item" : "\(totalCount) items")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.42))
+                        if !compactLayout {
+                            Text(totalCount == 1 ? "1 item" : "\(totalCount) items")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.42))
+                        }
 
                         Spacer(minLength: 8)
 
@@ -238,7 +333,7 @@ private struct TrayDropPane: View {
                             .foregroundStyle(.white.opacity(0.86))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 5)
-                            .frame(width: 150)
+                            .frame(width: compactLayout ? 82 : 150)
                             .background(
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     .fill(Color.white.opacity(0.06))
@@ -325,6 +420,7 @@ private struct TrayDropPane: View {
 private struct ExpandedShelfChip: View {
     let item: ShelfItem
     @ObservedObject private var shelf = ShelfStore.shared
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
         Button {
@@ -360,7 +456,8 @@ private struct ExpandedShelfChip: View {
         .buttonStyle(.plain)
         .hoverPointer()
         .onDrag {
-            shelf.dragProvider(for: item)
+            ShelfInternalDragSession.shared.begin(appState: appState)
+            return shelf.dragProvider(for: item)
         }
         .contextMenu {
             ShelfItemActionsMenu(item: item)
@@ -371,6 +468,7 @@ private struct ExpandedShelfChip: View {
 private struct TrayItemTile: View {
     let item: ShelfItem
     @ObservedObject private var shelf = ShelfStore.shared
+    @EnvironmentObject private var appState: AppState
     @State private var isHovering = false
 
     var body: some View {
@@ -460,7 +558,8 @@ private struct TrayItemTile: View {
             isHovering = hovering
         }
         .onDrag {
-            shelf.dragProvider(for: item)
+            ShelfInternalDragSession.shared.begin(appState: appState)
+            return shelf.dragProvider(for: item)
         }
         .contextMenu {
             ShelfItemActionsMenu(item: item)

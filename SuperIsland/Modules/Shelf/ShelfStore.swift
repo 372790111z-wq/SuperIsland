@@ -294,6 +294,7 @@ struct ShelfItem: Identifiable, Codable, Hashable {
 @MainActor
 final class ShelfStore: ObservableObject {
     static let shared = ShelfStore()
+    static let localItemTypeIdentifier = "com.workview.superisland.shelf-item"
 
     static let acceptedDropTypes: [UTType] = [
         .fileURL,
@@ -477,10 +478,17 @@ final class ShelfStore: ObservableObject {
         switch item.kind {
         case .file, .folder, .image:
             if let url = item.resolvedFileURL, !item.isMissing {
-                if let provider = NSItemProvider(contentsOf: url) {
-                    return provider
+                let provider = NSItemProvider(contentsOf: url) ?? NSItemProvider(object: url as NSURL)
+                // Keep the original bookmark and managed-image identity when
+                // moving across panes inside this app. Other apps still get
+                // the existing file representation.
+                provider.registerDataRepresentation(
+                    forTypeIdentifier: Self.localItemTypeIdentifier, visibility: .ownProcess
+                ) { completion in
+                    completion(Data(item.id.uuidString.utf8), nil)
+                    return nil
                 }
-                return NSItemProvider(object: url as NSURL)
+                return provider
             }
         case .link:
             if let url = item.resolvedURL {
@@ -609,12 +617,12 @@ final class ShelfStore: ObservableObject {
         for item in items {
             guard item.kind == .image,
                   let url = item.resolvedFileURL,
-                  isManagedImageURL(url) else { continue }
+                  Self.isManagedImageURL(url) else { continue }
             try? FileManager.default.removeItem(at: url)
         }
     }
 
-    private func isManagedImageURL(_ url: URL) -> Bool {
+    static func isManagedImageURL(_ url: URL) -> Bool {
         guard let storageURL = Self.imageStorageURL else { return false }
         let storagePath = storageURL.standardizedFileURL.path
         let itemPath = url.standardizedFileURL.path

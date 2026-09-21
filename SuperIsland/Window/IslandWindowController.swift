@@ -188,7 +188,7 @@ final class IslandWindowController {
         // re-layouts from window changes — no "jump left" on expand.
         let maxSize = contentMode == .windowEnhancementShell
             ? IslandShellMetrics.feedbackSurfaceSize(for: appState)
-            : maxWindowSize
+            : appState.maximumFullExpandedWindowSize
         let hostingView = FirstMouseHostingView(
             rootView: IslandContainerView(contentMode: contentMode)
                 .environmentObject(appState)
@@ -441,6 +441,20 @@ final class IslandWindowController {
 
     private func observeCompactLayoutChanges() {
         guard contentMode == .production else { return }
+
+        appState.$fullExpandedSelectedTab
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.appState.currentState == .fullExpanded else { return }
+                // Switching to Shelf can widen the surface without changing
+                // IslandState. Resize its real input viewport in the same turn.
+                self.applyFrameToAll(size: self.currentWindowSize)
+                for panel in self.panels.values {
+                    panel.contentView?.subviews.forEach { $0.updateTrackingAreas() }
+                }
+            }
+            .store(in: &cancellables)
 
         appState.$activeModule
             .removeDuplicates()
