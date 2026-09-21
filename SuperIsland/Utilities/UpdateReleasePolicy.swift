@@ -91,7 +91,7 @@ struct UpdateReleasePolicy {
                   allowedWE1Download(downloadURL, requireNewer: false),
                   downloadURL.deletingLastPathComponent().lastPathComponent == tag,
                   downloadURL.lastPathComponent == name else { continue }
-            return Offer(version: "WE1 \(build)", build: build, releaseURL: releaseURL, downloadURL: downloadURL)
+            return Offer(version: "SuperIsland \(build)", build: build, releaseURL: releaseURL, downloadURL: downloadURL)
         }
         return nil
     }

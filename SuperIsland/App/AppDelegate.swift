@@ -547,7 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         if let button = item.button {
-            let appName = Self.isWE1DebugBundle ? "SuperIsland WE1" : "SuperIsland"
+            let appName = "SuperIsland"
             button.image = NSImage(systemSymbolName: Constants.menuBarIconName, accessibilityDescription: appName)
             button.toolTip = appName
         }
@@ -750,7 +750,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hostingController.sizingOptions = []
 
         let window = NSWindow(contentViewController: hostingController)
-        window.title = Self.isWE1DebugBundle ? "SuperIsland WE1 设置" : "SuperIsland 设置"
+        window.title = "SuperIsland 设置"
         configureSettingsWindow(window, restoreInitialSizeIfNeeded: true)
         window.isReleasedWhenClosed = false
         window.center()
