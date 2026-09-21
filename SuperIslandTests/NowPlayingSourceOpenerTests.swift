@@ -55,7 +55,9 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
         var activated: [pid_t] = []
         var scripts = 0
         let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in false },
-            executeScript: { _ in scripts += 1; return nil }, activateApplication: { activated.append($0); return true }))
+            executeScript: { _ in scripts += 1; return nil }, activateApplication: { pid, allowReopen in
+                XCTAssertTrue(allowReopen); activated.append(pid); return true
+            }, isWebBrowser: { _ in false }))
         let source = Opener.Snapshot(bundleIdentifier: "com.tencent.QQMusicMac", title: "Song", artist: "Artist",
                                     browserURL: "", isPlaying: false)
         let outcome = await service.open(source, browserDetectionAllowed: true, isCurrent: { true })
@@ -67,7 +69,7 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
     func testExitedSourceDoesNotStartApplication() async {
         let service = Opener(dependencies: .init(runningPID: { _ in nil }, hasAutomationPermission: { _ in
             XCTFail("Permission must not be queried"); return false
-        }, executeScript: { _ in XCTFail("No script for exited source"); return nil }, activateApplication: { _ in
+        }, executeScript: { _ in XCTFail("No script for exited source"); return nil }, activateApplication: { _, _ in
             XCTFail("No activation for exited source"); return true
         }))
         let result = await service.open(snapshot(), browserDetectionAllowed: true, isCurrent: { true })
@@ -78,7 +80,7 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
         for allowDetection in [false, true] {
             var scripts = 0, activations = 0
             let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in false },
-                executeScript: { _ in scripts += 1; return nil }, activateApplication: { _ in activations += 1; return true }))
+                executeScript: { _ in scripts += 1; return nil }, activateApplication: { _, _ in activations += 1; return true }))
             let result = await service.open(snapshot(), browserDetectionAllowed: allowDetection, isCurrent: { true })
             XCTAssertEqual(result, .openedApp)
             XCTAssertEqual(scripts, 0)
@@ -90,7 +92,7 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
         let rows = try encoded([tab()])
         var current = true, scripts = 0
         let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in true },
-            executeScript: { _ in scripts += 1; current = false; return rows }, activateApplication: { _ in
+            executeScript: { _ in scripts += 1; current = false; return rows }, activateApplication: { _, _ in
                 XCTFail("Old source must not steal focus"); return true
             }))
         let result = await service.open(snapshot(), browserDetectionAllowed: true, isCurrent: { current })
@@ -102,7 +104,7 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
         let rows = try encoded([tab()])
         var pid: pid_t = 123
         let service = Opener(dependencies: .init(runningPID: { _ in pid }, hasAutomationPermission: { _ in true },
-            executeScript: { _ in pid = 124; return rows }, activateApplication: { _ in
+            executeScript: { _ in pid = 124; return rows }, activateApplication: { _, _ in
                 XCTFail("Replacement process must not be activated"); return true
             }))
         let result = await service.open(snapshot(), browserDetectionAllowed: true, isCurrent: { true })
@@ -114,7 +116,7 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
         var scripts: [String] = [], activations = 0
         let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in true },
             executeScript: { script in scripts.append(script); return scripts.count == 1 ? rows : "FOCUSED" },
-            activateApplication: { _ in activations += 1; return true }))
+            activateApplication: { _, _ in activations += 1; return true }))
         let result = await service.open(snapshot(), browserDetectionAllowed: true, isCurrent: { true })
         XCTAssertEqual(result, .openedTab)
         XCTAssertEqual(scripts.count, 2)
@@ -128,7 +130,7 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
             var scripts = 0, activations = 0
             let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in true },
                 executeScript: { _ in scripts += 1; return scripts == 1 ? firstResult : "CHANGED" },
-                activateApplication: { _ in activations += 1; return true }))
+                activateApplication: { _, _ in activations += 1; return true }))
             let result = await service.open(snapshot(), browserDetectionAllowed: true, isCurrent: { true })
             XCTAssertEqual(result, .openedApp)
             XCTAssertEqual(activations, 1)
@@ -140,7 +142,7 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
         var current = true, calls = 0
         let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in true },
             executeScript: { _ in calls += 1; if calls == 1 { return rows }; current = false; return "FOCUSED" },
-            activateApplication: { _ in XCTFail("Changed source must not be activated"); return true }))
+            activateApplication: { _, _ in XCTFail("Changed source must not be activated"); return true }))
         let result = await service.open(snapshot(), browserDetectionAllowed: true, isCurrent: { current })
         XCTAssertEqual(result, .cancelled)
     }
@@ -172,5 +174,144 @@ final class NowPlayingSourceOpenerTests: XCTestCase {
         XCTAssertNil(Opener.decodeTabs("1\t2\tbad json"))
         XCTAssertNil(Opener.decodeTabs("INCOMPLETE"))
         XCTAssertNil(Opener.decodeTabs(try encoded(Array(repeating: tab(), count: 33))))
+    }
+
+    func testClosedNativeMainWindowGetsExactlyOneReopenAndVisibleVerification() async {
+        var visible = false, frontmost = false, reopens = 0, waits = 0
+        let result = await Opener.activateExistingApplication(allowReopen: true, environment: .init(observe: {
+            .init(isRunning: true, isFrontmost: frontmost, hasVisibleWindow: visible)
+        }, requestActivation: {
+            frontmost = true
+        }, reopen: {
+            reopens += 1; return true
+        }, wait: {
+            waits += 1
+            // A Qt player can keep old AX windows after close and create its real main
+            // window later. Only the resulting visible window is confirmation.
+            if waits == 4 && reopens == 1 { visible = true }
+        }))
+        XCTAssertTrue(result)
+        XCTAssertEqual(reopens, 1)
+        XCTAssertEqual(waits, 4)
+    }
+
+    func testExistingNativeWindowStillReceivesExplicitApplicationOpenAction() async {
+        var frontmost = false, reopens = 0
+        let result = await Opener.activateExistingApplication(allowReopen: true, environment: .init(observe: {
+            .init(isRunning: true, isFrontmost: frontmost, hasVisibleWindow: true)
+        }, requestActivation: {
+            frontmost = true
+        }, reopen: {
+            reopens += 1; return true
+        }, wait: {}))
+        XCTAssertTrue(result)
+        XCTAssertEqual(reopens, 1)
+    }
+
+    func testBrowserWithoutVisibleWindowIsNotReopenedOrReportedSuccessful() async {
+        var requests = 0, waits = 0
+        let result = await Opener.activateExistingApplication(allowReopen: false, environment: .init(observe: {
+            .init(isRunning: true, isFrontmost: true, hasVisibleWindow: false)
+        }, requestActivation: {
+            requests += 1
+        }, reopen: {
+            XCTFail("Browser reopen could create a new tab/window"); return true
+        }, wait: { waits += 1 }))
+        XCTAssertFalse(result)
+        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(waits, 10)
+    }
+
+    func testAcceptedActivationAndReopenRequestsAreNotActualWindowSuccess() async {
+        var requests = 0
+        let result = await Opener.activateExistingApplication(allowReopen: true, environment: .init(observe: {
+            .init(isRunning: true, isFrontmost: false, hasVisibleWindow: false)
+        }, requestActivation: {
+            requests += 1 // Equivalent to activate() returning true while nothing appears.
+        }, reopen: { true }, wait: {}))
+        XCTAssertFalse(result)
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testReopenPermissionRefusalDoesNotPretendClosedWindowAppeared() async {
+        let result = await Opener.activateExistingApplication(allowReopen: true, environment: .init(observe: {
+            .init(isRunning: true, isFrontmost: true, hasVisibleWindow: false)
+        }, requestActivation: {}, reopen: { false }, wait: {}))
+        XCTAssertFalse(result)
+    }
+
+    func testVisibleButBackgroundWindowDoesNotCountAsActivation() async {
+        let result = await Opener.activateExistingApplication(allowReopen: false, environment: .init(observe: {
+            .init(isRunning: true, isFrontmost: false, hasVisibleWindow: true)
+        }, requestActivation: {}, reopen: { XCTFail("No reopen for browser"); return false }, wait: {}))
+        XCTAssertFalse(result)
+    }
+
+    func testActivationStopsWhenSourceExitsAndCannotRelaunchIt() async {
+        var running = true, waits = 0, reopens = 0
+        let result = await Opener.activateExistingApplication(allowReopen: true, environment: .init(observe: {
+            .init(isRunning: running, isFrontmost: false, hasVisibleWindow: false)
+        }, requestActivation: {}, reopen: { reopens += 1; return true }, wait: {
+            waits += 1; running = false
+        }))
+        XCTAssertFalse(result)
+        XCTAssertEqual(waits, 1)
+        XCTAssertEqual(reopens, 1)
+        let exited = await Opener.activateExistingApplication(allowReopen: true, environment: .init(observe: {
+            .init(isRunning: false, isFrontmost: false, hasVisibleWindow: false)
+        }, requestActivation: { XCTFail("Do not activate an exited source") }, reopen: {
+            XCTFail("Do not reopen an exited source"); return false
+        }, wait: {}))
+        XCTAssertFalse(exited)
+    }
+
+    func testAllBrowserFallbackRoutesForbidReopen() async {
+        for bundle in ["com.google.Chrome", "com.google.Chrome.canary", "com.apple.Safari", "com.microsoft.edgemac"] {
+            let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in false },
+                executeScript: { _ in XCTFail("Disabled browser detection"); return nil },
+                activateApplication: { _, allowReopen in XCTAssertFalse(allowReopen); return true }))
+            let source = Opener.Snapshot(bundleIdentifier: bundle, title: "Song", artist: "Artist", browserURL: "", isPlaying: true)
+            let result = await service.open(source, browserDetectionAllowed: false, isCurrent: { true })
+            XCTAssertEqual(result, .openedApp)
+        }
+    }
+
+    func testUnknownBrowserWithoutCachedURLCannotReopenByHandlerOrSchemeIdentity() async {
+        let unknownBrowser = "example.new-browser"
+        let classifications = [
+            Opener.classifyWebBrowser(bundleIdentifier: unknownBrowser, declaredSchemes: [],
+                                      httpHandlers: ["com.apple.Safari", unknownBrowser], httpsHandlers: ["com.apple.Safari"]),
+            Opener.classifyWebBrowser(bundleIdentifier: unknownBrowser, declaredSchemes: ["HTTPS"],
+                                      httpHandlers: ["com.apple.Safari"], httpsHandlers: ["com.apple.Safari"])
+        ]
+        for classification in classifications {
+            XCTAssertEqual(classification, true)
+            let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in false },
+                executeScript: { _ in XCTFail("No browser script needed"); return nil },
+                activateApplication: { _, allowReopen in XCTAssertFalse(allowReopen); return true },
+                isWebBrowser: { _ in classification }))
+            let source = Opener.Snapshot(bundleIdentifier: unknownBrowser, title: "Song", artist: "Artist", browserURL: "", isPlaying: true)
+            let result = await service.open(source, browserDetectionAllowed: false, isCurrent: { true })
+            XCTAssertEqual(result, .openedApp)
+        }
+    }
+
+    func testUncertainBrowserLookupCannotReopenButConfirmedQQMusicCan() async {
+        let sourceID = "com.tencent.QQMusicMac"
+        let knownNative = Opener.classifyWebBrowser(bundleIdentifier: sourceID, declaredSchemes: ["qqmusic"],
+                                                   httpHandlers: ["com.apple.Safari"], httpsHandlers: ["com.google.Chrome"])
+        XCTAssertEqual(knownNative, false)
+        let uncertain = Opener.classifyWebBrowser(bundleIdentifier: sourceID, declaredSchemes: ["qqmusic"],
+                                                 httpHandlers: nil, httpsHandlers: ["com.apple.Safari"])
+        XCTAssertNil(uncertain)
+        for classification in [knownNative, uncertain] {
+            let service = Opener(dependencies: .init(runningPID: { _ in 123 }, hasAutomationPermission: { _ in false },
+                executeScript: { _ in XCTFail("Native source has no script"); return nil },
+                activateApplication: { _, allowReopen in XCTAssertEqual(allowReopen, classification == false); return true },
+                isWebBrowser: { _ in classification }))
+            let source = Opener.Snapshot(bundleIdentifier: sourceID, title: "Song", artist: "Artist", browserURL: "", isPlaying: true)
+            let result = await service.open(source, browserDetectionAllowed: false, isCurrent: { true })
+            XCTAssertEqual(result, .openedApp)
+        }
     }
 }
