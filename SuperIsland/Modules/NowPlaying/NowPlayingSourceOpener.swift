@@ -29,12 +29,34 @@ final class NowPlayingSourceOpener {
         var runningPID: (String) -> pid_t?
         var hasAutomationPermission: (pid_t) -> Bool
         var executeScript: (String) async -> String?
-        var activateApplication: (pid_t) -> Bool
+        var activateApplication: (pid_t, _ allowReopen: Bool) async -> Bool
+        /// nil means that browser identity could not be safely determined.
+        var isWebBrowser: (String) -> Bool? = { _ in nil }
+    }
+
+    struct ActivationObservation {
+        let isRunning: Bool
+        let isFrontmost: Bool
+        let hasVisibleWindow: Bool
+    }
+
+    struct ActivationEnvironment {
+        var observe: () -> ActivationObservation
+        var requestActivation: () -> Void
+        var reopen: () -> Bool
+        var wait: () async -> Void
     }
 
     private let dependencies: Dependencies
     private static let scriptQueue = DispatchQueue(label: "com.workview.SuperIsland.source-opener", qos: .userInitiated)
     private static let chromeBundleIDs: Set<String> = ["com.google.Chrome", "com.google.Chrome.canary"]
+    private static let otherBrowserBundleIDs: Set<String> = [
+        "com.apple.Safari", "com.apple.SafariTechnologyPreview", "com.microsoft.edgemac",
+        "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Canary",
+        "org.mozilla.firefox", "org.mozilla.nightly", "com.brave.Browser", "com.brave.Browser.beta",
+        "com.brave.Browser.nightly", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+        "company.thebrowser.Browser", "org.chromium.Chromium", "com.kagi.kagimacOS", "app.zen-browser.zen"
+    ]
 
     init(dependencies: Dependencies? = nil) {
         self.dependencies = dependencies ?? Self.liveDependencies()
@@ -67,14 +89,39 @@ final class NowPlayingSourceOpener {
                 guard !Task.isCancelled, isCurrent() else { return .cancelled }
                 guard dependencies.runningPID(snapshot.bundleIdentifier) == pid else { return .unavailable }
                 if focused {
-                    return dependencies.activateApplication(pid) ? .openedTab : .unavailable
+                    let activated = await dependencies.activateApplication(pid, false)
+                    guard !Task.isCancelled, isCurrent() else { return .cancelled }
+                    return activated ? .openedTab : .unavailable
                 }
             }
         }
 
         guard !Task.isCancelled, isCurrent() else { return .cancelled }
         guard dependencies.runningPID(snapshot.bundleIdentifier) == pid else { return .unavailable }
-        return dependencies.activateApplication(pid) ? .openedApp : .unavailable
+        let allowReopen = snapshot.browserURL.isEmpty
+            && !Self.chromeBundleIDs.contains(snapshot.bundleIdentifier)
+            && !Self.otherBrowserBundleIDs.contains(snapshot.bundleIdentifier)
+            && dependencies.isWebBrowser(snapshot.bundleIdentifier) == false
+        let activated = await dependencies.activateApplication(pid, allowReopen)
+        guard !Task.isCancelled, isCurrent() else { return .cancelled }
+        return activated ? .openedApp : .unavailable
+    }
+
+    /// A successful activation request is not evidence of a visible application. Reopen is
+    /// explicit and native-only: some players retain stale AX windows after their red close button.
+    static func activateExistingApplication(allowReopen: Bool, environment: ActivationEnvironment) async -> Bool {
+        guard !Task.isCancelled, environment.observe().isRunning else { return false }
+        if allowReopen { _ = environment.reopen() }
+        guard environment.observe().isRunning else { return false }
+        environment.requestActivation()
+        for _ in 0..<10 {
+            await environment.wait()
+            guard !Task.isCancelled else { return false }
+            let observation = environment.observe()
+            guard observation.isRunning else { return false }
+            if observation.isFrontmost && observation.hasVisibleWindow { return true }
+        }
+        return false
     }
 
     /// A stale URL never wins over live metadata. Repeated matching tabs remain ambiguous
@@ -241,7 +288,7 @@ final class NowPlayingSourceOpener {
     private static func liveDependencies() -> Dependencies {
         .init(runningPID: { bundleIdentifier in
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
-                .filter { !$0.isTerminated && $0.activationPolicy == .regular }
+                .filter { !$0.isTerminated && $0.activationPolicy != .prohibited }
             return apps.count == 1 ? apps[0].processIdentifier : nil
         }, hasAutomationPermission: { processID in
             var processID = processID
@@ -260,25 +307,116 @@ final class NowPlayingSourceOpener {
                     continuation.resume(returning: error == nil ? result?.stringValue : nil)
                 }
             }
-        }, activateApplication: { processID in
+        }, activateApplication: { processID, allowReopen in
             guard let app = NSRunningApplication(processIdentifier: processID), !app.isTerminated else { return false }
-            _ = app.unhide()
-            let activated = app.activate(options: [])
-            if activated && AXIsProcessTrusted() {
+            return await activateExistingApplication(allowReopen: allowReopen, environment: .init(observe: {
+                let isRunning = !app.isTerminated
+                    && NSRunningApplication(processIdentifier: processID)?.isEqual(app) == true
+                let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                    as? [[String: Any]] ?? []
+                let visible = rows.contains { row in
+                    guard row[kCGWindowOwnerPID as String] as? Int32 == processID,
+                          row[kCGWindowLayer as String] as? Int == 0,
+                          (row[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                          let bounds = row[kCGWindowBounds as String] as? [String: Any],
+                          let width = bounds["Width"] as? Double,
+                          let height = bounds["Height"] as? Double else { return false }
+                    return width >= 80 && height >= 50
+                }
+                return .init(isRunning: isRunning,
+                             isFrontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier == processID,
+                             hasVisibleWindow: !app.isHidden && visible)
+            }, requestActivation: {
+                guard !app.isTerminated else { return }
+                _ = app.unhide()
+                _ = app.activate(options: [])
+                // The Dock preview already uses this exact AX frontmost/focus/raise sequence.
+                // Do not gate it on the activation request's return value.
+                guard AXIsProcessTrusted() else { return }
                 let application = AXUIElementCreateApplication(processID)
                 AXUIElementSetMessagingTimeout(application, 0.15)
-                for attribute in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
-                    var value: CFTypeRef?
-                    guard AXUIElementCopyAttributeValue(application, attribute as CFString, &value) == .success,
-                          let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { continue }
-                    let window = unsafeBitCast(value, to: AXUIElement.self)
+                _ = AXUIElementSetAttributeValue(application, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                if let window = restorableWindow(application: application, processID: processID) {
                     AXUIElementSetMessagingTimeout(window, 0.15)
                     _ = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                    _ = AXUIElementSetAttributeValue(application, kAXFocusedWindowAttribute as CFString, window)
+                    _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
                     _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                    break
+                }
+            }, reopen: {
+                guard !app.isTerminated else { return false }
+                return sendReopen(to: processID)
+            }, wait: {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }))
+        }, isWebBrowser: { bundleIdentifier in
+            let applications = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+                .filter { !$0.isTerminated && $0.activationPolicy != .prohibited }
+            guard applications.count == 1, let appURL = applications[0].bundleURL,
+                  let bundle = Bundle(url: appURL), let info = bundle.infoDictionary,
+                  info["CFBundleIdentifier"] as? String == bundleIdentifier else { return nil }
+            var schemes: [String] = []
+            if let rawTypes = info["CFBundleURLTypes"] {
+                guard let types = rawTypes as? [[String: Any]] else { return nil }
+                for type in types {
+                    guard let declared = type["CFBundleURLSchemes"] as? [String] else { return nil }
+                    schemes.append(contentsOf: declared)
                 }
             }
-            return activated
+            // LaunchServices lookup only: these URLs are never opened or requested.
+            func handlerIDs(for scheme: String) -> [String]? {
+                guard let url = URL(string: "\(scheme)://example.invalid") else { return nil }
+                let urls = NSWorkspace.shared.urlsForApplications(toOpen: url)
+                guard !urls.isEmpty else { return nil }
+                let identifiers = urls.compactMap { Bundle(url: $0)?.bundleIdentifier }
+                return identifiers.count == urls.count ? identifiers : nil
+            }
+            return classifyWebBrowser(bundleIdentifier: bundleIdentifier, declaredSchemes: schemes,
+                                      httpHandlers: handlerIDs(for: "http"), httpsHandlers: handlerIDs(for: "https"))
         })
+    }
+
+    static func classifyWebBrowser(bundleIdentifier: String, declaredSchemes: [String],
+                                   httpHandlers: [String]?, httpsHandlers: [String]?) -> Bool? {
+        if declaredSchemes.contains(where: { ["http", "https"].contains($0.lowercased()) }) { return true }
+        guard let httpHandlers, !httpHandlers.isEmpty, let httpsHandlers, !httpsHandlers.isEmpty else { return nil }
+        return httpHandlers.contains(bundleIdentifier) || httpsHandlers.contains(bundleIdentifier)
+    }
+
+    private static func restorableWindow(application: AXUIElement, processID: pid_t) -> AXUIElement? {
+        var candidates: [AXUIElement] = []
+        for attribute in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(application, attribute as CFString, &value) == .success,
+               let value, CFGetTypeID(value) == AXUIElementGetTypeID() {
+                candidates.append(unsafeBitCast(value, to: AXUIElement.self))
+            }
+        }
+        if candidates.isEmpty {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
+               let windows = value as? [AXUIElement] {
+                candidates.append(contentsOf: windows.prefix(8))
+            }
+        }
+        return candidates.first { window in
+            var owner: pid_t = 0
+            return AXUIElementGetPid(window, &owner) == .success && owner == processID
+        }
+    }
+
+    /// Targeting an existing PID cannot launch an exited source. This is the reopen event
+    /// used for an explicit application-open action, with no documents or playback commands.
+    private static func sendReopen(to processID: pid_t) -> Bool {
+        var processID = processID
+        guard let address = NSAppleEventDescriptor(descriptorType: typeKernelProcessID,
+                                                  bytes: &processID, length: MemoryLayout<pid_t>.size) else { return false }
+        let event = NSAppleEventDescriptor(eventClass: AEEventClass(kCoreEventClass),
+                                          eventID: AEEventID(kAEReopenApplication), targetDescriptor: address,
+                                          returnID: AEReturnID(kAutoGenerateReturnID),
+                                          transactionID: AETransactionID(kAnyTransactionID))
+        event.setParam(NSAppleEventDescriptor(boolean: true), forKeyword: AEKeyword(kAEApplicationActivationExpected))
+        let options = AESendMode(kAENoReply | kAENeverInteract | kAEDoNotPromptForUserConsent)
+        return AESendMessage(event.aeDesc, nil, options, 15) == noErr
     }
 }
