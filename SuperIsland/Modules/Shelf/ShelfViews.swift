@@ -457,7 +457,7 @@ private struct ExpandedShelfChip: View {
         .hoverPointer()
         .onDrag {
             ShelfInternalDragSession.shared.begin(appState: appState)
-            return shelf.dragProvider(for: item)
+            return ShelfStore.dragProvider(for: item)
         }
         .contextMenu {
             ShelfItemActionsMenu(item: item)
@@ -559,7 +559,7 @@ private struct TrayItemTile: View {
         }
         .onDrag {
             ShelfInternalDragSession.shared.begin(appState: appState)
-            return shelf.dragProvider(for: item)
+            return ShelfStore.dragProvider(for: item)
         }
         .contextMenu {
             ShelfItemActionsMenu(item: item)

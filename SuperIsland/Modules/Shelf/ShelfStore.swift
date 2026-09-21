@@ -474,11 +474,14 @@ final class ShelfStore: ObservableObject {
         touch(item)
     }
 
-    func dragProvider(for item: ShelfItem) -> NSItemProvider {
+    static func dragProvider(for item: ShelfItem) -> NSItemProvider {
         switch item.kind {
         case .file, .folder, .image:
             if let url = item.resolvedFileURL, !item.isMissing {
-                let provider = NSItemProvider(contentsOf: url) ?? NSItemProvider(object: url as NSURL)
+                // Export the original reference, not file contents. SwiftUI
+                // materializes content-backed providers in a Drag cache and
+                // loses the source directory (and sometimes the filename).
+                let provider = NSItemProvider(object: url as NSURL)
                 // Keep the original bookmark and managed-image identity when
                 // moving across panes inside this app. Other apps still get
                 // the existing file representation.

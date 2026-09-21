@@ -53,6 +53,56 @@ final class ShelfZIPDropLoaderTests: XCTestCase {
         guard case .unavailable = result else { return XCTFail("Expected bounded failure") }
         try await Task.sleep(nanoseconds: 200_000_000)
     }
+
+    func testShelfExportProvidesOriginalFileURLInsteadOfContents() async throws {
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("保留名称.zip")
+        try Data("fixture".utf8).write(to: url)
+        let source = ShelfItem.file(from: url)
+        let originalURL = try XCTUnwrap(source.resolvedFileURL)
+        let provider = ShelfStore.dragProvider(for: source)
+        XCTAssertTrue(provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier))
+        let result = await ShelfZIPDropLoader.load(provider, existingItems: [])
+        guard case .file(let item) = result else { return XCTFail("Expected original URL") }
+        XCTAssertEqual(item.path, originalURL.path)
+        XCTAssertEqual(item.displayName, url.lastPathComponent)
+    }
+
+    func testURLOnlyBridgeRecoversManagedImageIdentity() async {
+        let item = ShelfItem(kind: .image, displayName: "粘贴图片.png", path: "/tmp/owned-uuid.png")
+        let provider = NSItemProvider(object: URL(fileURLWithPath: item.path!) as NSURL)
+        let result = await ShelfZIPDropLoader.load(provider, existingItems: [item])
+        guard case .file(let resolved) = result else { return XCTFail("Expected file") }
+        XCTAssertEqual(resolved.id, item.id)
+        XCTAssertEqual(resolved.displayName, "粘贴图片.png")
+    }
+
+    func testSameFilenameAtDifferentPathDoesNotBorrowShelfIdentity() async {
+        let item = ShelfItem(kind: .image, displayName: "original", path: "/tmp/owned/photo.png")
+        let url = URL(fileURLWithPath: "/tmp/other/photo.png")
+        let result = await ShelfZIPDropLoader.load(NSItemProvider(object: url as NSURL), existingItems: [item])
+        guard case .file(let resolved) = result else { return XCTFail("Expected file") }
+        XCTAssertNotEqual(resolved.id, item.id)
+        XCTAssertEqual(resolved.path, url.path)
+    }
+
+    func testResolvedBookmarkTakesPriorityOverStaleStoredPath() async throws {
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let current = directory.appendingPathComponent("current.txt")
+        let old = directory.appendingPathComponent("old.txt")
+        try Data("current".utf8).write(to: current)
+        try Data("different file now at old location".utf8).write(to: old)
+        let bookmark = try current.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+        let item = ShelfItem(kind: .file, displayName: "moved", path: old.path, bookmarkData: bookmark)
+        let result = await ShelfZIPDropLoader.load(NSItemProvider(object: old as NSURL), existingItems: [item])
+        guard case .file(let resolved) = result else { return XCTFail("Expected file") }
+        XCTAssertNotEqual(resolved.id, item.id)
+        XCTAssertEqual(resolved.path, old.path)
+    }
 }
 
 @MainActor
