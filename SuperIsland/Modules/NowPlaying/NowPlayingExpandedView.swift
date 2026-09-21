@@ -19,7 +19,9 @@ struct NowPlayingExpandedView: View {
     private var compactExpandedView: some View {
         HStack(spacing: 12) {
             // Album art
-            AlbumArtView(image: manager.albumArt, size: 56)
+            NowPlayingSourceButton {
+                AlbumArtView(image: manager.albumArt, size: 56)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(manager.title)
@@ -57,7 +59,9 @@ struct NowPlayingExpandedView: View {
     private var fullView: some View {
         VStack(spacing: 8) {
             HStack(spacing: 16) {
-                AlbumArtView(image: manager.albumArt, size: 90)
+                NowPlayingSourceButton {
+                    AlbumArtView(image: manager.albumArt, size: 90)
+                }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(manager.title)

@@ -147,12 +147,16 @@ struct IslandContainerView: View {
             isCompact: appState.currentState == .compact,
             givesNestedScrollViewsPriority: appState.isShelfPanesVisible ||
                 (appState.currentState == .expanded && appState.activeBuiltInModule == .shelf),
+            diagnosticModule: IslandSwipeDiagnostics.module(in: appState),
+            diagnosticState: IslandSwipeDiagnostics.stateCode(appState.currentState),
             inputGeneration: inputGeneration,
             onTrackpad: {
+                recordSwipeGenerationGate(captured: inputGeneration)
                 guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
                 handleHorizontalSwipe($0)
             },
             onDragEnded: { value, generation in
+                recordSwipeGenerationGate(captured: generation)
                 guard appState.canHandleIslandInput(generation: generation) else { return }
                 handleSwipe(value: value)
             }
@@ -400,6 +404,17 @@ struct IslandContainerView: View {
             }
 
             currentExpandedContent
+                .background {
+                    if contentMode == .production && IslandSwipeDiagnostics.runtimeEnabled {
+                        IslandSwipePageMarker(
+                            module: IslandSwipeDiagnostics.module(in: appState),
+                            state: IslandSwipeDiagnostics.stateCode(appState.currentState)
+                        )
+                        // Only the invisible marker changes identity. The
+                        // real page and its managers keep their lifecycle.
+                        .id("\(IslandSwipeDiagnostics.module(in: appState).rawValue).\(IslandSwipeDiagnostics.stateCode(appState.currentState))")
+                    }
+                }
                 .padding(.horizontal, appState.contentHorizontalPadding)
                 .padding(.top, appState.contentTopPadding)
                 .padding(.bottom, appState.contentBottomPadding)
@@ -430,6 +445,17 @@ struct IslandContainerView: View {
     }
 
     // MARK: - Gestures
+
+    private func recordSwipeGenerationGate(captured: UInt64) {
+        guard IslandSwipeDiagnostics.runtimeEnabled else { return }
+        let allowed = appState.canHandleIslandInput(generation: captured)
+        IslandSwipeDiagnostics.record(.generationGate, module: IslandSwipeDiagnostics.module(in: appState),
+                                      reason: allowed ? .allowed : .generationRejected, values: [
+            .capturedGeneration: Int64(clamping: captured),
+            .generation: Int64(clamping: appState.islandInputGeneration),
+            .state: IslandSwipeDiagnostics.stateCode(appState.currentState)
+        ])
+    }
 
     private func handleSwipe(value: DragGesture.Value) {
         guard !appState.isZilanInteractionSuppressed else { return }
@@ -618,6 +644,8 @@ private struct IslandSurfaceSwipeModifier: ViewModifier {
     let enabled: Bool
     let isCompact: Bool
     let givesNestedScrollViewsPriority: Bool
+    let diagnosticModule: IslandSwipeDiagnostics.Module
+    let diagnosticState: Int64
     let inputGeneration: UInt64
     let onTrackpad: (SwipeDirection) -> Void
     let onDragEnded: (DragGesture.Value, UInt64) -> Void
@@ -627,8 +655,15 @@ private struct IslandSurfaceSwipeModifier: ViewModifier {
     func body(content: Content) -> some View {
         if enabled {
             content
-                .onTrackpadSwipe(givesNestedScrollViewsPriority: givesNestedScrollViewsPriority) { direction in
-                    guard !isCompact else { return }
+                .onTrackpadSwipe(
+                    givesNestedScrollViewsPriority: givesNestedScrollViewsPriority,
+                    diagnosticModule: diagnosticModule, diagnosticState: diagnosticState,
+                    diagnosticGeneration: inputGeneration
+                ) { direction in
+                    guard !isCompact else {
+                        IslandSwipeDiagnostics.record(.generationGate, module: diagnosticModule, reason: .compact)
+                        return
+                    }
                     onTrackpad(direction)
                 }
                 .gesture(
@@ -647,5 +682,18 @@ private struct IslandSurfaceSwipeModifier: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+private struct IslandSwipePageMarker: View {
+    let module: IslandSwipeDiagnostics.Module
+    let state: Int64
+
+    var body: some View {
+        Color.clear
+            .allowsHitTesting(false)
+            .onAppear {
+                IslandSwipeDiagnostics.record(.pageAppeared, module: module, values: [.state: state])
+            }
     }
 }
