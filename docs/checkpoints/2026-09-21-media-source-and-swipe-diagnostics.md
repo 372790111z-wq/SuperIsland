@@ -38,3 +38,12 @@
 - 网页来源不发送 reopen。除已知浏览器名单和缓存网页来源之外，再检查 LaunchServices 的 HTTP/HTTPS handler 与来源 Bundle 声明的 URL schemes；无法确认按未知处理，不允许 reopen。
 - 本机只读验证：HTTP/HTTPS 各 7 个 handler 均可读，QQ 音乐不在列表，且声明的 scheme 不含 HTTP/HTTPS，因此允许原生 reopen。
 - 139 项相关回归通过，其中来源打开 24 项、切页诊断 9 项，其余 106 项覆盖此前暂存/ZIP/滚动/拖放边界；真实 QQ 主窗口重开仍需新版安装后确认。
+
+## 160622 安装记录
+
+- 已安装 `/Applications/SuperIsland-WE1-Debug.app`，版本 `20260921160622`，源码 `fd8ea9873bd6f30577dcc06daa04cab2ba086273`，新进程 PID `65539`。
+- 可执行文件 SHA-256：`e2087944c38eedb767288ba0a54bb9cebaffb1b2aa99f2e91e58fb8a87b522aa`。Release arm64、严格签名、稳定 designated requirement、安装后哈希及运行态回读均通过。
+- 仅替换并重启 WE1。154800 另存于 `build/WE1MediaSource.noindex/Rollback/SuperIsland-WE1-Debug-20260921154800.app`，144151 完整回退包保持不变。
+- 本次运行继续启用切页诊断；暂存诊断未开启。源码与检查点仅本地 Git 保存，未推送远端。
+- 最终自动验证：`build/WE1MediaSource.noindex/Tests-final.xcresult`（139/139）、`release-final.log`、`candidate.json`、`installation.json`、`runtime-verification.json`。
+- 已请用户验证“关闭 QQ 音乐主窗口后点击封面”，当前待回复；不把自动测试或安装成功当作该场景验收。
