@@ -46,6 +46,15 @@ enum ShelfZIPDropLoader {
             url = nil
         }
         guard let url, url.isFileURL else { return .unsupported }
+        // SwiftUI may omit own-process representations when bridging a drag.
+        // Match the original URL exactly to retain managed-image names and
+        // bookmarks. Never use basenames or a stale pre-move stored path.
+        if let existing = existingItems.first(where: {
+            $0.isFileBacked &&
+            $0.resolvedFileURL?.standardizedFileURL.path == url.standardizedFileURL.path
+        }) {
+            return .file(existing)
+        }
         let didAccess = url.startAccessingSecurityScopedResource()
         defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
         return .file(.file(from: url))

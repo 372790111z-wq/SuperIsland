@@ -40,3 +40,12 @@
 - 候选二进制 SHA-256：`7e5a969d37743c3a0dec8e38962213e98b3a3ddcd163a6d415095612181a7361`。
 - 沿用 `SuperIsland WE1 Debug Local Code Signing`，签名要求与已安装 001213 一致，严格签名验证通过；无覆盖率代码、debug dylib 或测试包。
 - 构建清单：`build/WE1ShelfZIP.noindex/candidate.json`；状态为未安装、未原生实测。
+
+## 安装实测发现与内部拖动修复
+
+- 用户确认后安装了 114718，完整 001213 保留在 `build/WE1ShelfZIP.noindex/Rollback/SuperIsland-WE1-Debug-20260921001213.app`，哈希和签名核验通过。
+- 114718 从 Finder 拖入文件、文件夹及重复编号通过；实际 ZIP 解压/CRC/UTF-8 检查通过，保留空目录并过滤元数据。暂存接收、AirDrop 面板出现后取消均通过；测试路径未观察到调度中心根节点或 Finder 窗口变形。
+- 内部拖动仅“有输出”不够：回读结果发现 ZIP 被写到 `~/Library/Caches/com.apple.SwiftUI.Drag-…`。`NSItemProvider(contentsOf:)` 提供内容，SwiftUI 把它物化成缓存副本，原路径和自定义进程内身份未保留。证据在 `native-internal-failure-114718.json`。
+- 修复：暂存项拖出统一提供原始 NSURL，避免内容副本；ZIP loader 在进程内身份缺失时，只用现有项当前解析 URL 精确匹配，保留托管图片名称与书签。不同目录同名文件不匹配，不用可能过期的存储路径替代已解析书签，不新增事件监听或拖动身份状态。
+- 修复后相关测试增至 88 项，全通过（`Tests5.xcresult`），Release 构建通过（`release2.log`）。新增覆盖文件 URL 导出、URL-only 内部身份恢复、同名路径区分及旧路径被占用的书签边界。
+- 此处记录代码与测试结果；修复后的安装包和原生复测结果追加在后续安装记录中。114718 不标记为完整验收通过。
