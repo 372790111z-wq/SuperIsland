@@ -1,5 +1,7 @@
 # 音乐封面入口与切页诊断
 
+当前状态：用户已确认 160622 没问题，并要求正式打包、本轮收尾。已制作本地稳定 DMG/ZIP；程序保持验收时的源码、构建号和签名；安装包普通启动默认关闭临时诊断，当前进程保留（见收尾观察）。
+
 ## 范围与回退
 
 - 用户确认整张封面（包含右下角来源小图标）可点击，打开对应播放 App 或已有网页。开始代码、测试和安装验证；不写新 PRD。
@@ -37,13 +39,28 @@
 - 恢复窗口时补充与既有 Dock 路径一致的 AX 前台、聚焦与 raise；随后异步等待最多约 1 秒。仅当原进程仍运行、已成为前台且有实际可见普通窗口时，才向 Manager 报告成功。
 - 网页来源不发送 reopen。除已知浏览器名单和缓存网页来源之外，再检查 LaunchServices 的 HTTP/HTTPS handler 与来源 Bundle 声明的 URL schemes；无法确认按未知处理，不允许 reopen。
 - 本机只读验证：HTTP/HTTPS 各 7 个 handler 均可读，QQ 音乐不在列表，且声明的 scheme 不含 HTTP/HTTPS，因此允许原生 reopen。
-- 139 项相关回归通过，其中来源打开 24 项、切页诊断 9 项，其余 106 项覆盖此前暂存/ZIP/滚动/拖放边界；真实 QQ 主窗口重开仍需新版安装后确认。
+- 139 项相关回归通过，其中来源打开 24 项、切页诊断 9 项，其余 106 项覆盖此前暂存/ZIP/滚动/拖放边界。随后用户确认包含 QQ 主窗口重开修复的 160622 版本没有问题。
 
 ## 160622 安装记录
 
 - 已安装 `/Applications/SuperIsland-WE1-Debug.app`，版本 `20260921160622`，源码 `fd8ea9873bd6f30577dcc06daa04cab2ba086273`，新进程 PID `65539`。
 - 可执行文件 SHA-256：`e2087944c38eedb767288ba0a54bb9cebaffb1b2aa99f2e91e58fb8a87b522aa`。Release arm64、严格签名、稳定 designated requirement、安装后哈希及运行态回读均通过。
 - 仅替换并重启 WE1。154800 另存于 `build/WE1MediaSource.noindex/Rollback/SuperIsland-WE1-Debug-20260921154800.app`，144151 完整回退包保持不变。
-- 本次运行继续启用切页诊断；暂存诊断未开启。源码与检查点仅本地 Git 保存，未推送远端。
+- 安装验证期间启用切页诊断，暂存诊断未开启；打包默认普通启动不启用临时诊断；本次退出请求未完成，当前进程尚保留临时诊断。源码与检查点仅本地 Git 保存，未推送远端。
 - 最终自动验证：`build/WE1MediaSource.noindex/Tests-final.xcresult`（139/139）、`release-final.log`、`candidate.json`、`installation.json`、`runtime-verification.json`。
-- 已请用户验证“关闭 QQ 音乐主窗口后点击封面”，当前待回复；不把自动测试或安装成功当作该场景验收。
+- 2026-09-21 用户在该验证请求后明确回复：“这版没问题了，先正式打包吧。等有问题了我再找你。”据此记录本版用户验收，不扩大为未单独测试场景的逐项验证。
+
+## 已验收稳定安装包
+
+- 交付目录：`/Users/muyz/Projects/new super island/releases/WE1-20260921160622-arm64/`。
+- DMG：`SuperIsland-WE1-20260921160622-arm64.dmg`，11,120,773 字节。SHA-256：`ed0aac99d20b728612f8e368dac6c6bdeb8a36bcee19e53172ee7c6263e7d661`。
+- ZIP：`SuperIsland-WE1-20260921160622-arm64.zip`，11,317,207 字节。SHA-256：`f4efc62d4899fe451876e9db38e4a680a5fbea4befab4a017374726d0276a8a9`。
+- 同目录保留 `使用说明.txt`、`manifest.json`、`SHA256SUMS.txt`。适用 Apple 芯片 Mac / macOS 14+；应用版本仍为 1.0.9 / 20260921160622。
+- 直接封装已验收签名包，未重新编译、修改 App 或重新签名。候选、已安装包、暂存副本、只读挂载 DMG 内 App、ZIP 解压 App 的完整文件内容、权限与软链接逐项一致，严格签名全部通过；DMG 镜像和 ZIP 完整性检查通过。
+- 包内继续保留当前 `SuperIsland-WE1-Debug.app` 名称及 bundle identity，以沿用已有授权和配置。构建本身为 Release 优化；签名为本机稳定签名，未 Apple Developer ID 公证，未上传或公开发行。
+- 收尾尝试通过普通退出、再通过 WE1 自带 SIGTERM 正常退出处理器退出诊断模式，均未观察到进程退出；没有强制终止或重新安装。当前 160622 进程保留，应用文件和回退包未变。实际状态回读见 `build/WE1Accepted160622.noindex/normal-launch.json`，完整比对清单为 `bundle-files.json`。
+- 验收检查点：`we1-160622-accepted-20260921`。本轮到此收尾，后续发现问题再继续。
+
+### 收尾观察
+
+普通退出请求返回已发送，但进程 PID 65539 保留。三秒采样主线程主要停在正常 AppKit 事件等待，未观察到持续主线程卡死；退出未完成的原因尚未确定，不继续扩展开发。当前进程的切页诊断仍启用且有界，安装包下一次普通启动默认关闭。记录为未解决的运行态观察，不将其写成诊断已关闭或正常重启成功。
