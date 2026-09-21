@@ -115,7 +115,11 @@ private struct HomeNowPlayingPanel: View {
                     }
 
                     HStack(alignment: .center, spacing: 18) {
-                        albumArt
+                        NowPlayingSourceButton {
+                            albumArt
+                                .padding(.trailing, 4)
+                                .padding(.bottom, 4)
+                        }
 
                         controlsRow
                             .frame(maxWidth: .infinity, alignment: .center)

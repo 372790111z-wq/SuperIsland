@@ -57,11 +57,16 @@ extension View {
 
     func onTrackpadSwipe(
         givesNestedScrollViewsPriority: Bool = false,
+        diagnosticModule: IslandSwipeDiagnostics.Module = .none,
+        diagnosticState: Int64 = 0,
+        diagnosticGeneration: UInt64 = 0,
         perform action: @escaping (SwipeDirection) -> Void
     ) -> some View {
         overlay {
             TrackpadSwipeOverlay(
-                onSwipe: action, givesNestedScrollViewsPriority: givesNestedScrollViewsPriority
+                onSwipe: action, givesNestedScrollViewsPriority: givesNestedScrollViewsPriority,
+                diagnosticModule: diagnosticModule, diagnosticState: diagnosticState,
+                diagnosticGeneration: diagnosticGeneration
             )
                 .allowsHitTesting(false)
         }
@@ -126,23 +131,36 @@ enum IslandSurfaceScrollHitTest {
 struct TrackpadSwipeOverlay: NSViewRepresentable {
     let onSwipe: (SwipeDirection) -> Void
     let givesNestedScrollViewsPriority: Bool
+    let diagnosticModule: IslandSwipeDiagnostics.Module
+    let diagnosticState: Int64
+    let diagnosticGeneration: UInt64
 
     func makeNSView(context: Context) -> TrackpadSwipeView {
         let view = TrackpadSwipeView()
         view.onSwipe = onSwipe
         view.givesNestedScrollViewsPriority = givesNestedScrollViewsPriority
+        view.diagnosticModule = diagnosticModule
+        view.diagnosticState = diagnosticState
+        view.diagnosticGeneration = diagnosticGeneration
         return view
     }
 
     func updateNSView(_ nsView: TrackpadSwipeView, context: Context) {
         nsView.onSwipe = onSwipe
         nsView.givesNestedScrollViewsPriority = givesNestedScrollViewsPriority
+        nsView.diagnosticModule = diagnosticModule
+        nsView.diagnosticState = diagnosticState
+        nsView.diagnosticGeneration = diagnosticGeneration
     }
 }
 
 final class TrackpadSwipeView: NSView {
     var onSwipe: ((SwipeDirection) -> Void)?
     var givesNestedScrollViewsPriority = false
+    var diagnosticModule: IslandSwipeDiagnostics.Module = .none
+    var diagnosticState: Int64 = 0
+    var diagnosticGeneration: UInt64 = 0
+    private var swipeDiagnostics = IslandSwipeGestureDiagnostics()
     private var scrollOwnership = IslandSurfaceScrollOwnership()
 
     private enum ScrollAxis {
@@ -182,10 +200,17 @@ final class TrackpadSwipeView: NSView {
     }
 
     private func handleScroll(_ event: NSEvent) {
-        guard let window, event.window == window,
-              event.hasPreciseScrollingDeltas else { return }
+        guard let window, event.window == window else { return }
+        swipeDiagnostics.receive(
+            timestamp: event.timestamp, phase: event.phase, momentum: event.momentumPhase,
+            precise: event.hasPreciseScrollingDeltas,
+            deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY,
+            module: diagnosticModule, state: diagnosticState, generation: diagnosticGeneration
+        )
+        guard event.hasPreciseScrollingDeltas else { return }
 
         if IslandSurfaceSwipeSuppression.isActive(at: event.timestamp) {
+            swipeDiagnostics.decision(.suppressed)
             resetGesture()
             scrollOwnership.reset()
             return
@@ -227,6 +252,7 @@ final class TrackpadSwipeView: NSView {
         // switched tabs. Ignore them so one physical swipe moves exactly once.
         guard event.momentumPhase == [] else { return }
         guard allowsSurfaceSwipe else {
+            swipeDiagnostics.decision(.nestedScrollView)
             resetGesture()
             return
         }
@@ -241,15 +267,25 @@ final class TrackpadSwipeView: NSView {
         totalAbsDeltaY += abs(deltaY)
 
         updateLockedAxis()
-        guard !hasFired, lockedAxis != .vertical else { return }
+        guard !hasFired else {
+            swipeDiagnostics.decision(.duplicate)
+            return
+        }
+        guard lockedAxis != .vertical else {
+            swipeDiagnostics.decision(.verticalLock)
+            return
+        }
 
         if lockedAxis == .horizontal,
            abs(accumulatedDeltaX) >= horizontalTriggerThreshold {
             hasFired = true
+            swipeDiagnostics.decision(.triggered)
             let direction: SwipeDirection = accumulatedDeltaX < 0 ? .left : .right
             DispatchQueue.main.async { [weak self] in
                 self?.onSwipe?(direction)
             }
+        } else {
+            swipeDiagnostics.decision(.belowThreshold)
         }
     }
 
@@ -278,6 +314,7 @@ final class TrackpadSwipeView: NSView {
     }
 
     private func removeMonitor() {
+        swipeDiagnostics.finish(.detached)
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         scrollOwnership.reset()

@@ -964,14 +964,24 @@ final class AppState: ObservableObject {
     // MARK: - Module Cycling
 
     func cycleModule(forward: Bool) {
-        guard !isZilanInteractionSuppressed else { return }
+        let diagnosticStart = IslandSwipeDiagnostics.beginSwitch(in: self, forward: forward)
+        defer { IslandSwipeDiagnostics.completeSwitch(in: self, started: diagnosticStart) }
+        guard !isZilanInteractionSuppressed else {
+            IslandSwipeDiagnostics.record(.generationGate, module: IslandSwipeDiagnostics.module(in: self),
+                                          reason: .generationRejected)
+            return
+        }
         if currentState == .fullExpanded {
             cycleFullExpandedTab(forward: forward)
             return
         }
 
         let modules = availableModules
-        guard !modules.isEmpty else { return }
+        guard !modules.isEmpty else {
+            IslandSwipeDiagnostics.record(.switchAfter, module: IslandSwipeDiagnostics.module(in: self),
+                                          reason: .noModules)
+            return
+        }
 
         let nextModule: ActiveModule
         if let activeModule, let index = modules.firstIndex(of: activeModule) {
@@ -1541,7 +1551,11 @@ final class AppState: ObservableObject {
 
     private func cycleFullExpandedTab(forward: Bool) {
         let tabs = fullExpandedSwipeTabs
-        guard !tabs.isEmpty else { return }
+        guard !tabs.isEmpty else {
+            IslandSwipeDiagnostics.record(.switchAfter, module: IslandSwipeDiagnostics.module(in: self),
+                                          reason: .noModules)
+            return
+        }
 
         let currentTab = tabs.contains(fullExpandedSelectedTab) ? fullExpandedSelectedTab : .home
         let currentIndex = tabs.firstIndex(of: currentTab) ?? 0

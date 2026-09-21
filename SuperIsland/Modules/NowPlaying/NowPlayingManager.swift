@@ -60,6 +60,9 @@ final class NowPlayingManager: ObservableObject {
     @Published var playbackRate: Double = 0
     @Published var sourceName: String = "" // "Spotify", "Apple Music", "Chrome", etc.
     @Published var providerStatus: NowPlayingProviderStatus = .idle
+    @Published private(set) var isOpeningPlaybackSource = false
+    @Published private var failedPlaybackSource: NowPlayingSourceOpener.Snapshot?
+    private let sourceOpener = NowPlayingSourceOpener()
     @Published var browserDetectionTestMessage: String = ""
     @Published var browserDetectionEnabled: Bool = UserDefaults.standard.bool(forKey: nowPlayingBrowserDetectionEnabledKey) {
         didSet {
@@ -1398,6 +1401,45 @@ final class NowPlayingManager: ObservableObject {
     }
 
     // MARK: - Playback Controls
+
+    private var playbackSourceSnapshot: NowPlayingSourceOpener.Snapshot {
+        .init(bundleIdentifier: currentBundleIdentifier, title: title, artist: artist,
+              browserURL: currentChromeTabURL, isPlaying: isPlaying)
+    }
+
+    var canOpenPlaybackSource: Bool {
+        !currentBundleIdentifier.isEmpty && !title.isEmpty
+    }
+
+    var playbackSourceHelp: String {
+        if isOpeningPlaybackSource { return "正在打开播放来源" }
+        if failedPlaybackSource == playbackSourceSnapshot { return "暂时无法打开播放来源" }
+        return sourceName.isEmpty ? "打开播放来源" : "打开\(sourceName)"
+    }
+
+    func openPlaybackSource() {
+        guard canOpenPlaybackSource, !isOpeningPlaybackSource else { return }
+        let snapshot = playbackSourceSnapshot
+        let browserAllowed = browserDetectionEnabled && isBrowserAllowed(snapshot.bundleIdentifier)
+        failedPlaybackSource = nil
+        isOpeningPlaybackSource = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isOpeningPlaybackSource = false }
+            let outcome = await sourceOpener.open(snapshot, browserDetectionAllowed: browserAllowed) { [weak self] in
+                self?.playbackSourceSnapshot == snapshot
+            }
+            guard playbackSourceSnapshot == snapshot else { return }
+            switch outcome {
+            case .openedApp, .openedTab:
+                AppState.shared.dismiss()
+            case .unavailable:
+                failedPlaybackSource = snapshot
+            case .cancelled:
+                break
+            }
+        }
+    }
 
     func togglePlayPause() {
         if sourceName == "Spotify", !isApplicationRunning("Spotify") {
