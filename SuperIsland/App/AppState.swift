@@ -1176,6 +1176,37 @@ final class AppState: ObservableObject {
         contentSize(for: currentState)
     }
 
+    var isShelfPanesVisible: Bool {
+        currentState == .fullExpanded && fullExpandedSelectedTab == .module(.builtIn(.shelf))
+    }
+
+    /// Reserve a fixed hosting canvas for Shelf before it is selected. The
+    /// panel viewport still follows the current module's actual dimensions.
+    var maximumFullExpandedWindowSize: CGSize {
+        let current = windowSize(for: .fullExpanded)
+        return CGSize(
+            width: current.width + max(0, ShelfLayoutMetrics.preferredContentWidth - contentSize(for: .fullExpanded).width),
+            height: current.height
+        )
+    }
+
+    private var shelfFullExpandedWidth: CGFloat {
+        let screenWidth: CGFloat
+        if displayIdentifier == ScreenDetector.allDisplaysIdentifier {
+            // All panels share a SwiftUI presentation, so use the narrowest
+            // target display rather than clipping ZIP on a smaller monitor.
+            screenWidth = NSScreen.screens.map(\.frame.width).min() ?? presentationScreenFrame.width
+        } else {
+            screenWidth = presentationScreenFrame.width
+        }
+        let archWidth = usesOutwardTopCorners && !presentationHasNotch
+            ? topCornerRadius(for: .fullExpanded) * 2 : 0
+        return ShelfLayoutMetrics.contentWidth(
+            screenWidth: screenWidth,
+            windowOverhead: Constants.moduleCyclerGutterWidth * 2 + archWidth
+        )
+    }
+
     func size(for state: IslandState) -> CGSize {
         let contentSize = self.contentSize(for: state)
         // On non-notch Macs the outward arch insets walls by the top
@@ -1221,7 +1252,10 @@ final class AppState: ObservableObject {
         case .expanded:
             return Constants.expandedSize
         case .fullExpanded:
-            let base = Constants.fullExpandedSize
+            var base = Constants.fullExpandedSize
+            if fullExpandedSelectedTab == .module(.builtIn(.shelf)) {
+                base.width = shelfFullExpandedWidth
+            }
             // On non-notch Macs the toolbar is inline (no shoulder area),
             // so it eats into content height. Add space for it.
             if usesOutwardTopCorners && !presentationHasNotch {

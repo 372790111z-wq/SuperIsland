@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="SuperIsland 暂存架 ZIP 压缩交互需求稿。使用虚构文件，不读取或压缩真实文件。">
+<link rel="icon" href="data:,">
+<title>SuperIsland · 暂存架 ZIP 需求稿</title>
+<style>
+:root{color-scheme:dark;--bg:#101114;--panel:#1b1d22;--raised:#23262d;--line:#ffffff18;--text:#f3f4f7;--muted:#a4aab8;--blue:#538dff;--green:#73d7aa;--amber:#edc580;--red:#ffa4ac}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;padding:30px 22px 45px}
+button,input,select{font:inherit}button,select{color:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.4}button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible{outline:3px solid #94baff;outline-offset:3px}
+h1,h2,h3,p{margin:0}a{color:#a8c8ff}button{border:1px solid var(--line);border-radius:8px;background:#ffffff0b;padding:7px 12px}button:hover:not(:disabled){background:#ffffff17}
+.primary{background:#4b82ed;border-color:#6395f3;color:white}.primary:hover:not(:disabled){background:#6093f1}.quiet{background:none;border-color:transparent;color:#c2c7d2}.small{font-size:11px;padding:4px 9px}.icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.shell{max-width:1200px;margin:auto}.masthead{display:flex;align-items:center;gap:10px;padding-bottom:20px;border-bottom:1px solid var(--line)}.logo{background:#202838;border:1px solid #5e78a44d;border-radius:10px;padding:7px;display:flex;color:#b3ccff}.brand{font-weight:600}.tag{margin-left:auto;color:var(--amber);font-size:11px;background:#edc58010;padding:4px 10px;border:1px solid #edc58025;border-radius:20px}
+.intro{padding:25px 0 21px;display:flex;align-items:end;justify-content:space-between;gap:20px}.intro h1{font-size:28px;letter-spacing:-.04em;font-weight:650}.intro p{color:var(--muted);margin-top:6px}.demo-label{font-size:11px;color:var(--muted);text-align:right}.demo-label b{display:block;color:#c4cede;font-weight:500}
+.stage{border:1px solid var(--line);border-radius:18px;overflow:hidden;background:#181b21}.desktopbar{height:34px;background:#ffffff05;display:flex;align-items:center;padding:0 18px;font-size:11px;gap:20px;color:#bac2d0}.desktopbar b{color:#e4e8f0;font-weight:600}.desktopbar span:last-child{margin-left:auto;color:#929aa8}.desktop{min-height:365px;padding:0 22px 30px;background:radial-gradient(ellipse at 50% 0,#25364c8c,transparent 68%),#191d25}
+.island{max-width:960px;margin:0 auto;background:#090a0d;border:1px solid #ffffff26;border-top:0;border-radius:0 0 32px 32px;padding:15px 20px 20px;box-shadow:0 20px 50px #0005}.notch{display:flex;justify-content:center;align-items:center;height:18px;margin-bottom:17px;gap:9px;font-size:10px;color:#818693}.notch i{width:6px;height:6px;border-radius:50%;background:#223047;box-shadow:inset 0 0 2px #657292}
+.island-body{display:flex;gap:12px}.airdrop{width:142px;flex-shrink:0;border:1px dashed #ffffff32;border-radius:24px;background:#ffffff04;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:179px;gap:9px;color:#d5d8e0}.airdrop .disc{display:grid;place-items:center;width:54px;height:54px;border-radius:50%;background:#ffffff09}.disc .icon{width:31px;height:31px}.airdrop small{color:#80858f;font-size:10px}
+.tray{flex:1;min-width:0;border:1px dashed #ffffff32;border-radius:24px;background:#ffffff04;padding:14px 16px}.tray-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:13px}.tray-head h2{font-size:12px;font-weight:600}.count{font-size:10px;color:#9298a5}.tray-head .spacer{flex:1}.tray-head button{font-size:10px;padding:3px 8px}.search{width:108px;border:1px solid #ffffff18;background:#ffffff08;border-radius:6px;font-size:10px;padding:4px 8px;color:white;min-width:0}
+.items{display:flex;gap:16px;overflow:auto;padding:2px 2px 7px;min-height:112px;scrollbar-width:thin}.tile{flex:0 0 102px;position:relative;border:1px solid transparent;border-radius:12px;padding:8px 4px 6px;text-align:center}.tile.new{animation:arrive .4s ease}.item-open{display:flex;align-items:center;flex-direction:column;border:0;background:none;width:100%;padding:0;gap:9px}.item-open:hover:not(:disabled){background:none}.art{height:49px;width:49px;display:grid;place-items:center;color:#8cc6f8}.art .icon{width:43px;height:43px;stroke-width:1.3}.art.file{color:#d5e3f3}.art.image{color:#bbaaff}.art.link{color:#8cb8fe}.art.zip{color:#e8c787}.filename{font-size:10px;line-height:1.45;max-width:94px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.item-type{font-size:9px;color:#858b98;margin-top:2px}.more{position:absolute;right:-2px;top:-1px;border:0;background:#323640;border-radius:50%;padding:0;width:21px;height:21px;line-height:17px;color:#d5d8e0;font-weight:700;opacity:0}.tile:hover .more,.tile:focus-within .more{opacity:1}
+.empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:9px;min-height:112px;color:#949ba8;font-size:11px;width:100%}
+.work-status{max-width:890px;margin:21px auto 0;min-height:45px;display:flex;align-items:center;gap:10px;font-size:12px;color:#c0c9d8}.status-icon{display:grid;place-items:center;width:31px;height:31px;border:1px solid #ffffff1c;border-radius:9px;flex-shrink:0}.work-status[data-tone=success] .status-icon{color:var(--green)}.work-status[data-tone=error] .status-icon{color:var(--amber)}.status-main{flex:1;min-width:0}.status-main small{display:block;font-size:10px;color:#8f9bab;margin-top:1px;overflow-wrap:anywhere}.status-actions{display:flex;gap:6px;flex-wrap:wrap}.status-actions button{font-size:10px}.progress{height:3px;background:#ffffff16;border-radius:3px;margin-top:7px;overflow:hidden}.progress span{display:block;background:#7eaaff;height:100%;width:0;transition:width .18s}
+.trybar{padding:13px 18px;border-top:1px solid var(--line);display:flex;align-items:center;gap:9px;flex-wrap:wrap;background:#ffffff02}.trybar label,.trybar span{font-size:11px;color:var(--muted)}select{border:1px solid #ffffff25;border-radius:7px;padding:5px 9px;background:#262b35;max-width:100%}.trybar select{font-size:11px}.trybar .quiet{margin-left:auto}.hint{font-size:11px;color:#8490a4;margin:12px 0 25px}.hint strong{font-weight:500;color:#bbcadf}
+.details{display:grid;grid-template-columns:1.15fr 1fr;gap:23px}.detail-panel{min-width:0;border:1px solid var(--line);border-radius:13px;background:#1b1d2299;overflow:hidden}.panel-head{padding:15px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.panel-head h2{font-size:12px;font-weight:600}.panel-head span{font-size:10px;color:var(--muted);margin-left:auto}.folder-list{padding:8px 12px;min-height:122px;max-height:262px;overflow:auto}.folder-row{display:grid;grid-template-columns:23px minmax(0,1fr) auto;align-items:center;gap:8px;padding:7px 6px;font-size:11px}.folder-row .icon{color:#95b4d4}.folder-row.result .icon{color:var(--amber)}.folder-row strong{font-weight:500;display:block;overflow-wrap:anywhere}.folder-row small{color:#8491a4;font-size:10px}.folder-row .result-label{color:var(--green);font-size:10px;white-space:nowrap}.folder-foot{padding:11px 18px;font-size:10px;color:var(--muted);background:#ffffff03;border-top:1px solid var(--line)}
+.decisions{padding:15px 18px;display:grid;gap:12px}.decision{display:grid;grid-template-columns:50px minmax(0,1fr);gap:11px;font-size:11px}.decision .state{font-size:9px;align-self:start;padding:2px 6px;border-radius:4px;text-align:center;color:var(--amber);background:#edc5800e}.decision .state.confirmed{color:var(--green);background:#73d7aa0e}.decision b{font-weight:550;color:#d7dfeb;display:block}.decision p{color:var(--muted);margin-top:2px}.footer{display:flex;gap:20px;justify-content:space-between;flex-wrap:wrap;border-top:1px solid var(--line);margin-top:24px;padding-top:15px;font-size:10px;color:#838d9f}
+.menu{position:fixed;z-index:20;width:222px;padding:5px;background:#2a2c32f7;backdrop-filter:blur(22px);border:1px solid #ffffff32;border-radius:10px;box-shadow:0 12px 35px #0008}.menu .menu-name{padding:5px 8px;font-size:10px;color:#a0a6b0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.menu button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;font-size:12px;border:0;background:none;padding:6px 8px;border-radius:5px}.menu button:hover:not(:disabled){background:#487ede}.menu button .icon{width:15px;height:15px}.menu hr{border:0;border-top:1px solid var(--line);margin:5px 4px}.menu small{display:block;padding:5px 8px;color:#a3acbc;font-size:10px}
+dialog{border:1px solid #ffffff30;border-radius:18px;color:var(--text);background:#252830;padding:24px;max-width:min(460px,calc(100vw - 28px));width:460px;box-shadow:0 25px 100px #0009}dialog::backdrop{background:#080b13a8;backdrop-filter:blur(3px)}dialog h2{font-size:17px;margin:8px 0}dialog p{font-size:12px;color:#b4bece;margin:7px 0}dialog label{font-size:11px;display:block;color:#b4bece;margin:15px 0 6px}dialog select{width:100%}.dialog-top{display:flex;align-items:center;justify-content:space-between}.dialog-top>span{font-size:10px;color:var(--muted)}.dialog-icon{color:#a7c6fc}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:23px}dialog pre{font:11px/1.85 ui-monospace,monospace;background:#151922;border-radius:9px;padding:13px;white-space:pre-wrap;word-break:break-word;color:#d2dbed;max-height:230px;overflow:auto}.share-options{display:flex;gap:9px;margin-top:20px}.share-options span{flex:1;border:1px solid var(--line);border-radius:11px;padding:16px 5px;text-align:center;color:#bfcfe7;font-size:12px}
+[hidden]{display:none!important}@keyframes arrive{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:850px){body{padding:18px 14px}.desktop{padding:0 13px 22px}.island{padding:12px 13px 17px}.airdrop{width:112px}.tray{padding:12px}.details{gap:14px}.search{width:90px}}
+@media(max-width:600px){body{padding:12px 10px 28px}.intro{display:block;padding:20px 0 17px}.intro h1{font-size:24px}.demo-label{text-align:left;margin-top:12px}.demo-label b{display:inline;margin-right:5px}.desktopbar{gap:12px;font-size:10px}.desktopbar span:last-child{display:none}.island-body{flex-direction:column}.airdrop{width:100%;min-height:52px;flex-direction:row;border-radius:14px;gap:11px}.airdrop .disc{width:30px;height:30px}.disc .icon{width:21px;height:21px}.airdrop small{font-size:10px}.island{border-radius:0 0 24px 24px}.notch{margin-bottom:10px}.tray{border-radius:17px}.desktop{padding:0 10px 18px;min-height:390px}.tray-head{gap:6px}.search{width:79px}.work-status{align-items:start;margin-top:17px;flex-wrap:wrap}.status-actions{margin-left:41px}.trybar{padding:12px}.trybar .quiet{margin-left:0}.details{grid-template-columns:1fr}.hint{margin-bottom:18px}.folder-list{max-height:220px}.tag{font-size:10px}.more{opacity:1}.footer{gap:7px}.intro p{font-size:12px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+.zip-drop{width:142px;flex-shrink:0;border:1px dashed #edc58055;border-radius:24px;background:#edc58005;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:179px;gap:9px;color:#ead2a8;transition:background .15s,border-color .15s}
+.zip-drop .disc{display:grid;place-items:center;width:54px;height:54px;border-radius:50%;background:#edc5800c}.zip-drop small{color:#a09582;font-size:10px}.zip-drop.drag-over{background:#edc5801e;border-style:solid;border-color:#edc580}.zip-drop.busy{opacity:.65}.item-open[draggable=true]{cursor:grab}.item-open[draggable=true]:active{cursor:grabbing}
+@media(max-width:850px){.zip-drop{width:112px}}@media(max-width:600px){.zip-drop{width:100%;min-height:62px;flex-direction:row;border-radius:14px;gap:11px}.zip-drop .disc{width:32px;height:32px}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" aria-hidden="true" style="position:absolute;overflow:hidden"><defs>
+<symbol id="i-tray" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM4 14h5l2 3h2l2-3h5"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M2 7V4h7l3 3h10v13H2z"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M13 2H5v20h15V9zM13 2v7h7M8 13h9M8 17h7"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="18" rx="3"/><path d="m3 17 6-6 6 7 3-4 4 4"/><circle cx="16" cy="8" r="2"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="m10 14 4-4M8 16l-1 1a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0" transform="translate(0 0) scale(.95)"/></symbol>
+<symbol id="i-zip" viewBox="0 0 24 24"><path d="M13 2H5v20h15V9zM13 2v7h7M10 3v2h2v2h-2v2h2v2h-2v2M10 16h2v3h-2z"/></symbol>
+<symbol id="i-airdrop" viewBox="0 0 24 24"><path d="m12 15-5 7h10zM5 16a9 9 0 1 1 14 0M8 13a5 5 0 1 1 8 0"/><circle cx="12" cy="9" r="1"/></symbol>
+<symbol id="i-share" viewBox="0 0 24 24"><path d="M8 8H4v14h16V8h-4M12 16V2m-4 4 4-4 4 4"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+</defs></svg>
+<main class="shell">
+ <header class="masthead"><span class="logo"><svg class="icon"><use href="#i-tray"/></svg></span><span class="brand">SuperIsland</span><span class="tag">交互稿 v0.1 · 已确认</span></header>
+ <section class="intro"><div><h1>拖进去，就压缩</h1><p>暂存架右侧新增压缩区，生成 ZIP 后接着共享或拖出。</p></div><div class="demo-label"><b>交互演示 · 全部为虚构文件</b>本页不会读取、压缩或发送真实文件</div></section>
+ <section class="stage" aria-label="灵动岛暂存架交互演示">
+  <div class="desktopbar"><b>Finder</b><span>文件</span><span>编辑</span><span>显示</span><span>模拟桌面</span></div>
+  <div class="desktop">
+   <div class="island">
+    <div class="notch"><span>SuperIsland</span><i></i></div>
+    <div class="island-body">
+     <div class="airdrop"><div class="disc"><svg class="icon"><use href="#i-airdrop"/></svg></div><span>AirDrop</span><small>拖放以分享</small></div>
+     <section class="tray" aria-label="暂存架">
+      <div class="tray-head"><h2>暂存架</h2><span id="item-count" class="count"></span><span class="spacer"></span><input id="search" class="search" aria-label="搜索暂存文件" placeholder="搜索"></div>
+      <div class="items" id="items"></div>
+     </section>
+     <section id="zip-drop" class="zip-drop" aria-label="ZIP 压缩拖放区" aria-describedby="zip-help"><div class="disc"><svg class="icon"><use href="#i-zip"/></svg></div><span id="zip-title">ZIP 压缩</span><small id="zip-help">拖放以压缩</small></section>
+    </div>
+   </div>
+   <div id="work-status" class="work-status" data-tone="idle" role="status" aria-live="polite" aria-atomic="true">
+    <span class="status-icon"><svg class="icon"><use id="status-use" href="#i-info"/></svg></span>
+    <div class="status-main"><span id="status-title">把文件拖到右侧压缩区</span><small id="status-detail">松手即开始；多个文件分别生成 ZIP。</small><div class="progress" id="progress" hidden><span id="progress-fill"></span></div></div>
+    <div class="status-actions" id="status-actions"></div>
+   </div>
+  </div>
+  <div class="trybar"><label for="scenario">演示场景</label><select id="scenario"><option value="normal">正常压缩</option><option value="permission">原目录无写入权限</option><option value="missing">原文件已丢失</option><option value="partial">第二项压缩失败</option><option value="symlink">目录包含符号链接</option></select><button id="demo-one" class="small">模拟拖入文件夹</button><button id="demo-batch" class="small">模拟拖入 2 项</button><button id="empty-demo" class="small">空暂存架</button><button id="reset" class="quiet small">重置演示</button></div>
+ </section>
+ <p class="hint"><strong>试一试：</strong>将暂存架里的“项目资料”拖到右侧压缩框，再拖一次看自动编号。也可用下方按钮模拟 Finder 拖入多个文件。</p>
+ <div class="details">
+  <section class="detail-panel"><div class="panel-head"><h2>文件与生成结果</h2><span>模拟 Finder · 不是真实目录</span></div><div class="folder-list" id="folder-list"></div><p class="folder-foot">ZIP 默认保存在原文件旁。原文件保留，结果同时加入暂存架。</p></section>
+  <section class="detail-panel"><div class="panel-head"><h2>本次方案</h2><span>2026-09-21 已确认</span></div><div class="decisions">
+   <div class="decision"><span class="state confirmed">已确认</span><div><b>暂存架右侧新增压缩框</b><p>拖入后自动压缩。AirDrop、暂存和压缩各自接收拖入，不互相触发。</p></div></div>
+   <div class="decision"><span class="state confirmed">原需求</span><div><b>多文件分别压缩，自动编号</b><p>每个文件／文件夹生成一个 ZIP；重名加 (1)、(2)，不覆盖。原文件保留。</p></div></div>
+   <div class="decision"><span class="state confirmed">已采用</span><div><b>原目录保存，生成后放回暂存架</b><p>粘贴图片先选可见目录；无权限时可换位置。选择位置取消则整批不开始。</p></div></div>
+   <div class="decision"><span class="state confirmed">原需求</span><div><b>保留中文名称，去掉 macOS 杂项</b><p>保留文件夹和空目录；不擅自跟随符号链接。仅在压缩和校验都完成后加入结果。</p></div></div>
+  </div></section>
+ </div>
+ <footer class="footer"><span>独立 HTML 需求稿 · 001213 安装版保持不变</span><span>Windows 实机解压留待实现后验证</span></footer>
+</main>
+<div class="menu" id="menu" role="menu" aria-label="文件操作" hidden></div>
+<dialog id="save-dialog" aria-labelledby="save-heading"><div class="dialog-top"><svg class="icon dialog-icon"><use href="#i-folder"/></svg><span>保存位置 · 演示</span></div><h2 id="save-heading">选择 ZIP 保存位置</h2><p id="save-reason"></p><label for="save-location">保存到</label><select id="save-location"><option value="下载">下载</option><option value="桌面 / 交付演示">桌面 / 交付演示</option><option value="文稿 / 压缩文件">文稿 / 压缩文件</option></select><p>同名自动编号，不替换已有文件。</p><div class="dialog-actions"><button id="save-cancel">取消</button><button id="save-confirm" class="primary">在此压缩</button></div></dialog>
+<dialog id="info-dialog" aria-labelledby="info-heading"><div class="dialog-top"><svg class="icon dialog-icon"><use id="info-use" href="#i-file"/></svg><span id="info-kind">文件预览 · 演示</span></div><h2 id="info-heading"></h2><div id="info-body"></div><div class="dialog-actions"><button id="info-close">关闭</button></div></dialog>
+<script>
+(() => {
+ "use strict";
+ const $ = id => document.getElementById(id);
+ const sourceDir = "桌面 / 交付演示";
+ const initial = () => [
+  {id:"folder",name:"项目资料",kind:"folder",dir:sourceDir,description:"文件夹",entries:["项目资料/","项目资料/方案说明.txt","项目资料/空文件夹/"]},
+  {id:"pdf",name:"使用说明.pdf",kind:"file",dir:sourceDir,description:"PDF 文档",entries:["使用说明.pdf"]},
+  {id:"image",name:"粘贴图片.png",kind:"image",dir:null,description:"粘贴图片",entries:["粘贴图片.png"]},
+  {id:"link",name:"参考链接",kind:"link",description:"网页链接"}
+ ];
+ let items=initial(),archives=[],job=null,timer=null,nextId=1,menuTarget=null,menuOpener=null,savePlan=null,failed=[];
+ const icon = name => '<svg class="icon" aria-hidden="true"><use href="#i-'+name+'"></use></svg>';
+ const esc = s => String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+ const eligible = item => ["file","folder","image","zip"].includes(item.kind);
+ function feedback(title,detail="",tone="idle",actions=[]) {
+  $("work-status").dataset.tone=tone;$("status-title").textContent=title;$("status-detail").textContent=detail;
+  $("status-use").setAttribute("href","#i-"+(tone==="success"?"check":tone==="busy"?"clock":"info"));
+  $("status-actions").replaceChildren();
+  for(const action of actions){const b=document.createElement("button");b.textContent=action.label;b.type="button";b.onclick=action.run;$("status-actions").append(b);}
+ }
+ function render(){
+  const query=$("search").value.trim().toLocaleLowerCase(),shown=items.filter(i=>i.name.toLocaleLowerCase().includes(query));
+  $("item-count").textContent=items.length+" 项";$("search").disabled=!!job;
+  $("scenario").disabled=!!job;$("empty-demo").disabled=!!job;$("demo-one").disabled=!!job;$("demo-batch").disabled=!!job;
+  $("zip-drop").classList.toggle("busy",!!job);$("zip-drop").setAttribute("aria-busy",String(!!job));$("zip-title").textContent=job?"正在压缩":savePlan?"选择保存位置":"ZIP 压缩";$("zip-help").textContent=job?"完成后可继续拖入":savePlan?"等待选择目录":"拖放以压缩";
+  $("items").innerHTML=shown.length?shown.map(i=>'<article class="tile '+(i.kind==="zip"?"new ":"")+'" data-id="'+esc(i.id)+'"><button class="more" data-menu="'+esc(i.id)+'" aria-label="'+esc(i.name)+'的操作菜单" aria-haspopup="menu" '+(job?"disabled":"")+'>⋯</button><button class="item-open" data-open="'+esc(i.id)+'" draggable="'+(!job)+'" '+(job?"disabled":"")+' title="'+esc(i.name)+'"><span class="art '+i.kind+'">'+icon(i.kind)+'</span><span class="filename">'+esc(i.name)+'</span></button><p class="item-type">'+esc(i.description)+'</p></article>').join(""):
+    '<div class="empty">'+icon("tray")+'<span>'+(items.length?"没有找到文件":"将文件拖到这里")+'</span>'+(!items.length?'<button id="add-demo" class="small">模拟拖入暂存架</button>':'')+'</div>';
+  $("items").querySelectorAll("[data-menu]").forEach(b=>b.onclick=e=>{e.stopPropagation();openMenu(b.dataset.menu,b);});
+  $("items").querySelectorAll("[data-open]").forEach(b=>{
+   b.onclick=()=>showFile(items.find(i=>i.id===b.dataset.open));
+   b.ondragstart=e=>{if(job){e.preventDefault();return;}e.dataTransfer.setData("application/x-we1-demo",JSON.stringify([b.dataset.open]));e.dataTransfer.effectAllowed="copy";closeMenu();};
+   b.ondragend=()=>clearDrag();
+  });
+  $("items").querySelectorAll(".tile").forEach(tile=>tile.oncontextmenu=e=>{e.preventDefault();if(!job)openMenu(tile.dataset.id,tile.querySelector(".more"));});
+  if($("add-demo"))$("add-demo").onclick=()=>{items=initial();render();feedback("已暂存","拖到右侧压缩框即可生成 ZIP。");};
+  renderFolder();
+ }
+ function renderFolder(){
+  const records=[...initial().filter(i=>i.dir),...archives];
+  $("folder-list").innerHTML=records.map(i=>'<div class="folder-row '+(i.kind==="zip"?"result":"")+'" draggable="true" data-source="'+i.id+'" title="可拖到上方压缩区">'+icon(i.kind)+'<div><strong>'+esc(i.name)+'</strong><small>'+esc(i.dir)+'</small></div>'+(i.kind==="zip"?'<button class="small quiet" data-result="'+i.id+'">查看 ZIP</button>':'<span class="result-label">原件保留</span>')+'</div>').join("");
+  $("folder-list").querySelectorAll("[data-source]").forEach(row=>{row.ondragstart=e=>{if(job){e.preventDefault();return;}e.dataTransfer.setData("application/x-we1-demo",JSON.stringify([row.dataset.source]));e.dataTransfer.effectAllowed="copy";};row.ondragend=clearDrag;});
+  $("folder-list").querySelectorAll("[data-result]").forEach(b=>b.onclick=()=>showFile(archives.find(i=>i.id===b.dataset.result)));
+ }
+ function openMenu(id,opener){
+  menuTarget=items.find(i=>i.id===id);menuOpener=opener;const m=$("menu"),i=menuTarget;
+  m.innerHTML='<div class="menu-name">'+esc(i.name)+'</div><button role="menuitem" id="menu-share">'+icon("share")+'共享…</button><button role="menuitem" id="menu-reveal">'+icon("folder")+'查看保存位置</button><hr><button role="menuitem" id="menu-remove">'+icon("x")+'从暂存架移除</button>';
+  m.hidden=false;const r=opener.getBoundingClientRect();m.style.left=Math.max(10,Math.min(r.right-14,innerWidth-m.offsetWidth-10))+"px";m.style.top=Math.max(10,Math.min(r.bottom+4,innerHeight-m.offsetHeight-10))+"px";
+  $("menu-share").onclick=()=>{closeMenu();share(i);};$("menu-reveal").onclick=()=>{closeMenu();info(i.name,'<p>'+esc(i.dir||"此项没有用户可见的本地保存位置。")+'</p>',"folder","保存位置 · 演示");};$("menu-remove").onclick=()=>{closeMenu();items=items.filter(item=>item.id!==i.id);render();feedback("已移除","仅移出暂存架，已生成的 ZIP 仍保留在文件夹中。");};
+  m.querySelector("button:not(:disabled)").focus();
+ }
+ function closeMenu(){if($("menu").hidden)return;$("menu").hidden=true;if(menuOpener&&menuOpener.isConnected)menuOpener.focus();}
+ document.addEventListener("click",e=>{if(!$("menu").contains(e.target)&&!e.target.closest("[data-menu]"))closeMenu();});
+ document.addEventListener("keydown",e=>{if($("menu").hidden)return;if(e.key==="Escape"){e.preventDefault();closeMenu();}if(e.key==="ArrowDown"||e.key==="ArrowUp"){e.preventDefault();const bs=[...$("menu").querySelectorAll("button:not(:disabled)")],at=bs.indexOf(document.activeElement);bs[(at+(e.key==="ArrowDown"?1:bs.length-1))%bs.length].focus();}});
+ window.addEventListener("resize",closeMenu);window.addEventListener("scroll",closeMenu);
+ function info(title,body,art="file",kind="文件预览 · 演示"){
+  $("info-heading").textContent=title;$("info-body").innerHTML=body;$("info-use").setAttribute("href","#i-"+art);$("info-kind").textContent=kind;if(!$("info-dialog").open)$("info-dialog").showModal();
+ }
+ function showFile(i){
+  if(i.kind==="zip")info(i.name,'<p>保存于 '+esc(i.dir)+'</p><pre>'+esc(i.entries.join("\n"))+'</pre><p>保留中文名称和空目录。此演示不生成真实 ZIP。</p>',"zip","压缩包内容 · 演示");
+  else info(i.name,'<p>'+esc(i.kind==="link"?"网页链接不参与压缩。":"这是虚构的"+i.description+"。")+'</p>'+(i.kind==="folder"?'<pre>项目资料/\n  方案说明.txt\n  空文件夹/\n  .DS_Store（压缩时排除）\n  __MACOSX/（压缩时排除）</pre>':'')+'<p>关闭预览后，将文件拖到右侧压缩框。</p>',i.kind);
+ }
+ function share(i){info("共享 "+i.name,'<p>压缩完成后复用原有共享面板。</p><div class="share-options"><span>AirDrop</span><span>邮件</span><span>信息</span></div><p>这里只展示面板，不会发送文件。</p>',"share","系统共享面板 · 示意");$("info-close").textContent="取消";}
+ $("info-close").onclick=()=>$("info-dialog").close();$("info-dialog").addEventListener("close",()=>{$("info-close").textContent="关闭";});
+ function requestZip(targets){
+  if(job){return;}targets=targets.filter(Boolean);if(!targets.length||targets.some(i=>!eligible(i))){feedback("不能压缩这类内容","仅支持本地文件和文件夹。网页链接、纯文本不参与压缩。","error");return;}
+  const outcome=$("scenario").value;
+  if(targets.some(i=>!i.dir)){savePlan={targets,outcome,onlyManaged:true};$("save-reason").textContent="本批包含粘贴图片。先为这些图片选择目录；普通文件仍保存到各自原目录。取消则本批不开始。";render();$("save-dialog").showModal();return;}
+  start(targets,outcome,null,false);
+ }
+ function chooseRetry(){
+  savePlan={targets:failed.map(f=>f.item),outcome:"normal",onlyManaged:false};$("save-reason").textContent="为未完成的文件选择可写目录。已成功的 ZIP 会保留，不会重复压缩。";render();$("save-dialog").showModal();
+ }
+ $("save-confirm").onclick=()=>{const plan=savePlan;savePlan=null;$("save-dialog").close();if(plan)start(plan.targets,plan.outcome,$("save-location").value,plan.onlyManaged);};
+ $("save-cancel").onclick=()=>$("save-dialog").close();
+ $("save-dialog").addEventListener("close",()=>{if(savePlan){savePlan=null;render();feedback("已取消","本次没有开始压缩，原有结果保留。");}});
+ function start(targets,outcome,outputDir,onlyManaged){
+  if(job)return;failed=[];job={targets,outcome,outputDir,onlyManaged,done:[],index:0,ticks:0};closeMenu();render();$("progress").hidden=false;stepFeedback();timer=setInterval(tick,800);
+ }
+ function stepFeedback(){
+  const j=job;if(!j)return;const current=j.targets[j.index];
+  feedback("正在压缩 "+(j.index+1)+" / "+j.targets.length,current.name+" · "+(j.ticks>=4?"校验中":"压缩中"),"busy",[{label:"取消",run:cancel}]);
+  $("progress-fill").style.width=((j.index+j.ticks/6)/j.targets.length*100)+"%";
+ }
+ function tick(){
+  if(!job)return;const j=job;j.ticks++;if(j.ticks<6){stepFeedback();return;}
+  const item=j.targets[j.index];let reason=null;
+  if(j.outcome==="permission")reason="permission";else if(j.outcome==="missing")reason="missing";else if(j.outcome==="symlink")reason="symlink";else if(j.outcome==="partial"&&j.index===1)reason="read";
+  if(reason)failed.push({item,reason});else{
+   const dir=(j.outputDir&&(!j.onlyManaged||!item.dir))?j.outputDir:item.dir;
+   let n=0,name=item.name+".zip";while(archives.some(a=>a.dir===dir&&a.name===name)||items.some(a=>a.dir===dir&&a.name===name)){n++;name=item.name+" ("+n+").zip";}
+   const result={id:"zip-"+nextId++,name,kind:"zip",dir,description:"ZIP 压缩包",entries:item.kind==="zip"?[item.name]:item.entries||[item.name],source:item.id};
+   archives.push(result);items.push(result);j.done.push(result);
+  }
+  j.index++;j.ticks=0;
+  if(j.index>=j.targets.length)finish();else{render();stepFeedback();}
+ }
+ function finish(){
+  const j=job;clearInterval(timer);timer=null;job=null;$("progress").hidden=true;render();$("items").scrollLeft=$("items").scrollWidth;
+  if(failed.length){
+   const reason=failed[0].reason,detail=reason==="permission"?"无法写入原文件夹，请选择其他保存位置。":reason==="missing"?"原文件已移动或删除，请重新拖入后再试。":reason==="symlink"?"文件夹包含符号链接，请移除链接或改选实际文件后再试。":"部分文件无法读取。请检查文件及访问权限后重试。";
+   const actions=reason==="permission"?[{label:"选择位置",run:chooseRetry}]:reason==="read"?[{label:"重试失败项",run:()=>start(failed.map(f=>f.item),"normal",j.outputDir,j.onlyManaged)}]:[];
+   feedback(j.done.length?"已完成 "+j.done.length+" 项，"+failed.length+" 项失败":"未能压缩",failed.map(f=>f.item.name).join("、")+"："+detail,"error",actions);
+  }else{
+   const last=j.done[j.done.length-1],dirs=[...new Set(j.done.map(i=>i.dir))];
+   feedback(j.done.length===1?"已压缩":"已压缩 "+j.done.length+" 项","已加入暂存架 · 保存到 "+dirs.join("；"),"success",j.done.length===1?[{label:"共享 ZIP",run:()=>share(last)},{label:"查看 ZIP",run:()=>showFile(last)}]:[]);
+  }
+ }
+ function cancel(){
+  if(!job)return;const count=job.done.length;clearInterval(timer);timer=null;job=null;failed=[];$("progress").hidden=true;render();feedback("已取消",count?"已完成的 "+count+" 个 ZIP 已保留，其余未生成。":"未生成 ZIP，原文件保留。");
+ }
+ function reset(){
+  clearInterval(timer);timer=null;job=null;savePlan=null;failed=[];items=initial();archives=[];nextId=1;$("search").value="";$("scenario").value="normal";$("progress").hidden=true;closeMenu();if($("save-dialog").open)$("save-dialog").close();if($("info-dialog").open)$("info-dialog").close();render();feedback("把文件拖到右侧压缩区","松手即开始；多个文件分别生成 ZIP。");
+ }
+ $("demo-one").onclick=()=>requestZip([initial()[0]]);
+ $("demo-batch").onclick=()=>requestZip(initial().slice(0,2));
+ function clearDrag(){$("zip-drop").classList.remove("drag-over");$("zip-help").textContent=job?"完成后可继续拖入":"拖放以压缩";}
+ $("zip-drop").ondragover=e=>{e.preventDefault();e.stopPropagation();if(job){e.dataTransfer.dropEffect="none";return;}e.dataTransfer.dropEffect="copy";$("zip-drop").classList.add("drag-over");$("zip-help").textContent="松手开始压缩";};
+ $("zip-drop").ondragleave=e=>{if(!$("zip-drop").contains(e.relatedTarget))clearDrag();};
+ function readDemoDrop(e){
+  e.preventDefault();e.stopPropagation();clearDrag();if(job||savePlan)return null;
+  const raw=e.dataTransfer.getData("application/x-we1-demo");if(!raw){feedback("请使用演示文件","需求稿不读取真实文件；可以拖动页面里的示例文件。","error");return null;}
+  try{const ids=JSON.parse(raw);if(!Array.isArray(ids)||!ids.length)throw new Error();const targets=ids.map(id=>items.find(i=>i.id===id)||initial().find(i=>i.id===id)||archives.find(i=>i.id===id));if(targets.some(i=>!i))throw new Error();return targets;}catch{feedback("未能读取拖入内容","请重新拖入演示文件。","error");return null;}
+ }
+ $("zip-drop").ondrop=e=>{const targets=readDemoDrop(e);if(targets)requestZip(targets);};
+ for(const pane of [document.querySelector(".airdrop"),document.querySelector(".tray")]){
+  pane.ondragover=e=>{e.preventDefault();e.stopPropagation();e.dataTransfer.dropEffect=job?"none":"copy";};
+  pane.ondrop=e=>{const targets=readDemoDrop(e);if(!targets)return;if(pane.classList.contains("airdrop")){share(targets[0]);feedback("共享面板已打开","仅演示共享，不压缩、不暂存，也不会发送文件。");}else{for(const item of targets){if(!items.some(i=>i.id===item.id))items.push(item);}render();feedback("已暂存","原文件保留，未执行压缩。");}};
+ }
+ $("search").oninput=render;$("reset").onclick=reset;
+ $("empty-demo").onclick=()=>{items=[];closeMenu();render();feedback("暂存架为空","可以模拟拖入文件；文件夹里原有的文件与 ZIP 保留。");};
+ $("scenario").onchange=()=>{feedback("演示场景已切换","现在压缩文件以查看对应结果。第二项失败可用“模拟拖入 2 项”体验。");};
+ document.addEventListener("dragover",e=>e.preventDefault());document.addEventListener("drop",e=>{e.preventDefault();feedback("请使用演示文件","需求稿不接收真实文件，可点“重置演示”继续。");});
+ render();
+})();
+</script>
+</body>
+</html>

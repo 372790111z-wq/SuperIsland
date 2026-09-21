@@ -2,6 +2,34 @@ import XCTest
 @testable import SuperIsland
 
 final class ShelfDropTargetTests: XCTestCase {
+    func testExpandedShelfOnlyPermitsTheExplicitDropAction() {
+        XCTAssertFalse(ShelfDropDestination.surface.canReceive(shelfPanesVisible: true))
+        for destination in [ShelfDropDestination.tray, .airDrop, .zip] {
+            XCTAssertTrue(destination.canReceive(shelfPanesVisible: true))
+        }
+        XCTAssertTrue(ShelfDropDestination.surface.canReceive(shelfPanesVisible: false))
+    }
+
+    func testThirdPanePreservesTheExistingTrayWidthOnNormalDisplays() {
+        let previousTrayWidth = Constants.fullExpandedSize.width - 80 - 142 - 12
+        let width = ShelfLayoutMetrics.contentWidth(screenWidth: 1440, windowOverhead: 104)
+        let side = ShelfLayoutMetrics.sidePaneWidth(contentWidth: width)
+        XCTAssertEqual(side, 142)
+        XCTAssertEqual(width - 80 - side * 2 - 24, previousTrayWidth)
+    }
+
+    func testShelfSurfaceAndInputViewportFitNarrowDisplays() {
+        for screenWidth: CGFloat in [640, 800, 900] {
+            for overhead: CGFloat in [104, 168] {
+                let content = ShelfLayoutMetrics.contentWidth(screenWidth: screenWidth, windowOverhead: overhead)
+                XCTAssertLessThanOrEqual(content + overhead + 24, screenWidth)
+                let side = ShelfLayoutMetrics.sidePaneWidth(contentWidth: content)
+                XCTAssertGreaterThan(side, 0)
+                XCTAssertLessThanOrEqual(side * 2 + 24, content - 80)
+            }
+        }
+    }
+
     func testChildEntryInvalidatesPendingParentExit() {
         var state = ShelfDropTargetState()
         let surface = UUID(), tray = UUID()
@@ -86,5 +114,49 @@ final class ShelfDropTargetTests: XCTestCase {
         try await Task.sleep(nanoseconds: 450_000_000)
         XCTAssertFalse(state.isShelfDragActive)
         state.cancelFullExpandedDismiss()
+    }
+
+    @MainActor
+    func testInternalDragKeepsPresentationOpenBetweenPanesUntilRelease() async throws {
+        let state = AppState(synchronizesRuntimeEnergyState: false)
+        var dragging = true
+        let session = ShelfInternalDragSession(isDragging: { dragging })
+        defer {
+            session.end()
+            state.completeShelfDropTargets()
+            state.cancelFullExpandedDismiss()
+        }
+        session.begin(appState: state)
+        let pane = UUID()
+        state.setShelfDropTarget(pane, inside: true)
+        state.setShelfDropTarget(pane, inside: false)
+        try await Task.sleep(nanoseconds: 450_000_000)
+        state.dismiss()
+        XCTAssertTrue(state.isShelfDragActive)
+        XCTAssertEqual(state.currentState, .fullExpanded)
+
+        dragging = false
+        session.poll()
+        try await Task.sleep(nanoseconds: 450_000_000)
+        XCTAssertFalse(state.isShelfDragActive)
+    }
+
+    @MainActor
+    func testCompletedInternalDragCannotClearANewDestination() {
+        let state = AppState(synchronizesRuntimeEnergyState: false)
+        let session = ShelfInternalDragSession(isDragging: { true })
+        defer {
+            session.end()
+            state.completeShelfDropTargets()
+            state.cancelFullExpandedDismiss()
+        }
+        session.begin(appState: state)
+        state.completeShelfDropTargets()
+        session.poll()
+
+        let nextPane = UUID()
+        state.setShelfDropTarget(nextPane, inside: true)
+        session.end()
+        XCTAssertTrue(state.isShelfDragActive)
     }
 }

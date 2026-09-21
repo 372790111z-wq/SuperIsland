@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// A drag can move between the outer island and either pane, or between
+/// A drag can move between the outer island and its panes, or between
 /// displays. Each destination owns a distinct ID in the shared presentation.
 struct ShelfDropTargetState {
     private(set) var targets: Set<UUID> = []
@@ -23,7 +23,89 @@ struct ShelfDropTargetState {
 }
 
 enum ShelfDropDestination: String {
-    case surface, tray, airDrop
+    case surface, tray, airDrop, zip
+
+    /// Once the three explicit actions are visible, their parent must not
+    /// reinterpret a refused ZIP/share drop as a successful staging drop.
+    func canReceive(shelfPanesVisible: Bool) -> Bool {
+        self != .surface || !shelfPanesVisible
+    }
+}
+
+enum ShelfLayoutMetrics {
+    static let paneWidth: CGFloat = 142
+    static let paneSpacing: CGFloat = 12
+    static let preferredContentWidth = Constants.fullExpandedSize.width + paneWidth + paneSpacing
+
+    static func contentWidth(screenWidth: CGFloat, windowOverhead: CGFloat) -> CGFloat {
+        guard screenWidth > 0 else { return preferredContentWidth }
+        return min(preferredContentWidth, max(0, screenWidth - windowOverhead - 24))
+    }
+
+    static func sidePaneWidth(contentWidth: CGFloat) -> CGFloat {
+        // The container and full-expanded content contribute 80 pt padding.
+        // Preserve both old pane widths on normal displays; leave a usable
+        // tray and shrink the side panes only on small displays.
+        let innerWidth = max(0, contentWidth - 80)
+        let trayWidth = min(240, innerWidth * 0.56)
+        return min(paneWidth, max(0, (innerWidth - trayWidth - paneSpacing * 2) / 2))
+    }
+}
+
+/// SwiftUI's own-app drag does not pass through the external Finder monitor.
+/// Keep its presentation hold alive between the source tile and a destination.
+/// This polls physical state only during that drag, without injecting events.
+@MainActor
+final class ShelfInternalDragSession {
+    static let shared = ShelfInternalDragSession()
+    private weak var appState: AppState?
+    private var targetID: UUID?
+    private var inputGeneration: UInt64 = 0
+    private var timer: Timer?
+    private let isDragging: () -> Bool
+
+    init(isDragging: @escaping () -> Bool = {
+        CGEventSource.buttonState(.combinedSessionState, button: .left) &&
+            !CGEventSource.keyState(.combinedSessionState, key: 53)
+    }) {
+        self.isDragging = isDragging
+    }
+
+    func begin(appState: AppState) {
+        end()
+        guard appState.shelfEnabled,
+              appState.canHandleIslandInput(generation: appState.islandInputGeneration),
+              isDragging() else { return }
+        self.appState = appState
+        inputGeneration = appState.islandInputGeneration
+        let id = UUID()
+        targetID = id
+        appState.setShelfDropTarget(id, inside: true)
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.poll() }
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func poll() {
+        guard let appState, targetID != nil, isDragging(), appState.shelfEnabled,
+              appState.isShelfDragActive,
+              appState.canHandleIslandInput(generation: inputGeneration) else {
+            end()
+            return
+        }
+    }
+
+    func end() {
+        timer?.invalidate()
+        timer = nil
+        if let targetID { appState?.setShelfDropTarget(targetID, inside: false) }
+        targetID = nil
+        appState = nil
+    }
+
+    deinit { timer?.invalidate() }
 }
 
 extension View {
@@ -83,6 +165,7 @@ private struct ShelfDropDelegate: DropDelegate {
 
     private var canReceive: Bool {
         enabled && appState.shelfEnabled &&
+            destination.canReceive(shelfPanesVisible: appState.isShelfPanesVisible) &&
             appState.canHandleIslandInput(generation: inputGeneration)
     }
 
