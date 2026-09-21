@@ -56,10 +56,13 @@ extension View {
     }
 
     func onTrackpadSwipe(
+        givesNestedScrollViewsPriority: Bool = false,
         perform action: @escaping (SwipeDirection) -> Void
     ) -> some View {
         overlay {
-            TrackpadSwipeOverlay(onSwipe: action)
+            TrackpadSwipeOverlay(
+                onSwipe: action, givesNestedScrollViewsPriority: givesNestedScrollViewsPriority
+            )
                 .allowsHitTesting(false)
         }
     }
@@ -67,24 +70,80 @@ extension View {
 
 // MARK: - Trackpad Two-Finger Swipe
 
+/// The view where a gesture begins owns its entire sequence, including at a
+/// scroll view's boundary. A child must not hand a partly consumed swipe to
+/// the island just because the pointer moves out or its content cannot scroll.
+struct IslandSurfaceScrollOwnership {
+    enum Owner: Equatable { case surface, nestedScrollView }
+    static let gestureTimeout: TimeInterval = 0.35
+    private(set) var owner: Owner?
+    private var lastEventTime: TimeInterval?
+
+    mutating func allowsSurfaceSwipe(
+        phase: NSEvent.Phase, momentumPhase: NSEvent.Phase, timestamp: TimeInterval,
+        givesNestedScrollViewsPriority: Bool, isOverNestedScrollView: Bool
+    ) -> Bool {
+        if let lastEventTime, timestamp - lastEventTime > Self.gestureTimeout {
+            reset()
+        }
+        lastEventTime = timestamp
+        if phase.contains(.began) { owner = nil }
+        if phase.contains(.ended) || phase.contains(.cancelled) {
+            reset()
+            return false
+        }
+        guard momentumPhase.isEmpty else { return false }
+        if owner == nil {
+            owner = givesNestedScrollViewsPriority && isOverNestedScrollView
+                ? .nestedScrollView : .surface
+        }
+        return owner == .surface
+    }
+
+    mutating func reset() {
+        owner = nil
+        lastEventTime = nil
+    }
+}
+
+enum IslandSurfaceScrollHitTest {
+    /// `point` is in the root's coordinates. NSView.hitTest takes coordinates
+    /// in its superview, which also matters for windows with inset content.
+    @MainActor
+    static func isOverNestedScrollView(at point: NSPoint, in root: NSView) -> Bool {
+        var candidate = root.hitTest(root.convert(point, to: root.superview))
+        while let view = candidate {
+            if view is NSScrollView { return true }
+            if view === root { break }
+            candidate = view.superview
+        }
+        return false
+    }
+}
+
 /// Transparent overlay that uses a local event monitor to capture two-finger
 /// horizontal trackpad scroll gestures without blocking clicks or taps.
 struct TrackpadSwipeOverlay: NSViewRepresentable {
     let onSwipe: (SwipeDirection) -> Void
+    let givesNestedScrollViewsPriority: Bool
 
     func makeNSView(context: Context) -> TrackpadSwipeView {
         let view = TrackpadSwipeView()
         view.onSwipe = onSwipe
+        view.givesNestedScrollViewsPriority = givesNestedScrollViewsPriority
         return view
     }
 
     func updateNSView(_ nsView: TrackpadSwipeView, context: Context) {
         nsView.onSwipe = onSwipe
+        nsView.givesNestedScrollViewsPriority = givesNestedScrollViewsPriority
     }
 }
 
 final class TrackpadSwipeView: NSView {
     var onSwipe: ((SwipeDirection) -> Void)?
+    var givesNestedScrollViewsPriority = false
+    private var scrollOwnership = IslandSurfaceScrollOwnership()
 
     private enum ScrollAxis {
         case undecided
@@ -104,8 +163,11 @@ final class TrackpadSwipeView: NSView {
     private let verticalLockThreshold: CGFloat = 16
     private let horizontalDominanceRatio: CGFloat = 1.25
     private let verticalDominanceRatio: CGFloat = 1.35
-    private let gestureTimeout: TimeInterval = 0.35
+    private let gestureTimeout = IslandSurfaceScrollOwnership.gestureTimeout
     private var lastScrollEventTime: TimeInterval = 0
+
+    // The observation overlay must never hide the actual child from hitTest.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -125,8 +187,24 @@ final class TrackpadSwipeView: NSView {
 
         if IslandSurfaceSwipeSuppression.isActive(at: event.timestamp) {
             resetGesture()
+            scrollOwnership.reset()
             return
         }
+
+        let isOverNestedScrollView: Bool
+        if givesNestedScrollViewsPriority, let contentView = window.contentView {
+            let point = contentView.convert(event.locationInWindow, from: nil)
+            isOverNestedScrollView = IslandSurfaceScrollHitTest.isOverNestedScrollView(
+                at: point, in: contentView
+            )
+        } else {
+            isOverNestedScrollView = false
+        }
+        let allowsSurfaceSwipe = scrollOwnership.allowsSurfaceSwipe(
+            phase: event.phase, momentumPhase: event.momentumPhase, timestamp: event.timestamp,
+            givesNestedScrollViewsPriority: givesNestedScrollViewsPriority,
+            isOverNestedScrollView: isOverNestedScrollView
+        )
 
         let now = event.timestamp
         if now - lastScrollEventTime > gestureTimeout {
@@ -148,6 +226,10 @@ final class TrackpadSwipeView: NSView {
         // Momentum scrolls can arrive after the primary gesture has already
         // switched tabs. Ignore them so one physical swipe moves exactly once.
         guard event.momentumPhase == [] else { return }
+        guard allowsSurfaceSwipe else {
+            resetGesture()
+            return
+        }
 
         let deltaX = event.scrollingDeltaX
         let deltaY = event.scrollingDeltaY
@@ -198,6 +280,8 @@ final class TrackpadSwipeView: NSView {
     private func removeMonitor() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        scrollOwnership.reset()
+        resetGesture()
     }
 
     deinit {

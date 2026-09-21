@@ -19,8 +19,7 @@ enum ShelfZIPDropLoader {
         let localType = ShelfStore.localItemTypeIdentifier
         if provider.hasItemConformingToTypeIdentifier(localType),
            let payload = await payload(provider, type: localType, timeout: timeout),
-           let data = payload as? Data,
-           let value = String(data: data, encoding: .utf8),
+           let value = localIdentityString(payload),
            let id = UUID(uuidString: value),
            let item = existingItems.first(where: { $0.id == id }) {
             return item.isFileBacked ? .file(item) : .unsupported
@@ -58,6 +57,15 @@ enum ShelfZIPDropLoader {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
         return .file(.file(from: url))
+    }
+
+    private static func localIdentityString(_ value: NSSecureCoding) -> String? {
+        // The native pasteboard bridge can turn our UTF-8 Data into NSString.
+        // Both forms carry the same opaque identity; rejecting the string form
+        // would fall back to SwiftUI's materialized file in its Drag cache.
+        if let value = value as? String { return value }
+        if let data = value as? Data { return String(data: data, encoding: .utf8) }
+        return nil
     }
 
     private static func payload(

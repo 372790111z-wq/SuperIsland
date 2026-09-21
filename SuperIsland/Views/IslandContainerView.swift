@@ -145,6 +145,8 @@ struct IslandContainerView: View {
             enabled: contentMode == .production && appState.islandSurfaceSwipeEnabled
                 && !appState.isZilanInteractionSuppressed,
             isCompact: appState.currentState == .compact,
+            givesNestedScrollViewsPriority: appState.isShelfPanesVisible ||
+                (appState.currentState == .expanded && appState.activeBuiltInModule == .shelf),
             inputGeneration: inputGeneration,
             onTrackpad: {
                 guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
@@ -615,6 +617,7 @@ struct IslandContainerView: View {
 private struct IslandSurfaceSwipeModifier: ViewModifier {
     let enabled: Bool
     let isCompact: Bool
+    let givesNestedScrollViewsPriority: Bool
     let inputGeneration: UInt64
     let onTrackpad: (SwipeDirection) -> Void
     let onDragEnded: (DragGesture.Value, UInt64) -> Void
@@ -624,7 +627,7 @@ private struct IslandSurfaceSwipeModifier: ViewModifier {
     func body(content: Content) -> some View {
         if enabled {
             content
-                .onTrackpadSwipe { direction in
+                .onTrackpadSwipe(givesNestedScrollViewsPriority: givesNestedScrollViewsPriority) { direction in
                     guard !isCompact else { return }
                     onTrackpad(direction)
                 }

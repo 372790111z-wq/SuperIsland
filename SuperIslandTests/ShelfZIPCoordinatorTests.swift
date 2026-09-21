@@ -40,6 +40,22 @@ final class ShelfZIPDropLoaderTests: XCTestCase {
         XCTAssertEqual(resolved.displayName, item.displayName)
     }
 
+    func testNativeStringIdentityBeatsMaterializedDragCacheURL() async {
+        let item = ShelfItem(kind: .image, displayName: "粘贴图片.png", path: "/tmp/original/uuid.png")
+        let provider = NSItemProvider(item: item.id.uuidString as NSString,
+                                      typeIdentifier: ShelfStore.localItemTypeIdentifier)
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier, visibility: .all) {
+            completion in
+            completion(URL(fileURLWithPath: "/tmp/SwiftUI.Drag-cache/uuid.png").dataRepresentation, nil)
+            return nil
+        }
+        let result = await ShelfZIPDropLoader.load(provider, existingItems: [item])
+        guard case .file(let resolved) = result else { return XCTFail("Expected original item") }
+        XCTAssertEqual(resolved.id, item.id)
+        XCTAssertEqual(resolved.path, item.path)
+        XCTAssertEqual(resolved.displayName, "粘贴图片.png")
+    }
+
     func testStalledProviderTimesOutAndLateReplyCannotResumeTwice() async throws {
         let provider = NSItemProvider()
         provider.registerDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier, visibility: .all) {
@@ -64,6 +80,7 @@ final class ShelfZIPDropLoaderTests: XCTestCase {
         let originalURL = try XCTUnwrap(source.resolvedFileURL)
         let provider = ShelfStore.dragProvider(for: source)
         XCTAssertTrue(provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier))
+        XCTAssertEqual(provider.suggestedName, url.lastPathComponent)
         let result = await ShelfZIPDropLoader.load(provider, existingItems: [])
         guard case .file(let item) = result else { return XCTFail("Expected original URL") }
         XCTAssertEqual(item.path, originalURL.path)
