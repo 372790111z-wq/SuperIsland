@@ -1,6 +1,6 @@
 # Codex 用量刷新修复
 
-状态：源码与自动验证完成；候选包准备中，尚未替换已验收的 160622。
+状态：源码与自动验证完成，181025 候选包已签名归档。正常退出旧 WE1 未完成，安装停在替换前，仍运行已验收的 160622；未强退。
 
 ## 范围与回退
 
@@ -30,4 +30,12 @@
 - `scripts/tests/ai-usage.test.cjs`：8 项通过，覆盖周窗口、双窗口、Claude 保留、延迟标注/恢复、认证失败、无效数字与首次读取。
 - 独立 SwiftPM 对同一采集源执行 18 项测试通过；并发测试中间暴露的 fixture 懒初始化问题已修正为线程启动前初始化一个实例，生产单飞代码未因此调整。
 - Release arm64 构建通过；真实 Codex 采集摘要在 `build/WE1CodexUsage.noindex/live-codex-probe.json`，只保存状态、错误类别和窗口时长。
-- 包装完成后再补充源码提交、候选构建号、签名与安装边界。
+- 源码提交 `4eac824a038238e3a26390de2e0c710968648392`；构建前后采集源哈希一致。最终 Release 日志与源码哈希记录在 `build/WE1CodexUsage.noindex/release-final-result.json`。
+
+## 181025 候选包与安装边界
+
+- 版本 `20260921181025`，应用身份仍为 `com.workview.SuperIsland.WE1Debug`；稳定 designated requirement 与 160622 完全一致，严格签名通过。候选二进制 SHA-256：`6a698ae45bca6043f3b8c88ba49fa68dfffd9155c2525ab9c4b0c68402d23744`。
+- ZIP：`/Users/muyz/Projects/new super island/releases/WE1-20260921181025-arm64/SuperIsland-WE1-20260921181025-arm64.zip`；SHA-256：`90bd523818acc516382100f17e10ad8be62914b200bbc21dc1f122a52af0a07e`。同目录有说明、manifest 和校验和。保持本机签名，未公证或推送远端。
+- 向精确 PID 65539 发出正常退出请求后等待 10 秒，仍未退出；脚本在替换前中止。已复核已安装版本和二进制仍是 160622。未启动候选版、未强制结束进程。
+- 临时安装副本已从 `/Applications` 移回忽略构建目录 `build/WE1CodexUsage.noindex/UninstalledStage.noindex/`，防止残留待安装副本。详细状态为 `installation.json`。
+- 已询问用户是否允许仅强制结束 WE1 后继续更新；在授权到达前不得强退或将其写成已安装。若不授权，保留候选包及完整旧版。
