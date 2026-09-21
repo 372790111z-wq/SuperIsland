@@ -297,6 +297,9 @@ final class ShelfStore: ObservableObject {
     static let localItemTypeIdentifier = "com.workview.superisland.shelf-item"
 
     static let acceptedDropTypes: [UTType] = [
+        // Include the identity in SwiftUI's requested representations. A
+        // file-only request may omit it while materializing a cached copy.
+        UTType(exportedAs: localItemTypeIdentifier, conformingTo: .data),
         .fileURL,
         .url,
         .image,
@@ -482,6 +485,7 @@ final class ShelfStore: ObservableObject {
                 // materializes content-backed providers in a Drag cache and
                 // loses the source directory (and sometimes the filename).
                 let provider = NSItemProvider(object: url as NSURL)
+                provider.suggestedName = item.displayName
                 // Keep the original bookmark and managed-image identity when
                 // moving across panes inside this app. Other apps still get
                 // the existing file representation.
