@@ -5,6 +5,48 @@ import XCTest
 
 @MainActor
 final class ShelfZIPDropLoaderTests: XCTestCase {
+    func testNativePasteboardRecoversIdentityFromFileOnlySwiftUIProvider() async throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let item = ShelfItem(kind: .file, displayName: "原名称.txt", path: "/tmp/original/原名称.txt")
+        let native = NSPasteboardItem()
+        native.setString(item.id.uuidString, forType: .init(ShelfStore.localItemTypeIdentifier))
+        native.setString("file:///tmp/SwiftUI.Drag-cache/copy.txt", forType: .fileURL)
+        pasteboard.writeObjects([native])
+        let provider = NSItemProvider(object: URL(fileURLWithPath: "/tmp/SwiftUI.Drag-cache/copy.txt") as NSURL)
+        XCTAssertFalse(provider.hasItemConformingToTypeIdentifier(ShelfStore.localItemTypeIdentifier))
+        let identity = try XCTUnwrap(ShelfZIPDropLoader.nativePasteboardItemID(pasteboard))
+        let result = await ShelfZIPDropLoader.load(provider, existingItems: [item], nativeItemID: identity)
+        guard case .file(let resolved) = result else { return XCTFail("Expected original file") }
+        XCTAssertEqual(resolved.id, item.id)
+        XCTAssertEqual(resolved.path, item.path)
+        XCTAssertEqual(resolved.displayName, item.displayName)
+    }
+
+    func testNextExternalDragAndMultiplePasteboardItemsCannotBorrowIdentity() {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let item = NSPasteboardItem()
+        item.setString(UUID().uuidString, forType: .init(ShelfStore.localItemTypeIdentifier))
+        pasteboard.writeObjects([item])
+        XCTAssertNotNil(ShelfZIPDropLoader.nativePasteboardItemID(pasteboard))
+        pasteboard.clearContents()
+        pasteboard.writeObjects([URL(fileURLWithPath: "/tmp/external.txt") as NSURL])
+        XCTAssertNil(ShelfZIPDropLoader.nativePasteboardItemID(pasteboard))
+        pasteboard.clearContents()
+        let first = NSPasteboardItem(), second = NSPasteboardItem()
+        first.setString(UUID().uuidString, forType: .init(ShelfStore.localItemTypeIdentifier))
+        second.setString("file:///tmp/external.txt", forType: .fileURL)
+        pasteboard.writeObjects([first, second])
+        XCTAssertNil(ShelfZIPDropLoader.nativePasteboardItemID(pasteboard))
+    }
+
+    func testRemovedNativeItemDoesNotFallBackToDragCache() async {
+        let provider = NSItemProvider(object: URL(fileURLWithPath: "/tmp/SwiftUI.Drag-cache/copy.txt") as NSURL)
+        let result = await ShelfZIPDropLoader.load(provider, existingItems: [], nativeItemID: UUID())
+        guard case .unavailable = result else { return XCTFail("Removed original must not become cache input") }
+    }
+
     func testTextTypedFinderNSURLRemainsAFile() async throws {
         let url = URL(fileURLWithPath: "/tmp/中文 # 空格\n测试.txt")
         let provider = NSItemProvider(item: url as NSURL, typeIdentifier: UTType.plainText.identifier)
@@ -124,6 +166,41 @@ final class ShelfZIPDropLoaderTests: XCTestCase {
 
 @MainActor
 final class ShelfZIPCoordinatorTests: XCTestCase {
+    func testNativeIdentityIsCapturedBeforeAsyncLoadAndArchivesAtOriginalLocation() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try makeFile("原名称.txt", directory)
+        let original = ShelfItem.file(from: source)
+        var draggedID: UUID? = original.id
+        var results: [ShelfItem] = []
+        let coordinator = ShelfZIPCoordinator(existingItems: { [original] }, addResults: { results += $0 },
+                                               nativeDraggedItemID: { draggedID })
+        coordinator.handleDrop(providers: [provider(directory.appendingPathComponent("nonexistent-cache-copy.txt"))])
+        draggedID = nil
+        try await idle(coordinator)
+        XCTAssertEqual(results.map(\.displayName), ["原名称.txt.zip"])
+        XCTAssertEqual(results.first?.resolvedFileURL?.resolvingSymlinksInPath().path,
+                       directory.appendingPathComponent("原名称.txt.zip").resolvingSymlinksInPath().path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    func testMultiProviderDropDoesNotReadSingleNativeIdentity() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try makeFile("first.txt", directory)
+        let second = try makeFile("second.txt", directory)
+        var reads = 0
+        var results: [ShelfItem] = []
+        let coordinator = ShelfZIPCoordinator(addResults: { results += $0 }, nativeDraggedItemID: {
+            reads += 1
+            return UUID()
+        })
+        coordinator.handleDrop(providers: [provider(first), provider(second)])
+        try await idle(coordinator)
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(results.map(\.displayName), ["first.txt.zip", "second.txt.zip"])
+    }
+
     func testDropDeduplicatesRepresentationsButNextDropProducesNumberedZIP() async throws {
         let directory = try makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

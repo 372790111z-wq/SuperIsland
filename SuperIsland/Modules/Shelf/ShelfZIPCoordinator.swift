@@ -14,8 +14,15 @@ enum ShelfZIPInputResult {
 enum ShelfZIPDropLoader {
     static func load(
         _ provider: NSItemProvider, existingItems: [ShelfItem],
-        timeout: TimeInterval = 5
+        timeout: TimeInterval = 5, nativeItemID: UUID? = nil
     ) async -> ShelfZIPInputResult {
+        if let nativeItemID {
+            guard let item = existingItems.first(where: { $0.id == nativeItemID }) else {
+                return .unavailable
+            }
+            ShelfDropDiagnostics.record("zip.identity", destination: "zip", code: "native")
+            return item.isFileBacked ? .file(item) : .unsupported
+        }
         let localType = ShelfStore.localItemTypeIdentifier
         ShelfDropDiagnostics.record("zip.provider", destination: "zip", values: [
             "local": provider.hasItemConformingToTypeIdentifier(localType) ? 1 : 0,
@@ -61,6 +68,16 @@ enum ShelfZIPDropLoader {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
         return .file(.file(from: url))
+    }
+
+    /// Capture only this drop's opaque identity, before any asynchronous load.
+    /// SwiftUI can supply a file-only NSItemProvider even though the native
+    /// dragging pasteboard still has our own-process representation.
+    static func nativePasteboardItemID(_ pasteboard: NSPasteboard) -> UUID? {
+        guard let items = pasteboard.pasteboardItems, items.count == 1,
+              let value = items[0].string(forType: NSPasteboard.PasteboardType(ShelfStore.localItemTypeIdentifier))
+        else { return nil }
+        return UUID(uuidString: value)
     }
 
     private static func localIdentityString(_ value: NSSecureCoding) -> String? {
@@ -152,7 +169,8 @@ final class ShelfZIPCoordinator: ObservableObject {
     static let shared = ShelfZIPCoordinator(
         existingItems: { ShelfStore.shared.items },
         addResults: { _ = ShelfStore.shared.add($0) },
-        didReceive: { AppState.shared.presentShelfAfterDrop() }
+        didReceive: { AppState.shared.presentShelfAfterDrop() },
+        nativeDraggedItemID: { ShelfZIPDropLoader.nativePasteboardItemID(NSPasteboard(name: .drag)) }
     )
 
     @Published private(set) var title = "ZIP 压缩"
@@ -171,6 +189,7 @@ final class ShelfZIPCoordinator: ObservableObject {
     private let existingItems: () -> [ShelfItem]
     private let addResults: ([ShelfItem]) -> Void
     private let didReceive: () -> Void
+    private let nativeDraggedItemID: () -> UUID?
     private let archive: Archive
     private let pickDirectory: DirectoryPicker
     private var operation: Task<Void, Never>?
@@ -186,6 +205,7 @@ final class ShelfZIPCoordinator: ObservableObject {
         existingItems: @escaping () -> [ShelfItem] = { [] },
         addResults: @escaping ([ShelfItem]) -> Void = { _ in },
         didReceive: @escaping () -> Void = {},
+        nativeDraggedItemID: @escaping () -> UUID? = { nil },
         archive: @escaping Archive = { source, directory, name, cancellation in
             try ShelfZIPArchive.create(
                 source: source, outputDirectory: directory, preferredName: name,
@@ -197,6 +217,7 @@ final class ShelfZIPCoordinator: ObservableObject {
         self.existingItems = existingItems
         self.addResults = addResults
         self.didReceive = didReceive
+        self.nativeDraggedItemID = nativeDraggedItemID
         self.archive = archive
         self.pickDirectory = pickDirectory
     }
@@ -207,6 +228,7 @@ final class ShelfZIPCoordinator: ObservableObject {
     func handleDrop(providers: [NSItemProvider]) -> Bool {
         guard !providers.isEmpty else { return true }
         guard !isBusy else { return true }
+        let nativeItemID = providers.count == 1 ? nativeDraggedItemID() : nil
         beginReceiving()
         let token = cancellation!
         operation = Task { [weak self] in
@@ -214,7 +236,8 @@ final class ShelfZIPCoordinator: ObservableObject {
             var inputs: [ShelfItem] = []
             for (index, provider) in providers.enumerated() {
                 guard !token.isCancelled else { break }
-                let result = await ShelfZIPDropLoader.load(provider, existingItems: existingItems())
+                let result = await ShelfZIPDropLoader.load(provider, existingItems: existingItems(),
+                                                           nativeItemID: nativeItemID)
                 guard !token.isCancelled else { break }
                 switch result {
                 case .file(let item): inputs.append(item)
