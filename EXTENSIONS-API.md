@@ -376,7 +376,7 @@ declare namespace SuperIsland {
   // ─── Local Usage (requires "usage" permission) ───────
 
   namespace system {
-    /** Read locally available Codex and Claude usage summaries. */
+    /** Read cached Codex and Claude usage; collection runs in the background. */
     function getAIUsage(): {
       updatedAt: number;
       codex: {
@@ -398,7 +398,14 @@ declare namespace SuperIsland {
         planType: string | null;
         hasCredits: boolean;
         unlimited: boolean;
-        source?: "local-summary" | "oauth-api" | "auth-token" | "unavailable";
+        /** Credit balance policy is distinct from rate-limit allowance. */
+        creditsUnlimited?: boolean;
+        status?: "loading" | "ready" | "stale" | "unavailable";
+        errorCode?: "timeout" | "network" | "auth" | "rate-limited" | "invalid-response" | "no-credentials" | null;
+        /** Unix timestamp of the last successful reading, not the latest attempt. */
+        updatedAt?: number | null;
+        nextRetryAt?: number;
+        source?: "local-summary" | "oauth-api" | "loading" | "unavailable";
       };
       claude: {
         available: boolean;

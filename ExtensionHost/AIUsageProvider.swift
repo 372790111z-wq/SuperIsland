@@ -5,6 +5,22 @@ import LocalAuthentication
 #endif
 
 enum AIUsageProvider {
+    private static let codexProvider = CodexUsageService(
+        dependencies: .live(
+            onChange: {
+                DispatchQueue.main.async {
+                    ExtensionManager.shared.scheduleImmediateRefresh(extensionID: "superisland.ai-usage")
+                }
+            },
+            log: { message in
+                // Fixed status/error labels only; never credentials or response bodies.
+                ExtensionLogger.shared.log("superisland.ai-usage", .info, message)
+            }
+        )
+    )
+
+    // Claude keeps its existing collection and cache behavior. Its refresh is
+    // independent of Codex and cannot delay publication of a Codex result.
     private static let cacheTTL: TimeInterval = 300
     private static let claudeKeychainAccessStateDefaultsKey = "aiUsage.claude.keychainAccessState"
     private static let claudeKeychainAccessDeniedAtDefaultsKey = "aiUsage.claude.keychainAccessDeniedAt"
@@ -43,10 +59,12 @@ enum AIUsageProvider {
             triggerBackgroundRefresh()
         }
 
-        return existing ?? [
+        return [
+            // Compatibility timestamp for the snapshot itself. Each provider's
+            // updatedAt is its data timestamp; Codex never advances it on error.
             "updatedAt": Int(nowDate.timeIntervalSince1970),
-            "codex": ["available": false, "source": "loading"] as [String: Any],
-            "claude": ["available": false, "source": "loading"] as [String: Any]
+            "codex": codexProvider.snapshot(),
+            "claude": existing ?? ["available": false, "source": "loading"] as [String: Any]
         ]
     }
 
@@ -62,11 +80,7 @@ enum AIUsageProvider {
         DispatchQueue.global(qos: .utility).async {
             let nowDate = Date()
             let now = Int(nowDate.timeIntervalSince1970)
-            let payload: [String: Any] = [
-                "updatedAt": now,
-                "codex": buildCodexPayload(updatedAt: now),
-                "claude": buildClaudePayload(updatedAt: now)
-            ]
+            let payload = buildClaudePayload(updatedAt: now)
 
             cacheLock.lock()
             cachedAt = nowDate
@@ -74,113 +88,6 @@ enum AIUsageProvider {
             isRefreshing = false
             cacheLock.unlock()
         }
-    }
-
-    // MARK: - Codex
-
-    private static func buildCodexPayload(updatedAt: Int) -> [String: Any] {
-        if let localSummary = loadJSONDictionary(fromCandidates: homePathCandidates([
-            ".codex/usage-summary.json",
-            ".codex/usage/summary.json"
-        ])) {
-            return buildCodexPayloadFromLocalSummary(localSummary, updatedAt: updatedAt)
-        }
-
-        if let oauthPayload = loadCodexPayloadFromOAuthAPI(updatedAt: updatedAt) {
-            return oauthPayload
-        }
-
-        // Last fallback: if auth exists we still mark as available to avoid N/A UI.
-        let hasAuth = loadCodexAccessToken() != nil
-        return [
-            "available": hasAuth,
-            "primary": NSNull(),
-            "secondary": NSNull(),
-            "planType": NSNull(),
-            "hasCredits": false,
-            "unlimited": false,
-            "source": hasAuth ? "auth-token" : "unavailable",
-            "updatedAt": updatedAt
-        ]
-    }
-
-    private static func buildCodexPayloadFromLocalSummary(_ data: [String: Any], updatedAt: Int) -> [String: Any] {
-        [
-            "available": true,
-            "primary": data["primary"] ?? NSNull(),
-            "secondary": data["secondary"] ?? NSNull(),
-            "planType": data["planType"] ?? NSNull(),
-            "hasCredits": data["hasCredits"] as? Bool ?? false,
-            "unlimited": data["unlimited"] as? Bool ?? false,
-            "source": "local-summary",
-            "updatedAt": data["updatedAt"] ?? updatedAt
-        ]
-    }
-
-    private static func loadCodexPayloadFromOAuthAPI(updatedAt: Int) -> [String: Any]? {
-        guard let token = loadCodexAccessToken(),
-              let url = URL(string: "https://chatgpt.com/backend-api/wham/usage"),
-              let response = fetchJSON(url: url, bearerToken: token, timeout: 3.0) else {
-            return nil
-        }
-
-        let rateLimit = response["rate_limit"] as? [String: Any]
-        let primary = mapCodexWindow(rateLimit?["primary_window"])
-        let secondary = mapCodexWindow(rateLimit?["secondary_window"])
-        let credits = response["credits"] as? [String: Any]
-
-        return [
-            "available": true,
-            "primary": primary ?? NSNull(),
-            "secondary": secondary ?? NSNull(),
-            "planType": response["plan_type"] ?? NSNull(),
-            "hasCredits": credits?["has_credits"] as? Bool ?? false,
-            "unlimited": credits?["unlimited"] as? Bool ?? false,
-            "source": "oauth-api",
-            "updatedAt": updatedAt
-        ]
-    }
-
-    private static func mapCodexWindow(_ value: Any?) -> [String: Any]? {
-        guard let window = value as? [String: Any] else {
-            return nil
-        }
-
-        let usedPercent = asDouble(window["used_percent"])
-        let remainingPercent = max(0, 100 - usedPercent)
-        let limitWindowSeconds = Int(asDouble(window["limit_window_seconds"]))
-        let windowMinutes = max(1, limitWindowSeconds / 60)
-
-        return [
-            "usedPercent": usedPercent,
-            "remainingPercent": remainingPercent,
-            "windowMinutes": windowMinutes,
-            "windowLabel": codexWindowLabel(seconds: limitWindowSeconds),
-            "resetsAt": window["reset_at"] ?? NSNull()
-        ]
-    }
-
-    private static func codexWindowLabel(seconds: Int) -> String {
-        if seconds % 3600 == 0 {
-            return "\(seconds / 3600)h"
-        }
-        return "\(max(1, seconds / 60))m"
-    }
-
-    private static func loadCodexAccessToken() -> String? {
-        for authPath in homePathCandidates([".codex/auth.json"]) {
-            let authURL = URL(fileURLWithPath: authPath)
-            guard FileManager.default.fileExists(atPath: authURL.path),
-                  let data = try? Data(contentsOf: authURL),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tokens = object["tokens"] as? [String: Any],
-                  let accessToken = tokens["access_token"] as? String,
-                  !accessToken.isEmpty else {
-                continue
-            }
-            return accessToken
-        }
-        return nil
     }
 
     // MARK: - Claude
