@@ -17,11 +17,15 @@ enum ShelfZIPDropLoader {
         timeout: TimeInterval = 5
     ) async -> ShelfZIPInputResult {
         let localType = ShelfStore.localItemTypeIdentifier
+        ShelfDropDiagnostics.record("zip.provider", destination: "zip", values: [
+            "local": provider.hasItemConformingToTypeIdentifier(localType) ? 1 : 0,
+            "types": Int64(provider.registeredTypeIdentifiers.count)
+        ])
         if provider.hasItemConformingToTypeIdentifier(localType),
-           let payload = await payload(provider, type: localType, timeout: timeout),
-           let value = localIdentityString(payload),
+           let value = await localIdentity(provider, type: localType, timeout: timeout),
            let id = UUID(uuidString: value),
            let item = existingItems.first(where: { $0.id == id }) {
+            ShelfDropDiagnostics.record("zip.identity", destination: "zip", code: "matched")
             return item.isFileBacked ? .file(item) : .unsupported
         }
 
@@ -66,6 +70,31 @@ enum ShelfZIPDropLoader {
         if let value = value as? String { return value }
         if let data = value as? Data { return String(data: data, encoding: .utf8) }
         return nil
+    }
+
+    private static func localIdentity(_ provider: NSItemProvider, type: String,
+                                      timeout: TimeInterval) async -> String? {
+        // Read the representation we registered. For pasteboard-backed custom
+        // types, loadItem may hand back a materialized file URL instead of bytes.
+        let data: Data? = await withCheckedContinuation { continuation in
+            let request = ShelfZIPProviderRequest(continuation)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                request.finish(nil)
+            }
+            provider.loadDataRepresentation(forTypeIdentifier: type) { data, error in
+                request.finish(error == nil ? data as NSData? : nil)
+            }
+        } as? Data
+        if let data, let value = String(data: data, encoding: .utf8), UUID(uuidString: value) != nil {
+            ShelfDropDiagnostics.record("zip.identity.data", destination: "zip", code: "valid")
+            return value
+        }
+        let item = await payload(provider, type: type, timeout: timeout)
+        ShelfDropDiagnostics.record("zip.identity.fallback", destination: "zip", values: [
+            "data": item is Data ? 1 : 0, "string": item is String ? 1 : 0,
+            "url": item is URL ? 1 : 0
+        ])
+        return item.flatMap(localIdentityString)
     }
 
     private static func payload(
