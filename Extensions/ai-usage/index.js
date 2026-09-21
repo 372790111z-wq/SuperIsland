@@ -58,16 +58,8 @@ function withSource(detail, source) {
 }
 
 function pickCodexWindow(codex) {
-  const primary = asObject(codex.primary);
-  const secondary = asObject(codex.secondary);
-
-  if (!primary && !secondary) return null;
-  if (primary && !secondary) return primary;
-  if (!primary && secondary) return secondary;
-
-  const primaryRemaining = toNumber(primary.remainingPercent, 101);
-  const secondaryRemaining = toNumber(secondary.remainingPercent, 101);
-  return primaryRemaining <= secondaryRemaining ? primary : secondary;
+  return codexUsageWindows(codex).reduce((lowest, window) =>
+    !lowest || window.remainingPercent < lowest.remainingPercent ? window : lowest, null);
 }
 
 function codexRemainingPercent(codexWindow) {
@@ -83,35 +75,62 @@ function codexRemainingPercent(codexWindow) {
 }
 
 function codexUsageStats(codex) {
-  const windows = [];
-  const primary = asObject(codex.primary);
-  const secondary = asObject(codex.secondary);
-
-  [primary, secondary].forEach((window) => {
-    if (!window) return;
-    const remainingPercent = codexRemainingPercent(window);
-    if (remainingPercent === null) return;
-    windows.push({
-      remainingPercent,
-      windowMinutes: toNumber(window.windowMinutes, 0)
-    });
-  });
-
-  if (windows.length === 0) {
-    return { weeklyRemaining: null, sessionRemaining: null };
-  }
-
-  windows.sort((a, b) => a.windowMinutes - b.windowMinutes);
-  const session = windows[0];
-  const weekly = windows[windows.length - 1];
-
+  const windows = codexUsageWindows(codex);
+  const session = windows.find(window => window.windowMinutes === 300);
+  const weekly = windows.find(window => window.windowMinutes === 10080);
   return {
-    weeklyRemaining: weekly ? Math.round(clamp(weekly.remainingPercent, 0, 100)) : null,
-    sessionRemaining: session ? Math.round(clamp(session.remainingPercent, 0, 100)) : null
+    weeklyRemaining: weekly ? Math.round(weekly.remainingPercent) : null,
+    sessionRemaining: session ? Math.round(session.remainingPercent) : null
   };
 }
 
+function codexNumber(value) {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function codexUsageWindows(codex) {
+  if (codex.available !== true) return [];
+  return [codex.primary, codex.secondary].map(value => {
+    const window = asObject(value);
+    if (!window) return null;
+    const used = codexNumber(window.usedPercent);
+    const remaining = codexNumber(window.remainingPercent) ?? (used === null ? null : 100 - used);
+    const minutes = codexNumber(window.windowMinutes);
+    if (remaining === null || remaining < 0 || remaining > 100 || !Number.isInteger(minutes) || minutes <= 0) return null;
+    const label = minutes === 10080 ? "每周剩余"
+      : minutes % 60 === 0 ? `${minutes / 60} 小时剩余` : `${minutes} 分钟剩余`;
+    return { remainingPercent: remaining, windowMinutes: minutes, windowLabel: label };
+  }).filter(Boolean).sort((a, b) => a.windowMinutes - b.windowMinutes);
+}
+
+function codexStatus(codex) {
+  if (codex.status === "stale") return "更新延迟";
+  if (codex.status === "loading" || codex.source === "loading") return "读取中";
+  switch (codex.errorCode) {
+    case "auth": return "登录已失效，请重新登录 Codex";
+    case "no-credentials": return "请先登录 Codex";
+    case "timeout": return "请求超时，稍后重试";
+    case "network": return "连接失败，稍后重试";
+    case "rate-limited": return "刷新受限，稍后重试";
+    case "invalid-response": return "用量数据异常，稍后重试";
+    default: return codex.available === true ? "" : "暂时无法读取用量";
+  }
+}
+
 function codexModel(usage) {
+  const codex = asObject(usage && usage.codex) || {};
+  const model = codexReadingModel(usage);
+  model.windows = codexUsageWindows(codex);
+  model.isStale = codex.status === "stale";
+  model.status = codexStatus(codex) || (model.windows.length ? "" : "暂时无法读取用量");
+  model.updatedAt = codexNumber(codex.updatedAt);
+  return model;
+}
+
+function codexReadingModel(usage) {
   const codex = asObject(usage && usage.codex);
   const source = codex && typeof codex.source === "string" ? codex.source : null;
   if (!codex || codex.available !== true) {
@@ -124,19 +143,6 @@ function codexModel(usage) {
       weeklyRemaining: null,
       sessionRemaining: null,
       detail: withSource("Not available", source)
-    };
-  }
-
-  if (codex.unlimited === true) {
-    return {
-      title: "Codex",
-      text: "∞",
-      remaining: 100,
-      progress: 1,
-      color: "green",
-      weeklyRemaining: 100,
-      sessionRemaining: 100,
-      detail: withSource("Unlimited", source)
     };
   }
 
@@ -255,8 +261,23 @@ function ringWithPercent(model, lineWidth) {
     View.text(model.text, {
       style: "monospacedSmall",
       color: model.color
-    })
+    }),
+    ...(model.isStale ? [View.text("延迟", { style: "caption", color: "orange" })] : [])
   ], { spacing: 5, align: "center" });
+}
+
+function codexStatusViews(model) {
+  return model.status ? [View.text(model.status, {
+    style: "footnote", color: model.isStale ? "orange" : "gray"
+  })] : [];
+}
+
+function codexUpdatedViews(model) {
+  if (!model.windows.length || model.updatedAt === null || model.updatedAt <= 0) return [];
+  const date = new Date(model.updatedAt * 1000);
+  if (!Number.isFinite(date.getTime())) return [];
+  const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return [View.text(`更新于 ${time}`, { style: "footnote", color: "gray" })];
 }
 
 function usageSnapshot() {
@@ -281,11 +302,14 @@ SuperIsland.registerModule({
     leading() {
       const usage = usageSnapshot();
       const codex = codexModel(usage);
-      return View.circularProgress(codex.progress, {
+      const ring = View.circularProgress(codex.progress, {
         total: 1,
         lineWidth: 3,
         color: codex.color
       });
+      return codex.isStale ? View.hstack([
+        ring, View.text("延迟", { style: "caption", color: "orange" })
+      ], { spacing: 3, align: "center" }) : ring;
     },
 
     trailing() {
@@ -313,7 +337,8 @@ SuperIsland.registerModule({
         View.hstack([
           View.circularProgress(codex.progress, { total: 1, lineWidth: 4, color: codex.color }),
           View.text(codex.text, { style: "monospaced", color: codex.color })
-        ], { spacing: 8, align: "center" })
+        ], { spacing: 8, align: "center" }),
+        ...codexStatusViews(codex)
       ], { spacing: 4, align: "center" }),
 
       View.vstack([
@@ -338,8 +363,9 @@ SuperIsland.registerModule({
           View.circularProgress(codex.progress, { total: 1, lineWidth: 6, color: codex.color }),
           View.text("Codex", { style: "caption", color: "gray" }),
           View.text(codex.text, { style: "monospaced", color: codex.color }),
-          View.text(`Week ${percentLabel(codex.weeklyRemaining)}`, { style: "footnote", color: "gray" }),
-          View.text(`Session ${percentLabel(codex.sessionRemaining)}`, { style: "footnote", color: "gray" })
+          ...codex.windows.map(window => View.text(`${window.windowLabel} ${formatPercent(window.remainingPercent)}`, { style: "footnote", color: "gray" })),
+          ...codexStatusViews(codex),
+          ...codexUpdatedViews(codex)
         ], { spacing: 4, align: "center" }),
         View.vstack([
           View.circularProgress(claude.progress, { total: 1, lineWidth: 6, color: claude.color }),

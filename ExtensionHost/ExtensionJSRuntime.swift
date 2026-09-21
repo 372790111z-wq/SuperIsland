@@ -39,6 +39,8 @@ final class ExtensionJSRuntime {
     private var didActivate = false
     private var lifecycleGeneration: UInt64 = 0
     private var timersSuspended = false
+    // The five view sizes rendered in one pass must use the same usage data.
+    private var renderingAIUsageSnapshot: [String: Any]?
     private let performWhatsAppCommand: @MainActor (WhatsAppCommand) -> [String: Any]
 
     private let defaults = UserDefaults.standard
@@ -150,6 +152,11 @@ final class ExtensionJSRuntime {
         guard let config = moduleConfig else {
             return nil
         }
+
+        if manifest.permissions.contains("usage") {
+            renderingAIUsageSnapshot = AIUsageProvider.snapshot()
+        }
+        defer { renderingAIUsageSnapshot = nil }
 
         let compact = renderNode(from: config, key: "compact") ?? .empty
         let expanded = renderNode(from: config, key: "expanded") ?? compact
@@ -458,7 +465,7 @@ final class ExtensionJSRuntime {
             guard self.manifest.permissions.contains("usage") else {
                 return JSValue(nullIn: self.context)
             }
-            return JSValue(object: AIUsageProvider.snapshot(), in: self.context)
+            return JSValue(object: self.renderingAIUsageSnapshot ?? AIUsageProvider.snapshot(), in: self.context)
         }
 
         let getNowPlaying: @convention(block) () -> JSValue? = { [weak self] in
