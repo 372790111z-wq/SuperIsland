@@ -32,3 +32,11 @@
 - 候选包与构建清单位于忽略目录 `build/WE1ShelfZIP.noindex/`；安装须另获用户确认，届时先保留完整 001213 应用包，只替换 WE1，不清理偏好或用户数据。
 - 当前安装版本 `20260921001213`，二进制 SHA-256 为 `0c051a95983b8a000cbbe0db050a782666d5ab269899c35f678b425863579adb`。其代码、安装与已知顶部拖动路径边界见同目录 `2026-09-21-shelf-native-receive.md`。
 - 源码可从 `we1-001213-saved-20260921` 另建工作区恢复；不以重置或覆盖方式破坏当前工作区。
+
+## 已生成候选包
+
+- 源码提交：`b964e4a948351e1a426454131a801781371f58c2`。
+- 构建：`20260921114718`，约 20.3 MB；路径 `build/WE1ShelfZIP.noindex/Candidate-20260921114718.noindex/SuperIsland-WE1-Debug.app`。
+- 候选二进制 SHA-256：`7e5a969d37743c3a0dec8e38962213e98b3a3ddcd163a6d415095612181a7361`。
+- 沿用 `SuperIsland WE1 Debug Local Code Signing`，签名要求与已安装 001213 一致，严格签名验证通过；无覆盖率代码、debug dylib 或测试包。
+- 构建清单：`build/WE1ShelfZIP.noindex/candidate.json`；状态为未安装、未原生实测。
