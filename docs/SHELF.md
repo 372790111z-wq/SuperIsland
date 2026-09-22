@@ -1,19 +1,47 @@
-# File Shelf
+# 文件暂存架与 ZIP 压缩
 
-The Shelf module is a local staging area for items users want to keep close to the island temporarily.
+暂存架用于把文件、文件夹、图片、链接和文字临时放在灵动岛中，方便稍后打开、拖出或分享。它不是备份工具：从 Finder 加入的文件通常只保存引用，原文件仍在原位置。
 
-## Supported Items
+## 暂存与分享
 
-- Files and folders are stored as metadata with security-scoped bookmarks where available.
-- URLs and text snippets are stored as local metadata.
-- Dropped image data is saved locally for shelf use; large file drops are not copied into app storage.
+1. 从 Finder 或桌面拖动文件到灵动岛，出现文件区域后，将文件放入中间的「暂存架」。
+2. 单击暂存项打开；右键可固定、快速查看、在 Finder 中显示、复制、分享或移除。可用操作取决于项目类型和文件是否仍存在。
+3. 把暂存项拖回 Finder 或其他接收文件的应用。ZIP 拖出使用原文件名；是否复制或移动，以及能否接收该类型，由接收应用决定。
+4. 拖到左侧「AirDrop」可打开系统分享面板；也可通过暂存项右键菜单的「分享…」选择其他系统分享方式。打开面板后仍需选择接收方，不会直接发送。
 
-## Actions
+在暂存架文件列表内左右滚动，只滚动列表；即使滚到边缘，也不会顺带切换整个灵动岛模块。切换模块可使用列表外的切页操作。
 
-Shelf items can be opened, pinned, removed, dragged back out, revealed in Finder, previewed with Quick Look, copied, shared with the system sharing picker, or sent with AirDrop when the sharing service is available.
+### 固定与保留时间
 
-Pinned items stay ahead of unpinned items and are not removed by retention cleanup.
+在「设置 → 模块」中设置暂存架保留时间，默认 Never（不自动清理），可选择 1、7、30 或 90 天。固定项排在前面，不受保留时间清理影响。
 
-## Retention
+移除普通文件或文件夹的暂存项，只移除引用，不删除磁盘原件。直接拖入的图片数据会保存为暂存架托管图片；移除该项或到期清理时，其托管副本也会删除。原文件无法找到时，暂存项保留缺失状态，可移除或复制记录的路径。
 
-Settings -> Modules -> Shelf retention controls automatic cleanup for unpinned shelf items. The default is Never, which preserves the previous behavior. Missing local files remain visible with a missing state so users can remove the stale entry or copy the stored path.
+## 拖入自动压缩
+
+把 Finder、桌面或暂存架中的本地文件、文件夹拖到暂存架右侧的「ZIP 压缩」区域，松手后自动开始。完成的 ZIP 会加入暂存架，源文件保留。
+
+| 拖入内容 | 生成结果 |
+| --- | --- |
+| `报告.pdf` | 同目录生成 `报告.pdf.zip` |
+| 文件夹 `资料` | 同目录生成 `资料.zip`，保留文件夹根目录和空目录 |
+| 多个文件或文件夹 | 每项单独生成一个 ZIP，不合并为一个包 |
+| 同名 ZIP 已存在 | 使用 `报告.pdf (1).zip`、`报告.pdf (2).zip` 等名称，不覆盖原包 |
+| 暂存架托管图片 | 开始前选择保存目录，再生成 ZIP |
+
+一批项目同时包含托管图片和普通文件时，会先为图片选择目录；普通文件仍输出到各自原目录。取消这次目录选择，整批都不开始压缩。
+
+### 失败与取消
+
+- 可取消正在进行的任务；已经完成的 ZIP 保留，未完成的临时文件会清理。
+- 部分失败时，成功结果仍加入暂存架；「重试」只处理失败项。
+- 目标目录无法写入等可更换位置的失败，可选择新目录；新目录应用于该批所有待重试项。
+- ZIP 区只接收本地文件和文件夹，不接收纯文字或网页链接。
+- 压缩会跳过 `.DS_Store`、`._*` 和 `__MACOSX`。遇到符号链接或其他特殊文件会拒绝该项，不会跟随链接压缩到别处。
+- 压缩期间源文件发生变化、文件不可读或磁盘空间不足时，会报告失败，不发布不完整的 ZIP。
+
+## 验证范围
+
+Finder 拖入、暂存架内部压缩、ZIP 原名拖出、列表滚动隔离及 AirDrop 面板打开后取消，已有原生实机记录；归档内容另经独立解压校验。使用 UTF-8 文件名并支持 ZIP64，但 Windows 实际解压、大于 4 GB 的实物归档、AirDrop 接收端传输及所有第三方拖放目标尚未逐项验证。
+
+实现与验证记录见 [暂存架 ZIP 检查点](checkpoints/2026-09-21-shelf-zip-candidate.md)。历史记录中的 WE1 是测试阶段名称，不代表另一个当前产品。
