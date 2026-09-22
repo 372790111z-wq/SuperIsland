@@ -1,28 +1,38 @@
-# Now Playing
+# 正在播放
 
-The Now Playing module combines the system media feed with app-specific fallbacks for Apple Music and Spotify.
+「正在播放」显示当前媒体的封面、标题、作者和播放进度，提供播放／暂停、上一首、下一首等控件。信息来自系统媒体通道，并为 Apple Music、Spotify 提供专门的检测与控制路径；其他来源能显示哪些内容，取决于应用提供的媒体信息。
 
-## Browser media detection
+## 点击封面打开来源
 
-Browser media detection is off by default. When enabled in Settings -> Modules -> Now Playing, SuperIsland can use macOS Automation to inspect allowed browser tabs for active `video` and `audio` elements.
+首页和音乐展开页中的**整张音乐封面**都可点击，包括右下角的来源小图标。播放按钮和进度条仍单独操作。
 
-Supported browser targets:
+- 来源 App 在后台或窗口最小化时，点击封面会尝试将其窗口带到前台。
+- 对仍在运行的原生音乐 App，主窗口关闭后可请求重新打开窗口。QQ 音乐的这一场景已有用户实测反馈。
+- 来源 App 已经完全退出时，不会自动启动它；需要先手动打开 App。
+- 来源打不开时，灵动岛保持展开，封面的悬停提示为「暂时无法打开播放来源」。成功打开后才收起灵动岛。
 
-- Google Chrome
-- Google Chrome Canary
+此操作只打开来源，不自动播放、切歌或新建网页。
 
-Browser detection requires:
+## 浏览器媒体
 
-- Automation permission for SuperIsland
-- The browser running with media in an open tab
-- JavaScript from Apple Events enabled in the browser
+浏览器媒体检测默认关闭，可在「设置 → 模块 → 正在播放」开启，并选择允许检测的浏览器。当前专门支持 Google Chrome 和 Google Chrome Canary。
 
-If detection is unavailable, the app keeps browser support explicit instead of showing a misleading playing state.
+需要同时满足：
 
-## Provider states
+1. 浏览器正在运行，媒体所在标签仍打开。
+2. macOS 已授予 SuperIsland 对该浏览器的「自动化」权限。
+3. 浏览器已允许通过 Apple Events 执行 JavaScript。
 
-Now Playing distinguishes active playback, paused playback, stale last-known playback, missing permissions, and no detected media. A paused or recently known track can remain visible briefly so the home panel does not immediately collapse to an empty state.
+满足条件时，点击封面会尝试根据实时媒体标题、作者及播放状态定位现有标签，再核对窗口、标签身份和 URL。多个标签无法可靠区分、检测关闭或权限不足时，只尝试打开浏览器窗口，不保证切到媒体所在页；不会猜测后新建或导航到一个网页。
 
-## Controls
+网页播放控件只用于通过上述浏览器检测路径识别的媒体。普通系统媒体来源继续使用系统控制方式。
 
-System media controls continue to use the existing system path. Apple Music and Spotify controls use their app automation support. Browser controls are only attempted for browser media that was detected through the opt-in browser path.
+## 无数据与暂停状态
+
+模块区分播放中、暂停、最近已知信息、缺少权限和未检测到媒体。暂停或短暂失去来源后，上一条媒体信息可能暂时保留，避免面板立刻变空；保留封面不代表来源 App 仍可打开。
+
+## 验证范围
+
+整张封面入口和 QQ 音乐关闭主窗口后的恢复已随 160622 获得用户反馈，并包含在后续版本中。浏览器选页通过逻辑测试和脚本语法检查，尚未完成真实浏览器标签定位的实机验收。
+
+天气切到口播稿曾出现卡顿，已增加可选诊断；现有一次状态切换采样不足以说明历史卡顿的根因已经修复。完整范围见 [音乐来源与切页记录](checkpoints/2026-09-21-media-source-and-swipe-diagnostics.md)。
