@@ -1,6 +1,6 @@
 # Codex 用量刷新修复
 
-状态：源码与自动验证完成，181025 候选包已签名归档。正常退出旧 WE1 未完成，安装停在替换前，仍运行已验收的 160622；未强退。
+状态：Codex 修复与自动验证完成。181025 为历史候选；修复已随改名后的 004644 于 2026-09-22 安装并运行。实际状态见 `2026-09-22-superisland-name-package.md` 的安装完成节；用量长时间稳定性仍待验收。
 
 ## 范围与回退
 
@@ -32,7 +32,7 @@
 - Release arm64 构建通过；真实 Codex 采集摘要在 `build/WE1CodexUsage.noindex/live-codex-probe.json`，只保存状态、错误类别和窗口时长。
 - 源码提交 `4eac824a038238e3a26390de2e0c710968648392`；构建前后采集源哈希一致。最终 Release 日志与源码哈希记录在 `build/WE1CodexUsage.noindex/release-final-result.json`。
 
-## 181025 候选包与安装边界
+## 181025 候选包与当时安装边界（历史）
 
 - 版本 `20260921181025`，应用身份仍为 `com.workview.SuperIsland.WE1Debug`；稳定 designated requirement 与 160622 完全一致，严格签名通过。候选二进制 SHA-256：`6a698ae45bca6043f3b8c88ba49fa68dfffd9155c2525ab9c4b0c68402d23744`。
 - ZIP：`/Users/muyz/Projects/new super island/releases/WE1-20260921181025-arm64/SuperIsland-WE1-20260921181025-arm64.zip`；SHA-256：`90bd523818acc516382100f17e10ad8be62914b200bbc21dc1f122a52af0a07e`。同目录有说明、manifest 和校验和。保持本机签名，未公证或推送远端。

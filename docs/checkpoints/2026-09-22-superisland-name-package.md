@@ -1,6 +1,6 @@
 # SuperIsland 对外名称统一
 
-状态：名称修改、Release 编译、本机签名与 ZIP/DMG 校验完成；未安装，仍运行旧 160622。
+状态：名称修改与打包完成；用户确认后已安装并运行 004644。权限及登录时启动已回读；用户完整功能验收尚未进行。
 
 ## 范围
 
@@ -28,10 +28,24 @@
 - 签名后二进制 SHA-256：`785693a86e575d37e0c692de27fc695fcc2db1a7093d354cc0585a2e60b0b926`。
 - Bundle ID：`com.workview.SuperIsland.WE1Debug`；指定签名要求与现有安装一致。本机签名，未公证、未推送或发布远端。
 
-## 当前安装及回退
+## 打包时的安装边界（历史）
 
 本轮没有强退、替换或重命名正在运行的旧应用。实际仍为 `/Applications/SuperIsland-WE1-Debug.app`，构建 160622，PID 65539，二进制 SHA-256 与原验收版一致；`/Applications/SuperIsland.app` 尚不存在。
 
 上一轮正常退出未完成，是否允许仅强制结束旧 WE1 的问题仍未收到明确答复。本次“修改吧”对应名称调整，不扩大为强退授权。后续安装应在新包与旧包检查完成后处理精确进程，保留回滚副本，改到 `/Applications/SuperIsland.app`，再回读实际进程、权限及开机启动状态；不得把包校验当作安装验收。
 
 历史 160622 稳定 tag/包及 181025 用量修复候选包都保留。当前源码起点为 `78c67fa`，安装没有变化，无需设备回滚。新包以该检查点为准，不覆盖前一候选档案。
+
+## 2026-09-22 安装完成
+
+用户在候选包完成后明确“确认”，授权结束旧版并安装。实际再次请求正常退出后，旧 PID 65539 在等待期限内退出，**未使用强制结束**。
+
+- 实际路径：`/Applications/SuperIsland.app`，构建 `20260922004644`，源码 `c0ad576`。
+- 新 PID 86938，已确认仅一个 SuperIsland 主进程；旧安装路径不存在。
+- 主程序哈希及指定签名要求与候选一致，已安装包和旧备份严格签名均通过。
+- 旧 app 完整移至 `build/SuperIslandName.noindex/Rollback/SuperIsland-WE1-Debug-20260921160622.app`，原二进制哈希未变。历史稳定 ZIP/DMG 同样保留。
+- CUA 实际读到应用名 `SuperIsland`、标题 `SuperIsland 设置`、权限目标 `/Applications/SuperIsland.app`；辅助功能与屏幕录制显示“已生效”。通用页“登录时启动”已开启，没有切换该开关。检查后恢复窗口增强页。
+- 包含 Codex 用量修复及原有 Claude 功能。没有点击其他功能、重新授权或宣称长时间用量稳定性已验收。
+- 完整安装回执：`build/SuperIslandName.noindex/renamed-installation.json`。没有推送 GitHub 或发布远端。
+
+回滚时须先退出新应用，将它移至独立保留目录，再把上述旧 app 放回 `/Applications/SuperIsland-WE1-Debug.app` 并重新注册/启动。不要同时运行两个相同 Bundle ID 的版本。此处仅记录回滚办法，未执行回滚。
