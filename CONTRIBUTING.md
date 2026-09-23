@@ -2,10 +2,10 @@
 
 ## 获取当前代码
 
-本仓库是 `372790111z-wq/SuperIsland`。请从 [README](README.md) 所列的当前维护分支创建工作分支，避免从尚未包含后续功能的 `main` 开始。
+本仓库是 `372790111z-wq/SuperIsland`。请从 [`main`](README.md) 创建工作分支；它已包含当前维护版的功能和文档。
 
 ```sh
-git clone --branch fix/we1-codex-usage-refresh-20260921 https://github.com/372790111z-wq/SuperIsland.git
+git clone https://github.com/372790111z-wq/SuperIsland.git
 cd SuperIsland
 git switch -c your-feature
 ```
@@ -23,7 +23,7 @@ git switch -c your-feature
 
 ## 代码审查
 
-PR 应以包含当前工作基础的维护分支为目标，说明具体问题、行为变化和验证结果。合并到 `main`、改变更新渠道和公开发行另行审查；推送分支不代表完成这些步骤。
+PR 应以 `main` 为目标，说明具体问题、行为变化和验证结果。改变更新渠道和公开发行另行审查；推送源码不代表已发布安装包。
 
 Swift 与 JavaScript 风格遵循现有模块。界面代码遵守主线程约束；诊断日志不得包含凭据、账号标识或私人正文。
 

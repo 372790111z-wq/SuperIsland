@@ -17,7 +17,7 @@
 ## 当前版本
 
 本仓库是在 [shobhit99/SuperIsland](https://github.com/shobhit99/SuperIsland) 基础上持续维护的版本。
-当前维护分支为 [`fix/we1-codex-usage-refresh-20260921`](https://github.com/372790111z-wq/SuperIsland/tree/fix/we1-codex-usage-refresh-20260921)，`main` 尚未合入这些新增功能。
+最新代码已合入本仓库的 [`main`](https://github.com/372790111z-wq/SuperIsland/tree/main)。[`fix/we1-codex-usage-refresh-20260921`](https://github.com/372790111z-wq/SuperIsland/tree/fix/we1-codex-usage-refresh-20260921) 保留为本轮开发分支。
 
 最近安装验证的构建为 **20260922004644**，应用名称为 **SuperIsland**。源码、使用说明和本机验证记录保存在本仓库；该构建目前为本机签名包，尚未发布 GitHub Release，也未经过 Apple 公证。上游安装包不包含这里的新增功能。
 
@@ -74,7 +74,7 @@
 ## 从源码构建
 
 ```sh
-git clone --branch fix/we1-codex-usage-refresh-20260921 https://github.com/372790111z-wq/SuperIsland.git
+git clone https://github.com/372790111z-wq/SuperIsland.git
 cd SuperIsland
 ```
 
@@ -110,4 +110,4 @@ docs/              使用说明和验证记录
 assets/screenshots/ 当前应用的公开界面截图
 ```
 
-感谢上游 SuperIsland 及其贡献者。上游项目、网站和发行记录属于各自维护者；本仓库的功能与构建状态以当前分支文档为准。
+感谢上游 SuperIsland 及其贡献者。上游项目、网站和发行记录属于各自维护者；本仓库的功能与构建状态以 `main` 的文档为准。
