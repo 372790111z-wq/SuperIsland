@@ -2810,6 +2810,10 @@ final class MissionControlInteractionMonitor {
     }
 
     private func present(_ target: Target) {
+        if let currentTarget, !targetsMatch(currentTarget, target) {
+            // A visible panel otherwise slides between Mission Control thumbnails.
+            closePanel.hide()
+        }
         currentTarget = target
         currentTargetResolvedNanoseconds = DispatchTime.now().uptimeNanoseconds
         guard preferences.isActionEnabled(.closeWindow),
