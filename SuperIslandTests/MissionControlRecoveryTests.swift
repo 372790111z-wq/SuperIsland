@@ -25,7 +25,7 @@ final class MissionControlRecoveryTests: XCTestCase {
         ))
         XCTAssertFalse(MissionControlWindowManagerFrameMatch.accepts(
             wrapper: wrapper,
-            thumbnail: CGRect(x: .nan, y: 237, width: 125, height: 103)
+            thumbnail: CGRect(x: CGFloat.nan, y: 237, width: 125, height: 103)
         ))
     }
 
