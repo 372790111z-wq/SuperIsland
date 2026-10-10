@@ -2,6 +2,33 @@ import XCTest
 @testable import SuperIsland
 
 final class MissionControlRecoveryTests: XCTestCase {
+    func testSystemWindowManagerFrameMatchesObservedThumbnailMargins() {
+        XCTAssertTrue(MissionControlWindowManagerFrameMatch.accepts(
+            wrapper: CGRect(x: 15, y: 230, width: 137, height: 117),
+            thumbnail: CGRect(x: 21, y: 237, width: 125, height: 103)
+        ))
+        XCTAssertTrue(MissionControlWindowManagerFrameMatch.accepts(
+            wrapper: CGRect(x: 243, y: 236, width: 225, height: 145),
+            thumbnail: CGRect(x: 250, y: 243, width: 212, height: 131)
+        ))
+    }
+
+    func testSystemWindowManagerFrameRejectsUnrelatedOrAmbiguousWindow() {
+        let wrapper = CGRect(x: 15, y: 230, width: 137, height: 117)
+        XCTAssertFalse(MissionControlWindowManagerFrameMatch.accepts(
+            wrapper: wrapper,
+            thumbnail: CGRect(x: 21, y: 237, width: 110, height: 103)
+        ))
+        XCTAssertFalse(MissionControlWindowManagerFrameMatch.accepts(
+            wrapper: wrapper,
+            thumbnail: wrapper
+        ))
+        XCTAssertFalse(MissionControlWindowManagerFrameMatch.accepts(
+            wrapper: wrapper,
+            thumbnail: CGRect(x: CGFloat.nan, y: 237, width: 125, height: 103)
+        ))
+    }
+
     func testMissingSceneRootRemainsOutsideThroughRealResolverRouting() {
         let reason = "scene-marker-not-found-mc-root-v2"
         XCTAssertEqual(MissionControlSceneResolverFixture.resolve(.outside(reason)),
