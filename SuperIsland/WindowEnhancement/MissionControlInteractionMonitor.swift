@@ -169,6 +169,48 @@ private enum MissionControlAXResolution: @unchecked Sendable {
     }
 }
 
+/// A WindowServer thumbnail with no matching AX window is only a hint. The AX
+/// Exposé group may supply the original window identity, but it can be used
+/// only when both sources describe the same visible thumbnail and owner.
+struct MissionControlCrossSourceMatch {
+    static func accepts(
+        windowServerFrame: CGRect,
+        windowServerOwnerPID: pid_t,
+        exposeFrame: CGRect,
+        exposeOwnerPID: pid_t,
+        originalWindowIsTransformed: Bool
+    ) -> Bool {
+        guard windowServerOwnerPID > 0,
+              windowServerOwnerPID == exposeOwnerPID,
+              originalWindowIsTransformed,
+              [windowServerFrame, exposeFrame].allSatisfy({
+                  !$0.isNull && !$0.isInfinite &&
+                      $0.width >= 24 && $0.height >= 24 &&
+                      [$0.minX, $0.minY, $0.width, $0.height].allSatisfy(\.isFinite)
+              }) else { return false }
+
+        // The two APIs use the same screen coordinates, with small rounding
+        // differences. A loose overlap test could select another stacked
+        // window, so require every edge to agree within a narrow tolerance.
+        let maximumEdgeDifference: CGFloat = 8
+        return abs(windowServerFrame.minX - exposeFrame.minX) <= maximumEdgeDifference &&
+            abs(windowServerFrame.minY - exposeFrame.minY) <= maximumEdgeDifference &&
+            abs(windowServerFrame.maxX - exposeFrame.maxX) <= maximumEdgeDifference &&
+            abs(windowServerFrame.maxY - exposeFrame.maxY) <= maximumEdgeDifference
+    }
+}
+
+private struct MissionControlWindowServerCandidate {
+    let windowNumber: CGWindowID
+    let ownerPID: pid_t
+    let thumbnailFrame: CGRect
+}
+
+private struct MissionControlWindowServerSnapshot {
+    let resolution: MissionControlAXResolution
+    let unresolvedFrontmost: MissionControlWindowServerCandidate?
+}
+
 private final class MissionControlMouseIngress: @unchecked Sendable {
     private let lock = NSLock()
     private var pendingDelivery: (@Sendable () -> Void)?
@@ -422,6 +464,11 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         hash: CFHashCode,
         firstSeenNanoseconds: UInt64
     )?
+    private var lastCrossSourceAttempt: (
+        windowNumber: CGWindowID,
+        ownerPID: pid_t,
+        startedNanoseconds: UInt64
+    )?
 
 #if DEBUG
     // Tests replace only the existing scene read; routing and canonicalization
@@ -580,13 +627,14 @@ private final class MissionControlAXResolver: @unchecked Sendable {
     }
 
     /// Revalidates a destructive action against the identity that was bound to
-    /// the visible affordance. A generic point resolver is intentionally not
-    /// used here: overlapping WindowServer rectangles can be ambiguous at a
-    /// thumbnail's center even though the selected window ID remains exact.
+    /// the visible affordance. The original-window fast path remains exact;
+    /// an unresolved proxy is checked against the captured pointer and must
+    /// resolve back to the same original PID, window ID and thumbnail frame.
     func resolveExpectedTarget(
         windowNumber: CGWindowID,
         ownerPID: pid_t,
         expectedThumbnailFrame: CGRect,
+        expectedPointer: CGPoint,
         dockPID: pid_t,
         completion: @escaping @Sendable (MissionControlAXResolution, UInt64) -> Void
     ) {
@@ -597,6 +645,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                     windowNumber: windowNumber,
                     ownerPID: ownerPID,
                     expectedThumbnailFrame: expectedThumbnailFrame,
+                    expectedPointer: expectedPointer,
                     dockPID: dockPID
                 )
             }
@@ -610,6 +659,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
     func resetMissionControlSession() {
         queue.async { [weak self] in
             self?.observedMissionControlRoot = nil
+            self?.lastCrossSourceAttempt = nil
 #if DEBUG
             self?.sceneProbeLastSampleNanoseconds = 0
             self?.sceneProbeLastPrivateInventoryNanoseconds = 0
@@ -660,6 +710,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         windowNumber: CGWindowID,
         ownerPID: pid_t,
         expectedThumbnailFrame: CGRect,
+        expectedPointer: CGPoint,
         dockPID: pid_t
     ) -> MissionControlAXResolution {
         guard windowNumber > 0,
@@ -701,40 +752,57 @@ private final class MissionControlAXResolver: @unchecked Sendable {
             }
             return CGWindowID(number.uint32Value) == windowNumber
         }
-        guard matches.count == 1,
-              let description = matches.first,
-              let currentOwner = description[kCGWindowOwnerPID as String] as? NSNumber,
-              pid_t(currentOwner.int32Value) == ownerPID,
-              let layer = description[kCGWindowLayer as String] as? NSNumber,
-              layer.intValue == 0,
-              let currentFrame = windowFrame(
-                  from: description[kCGWindowBounds as String]
-              ),
+        if matches.count == 1,
+           let description = matches.first,
+           let currentOwner = description[kCGWindowOwnerPID as String] as? NSNumber,
+           pid_t(currentOwner.int32Value) == ownerPID,
+           let layer = description[kCGWindowLayer as String] as? NSNumber,
+           layer.intValue == 0,
+           let currentFrame = windowFrame(
+               from: description[kCGWindowBounds as String]
+           ),
+           thumbnailFrameIsStable(
+               currentFrame,
+               comparedWith: expectedThumbnailFrame
+           ),
+           let liveWindow = resolveExactWindow(
+               processIdentifier: ownerPID,
+               windowNumber: windowNumber
+           ),
+           isTransformedMissionControlFrame(
+               currentFrame,
+               liveWindow: liveWindow
+           ) {
+            return canonicalized(.valid(MissionControlAXHit(
+                thumbnailFrame: currentFrame,
+                window: liveWindow,
+                windowNumber: windowNumber,
+                ownerPID: ownerPID,
+                canClose: elementAttribute(
+                    kAXCloseButtonAttribute,
+                    of: liveWindow
+                ) != nil
+            )), forceRefresh: true)
+        }
+
+        guard expectedThumbnailFrame.insetBy(dx: -8, dy: -8).contains(expectedPointer) else {
+            return .missionControlWithoutExactTarget("close-pointer-left-thumbnail")
+        }
+        let alternate = canonicalized(resolveFromSceneSnapshot(
+            point: expectedPointer,
+            dockPID: dockPID,
+            forceCrossSourceLookup: true
+        ), forceRefresh: true)
+        guard case let .valid(hit) = alternate,
+              hit.windowNumber == windowNumber,
+              hit.ownerPID == ownerPID,
               thumbnailFrameIsStable(
-                  currentFrame,
+                  hit.thumbnailFrame,
                   comparedWith: expectedThumbnailFrame
-              ),
-              let liveWindow = resolveExactWindow(
-                  processIdentifier: ownerPID,
-                  windowNumber: windowNumber
-              ),
-              isTransformedMissionControlFrame(
-                  currentFrame,
-                  liveWindow: liveWindow
               ) else {
             return .missionControlWithoutExactTarget("close-exact-target-changed")
         }
-
-        return canonicalized(.valid(MissionControlAXHit(
-            thumbnailFrame: currentFrame,
-            window: liveWindow,
-            windowNumber: windowNumber,
-            ownerPID: ownerPID,
-            canClose: elementAttribute(
-                kAXCloseButtonAttribute,
-                of: liveWindow
-            ) != nil
-        )), forceRefresh: true)
+        return alternate
     }
 
     private func thumbnailFrameIsStable(
@@ -760,7 +828,8 @@ private final class MissionControlAXResolver: @unchecked Sendable {
     /// AXExposeWindowGroup descendants.
     private func resolveFromSceneSnapshot(
         point: CGPoint,
-        dockPID: pid_t
+        dockPID: pid_t,
+        forceCrossSourceLookup: Bool = false
     ) -> MissionControlAXResolution {
 #if DEBUG
         if let sceneSnapshotForTesting { return sceneSnapshotForTesting }
@@ -829,20 +898,26 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         // same identity + frame model used by WINS' scene detector, without
         // relying on titles or guessing from the anonymous AX button order.
         //
-        // Keep the concrete `mc` AX root above as the session gate. That makes
-        // a transient desktop/window animation incapable of becoming a
-        // destructive Mission Control target. Only fall back to the legacy AX
-        // subtree resolver if WindowServer fails to return an inventory at all.
-        if let windowServerResolution = resolveFromWindowServerSnapshot(
+        // Keep the concrete `mc` AX root above as the session gate. If the
+        // frontmost WindowServer thumbnail has no matching AX window, allow a
+        // bounded AX Exposé lookup only for that same owner and rectangle.
+        // Other unresolved results remain non-actionable.
+        let windowServerSnapshot = resolveFromWindowServerSnapshot(
             point: point,
             dockPID: dockPID
-        ) {
-            return windowServerResolution
+        )
+        if let windowServerSnapshot {
+            guard let candidate = windowServerSnapshot.unresolvedFrontmost,
+                  (forceCrossSourceLookup ||
+                    shouldAttemptCrossSourceLookup(candidate, now: started)) else {
+                return windowServerSnapshot.resolution
+            }
         }
 
         var hitsByWindowNumber: [CGWindowID: MissionControlAXHit] = [:]
         var sawConcreteMarker = false
         var sawUnresolvedMarker = false
+        var exposeGroupsContainingPointer = 0
         var visitedCount = 0
         var traversalWasTruncated = false
         var visitedByProvider: [String: Int] = [:]
@@ -894,7 +969,11 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 description: ""
             ) {
                 sawConcreteMarker = true
-                if let frame = visibleFrame(of: next.element),
+                let groupFrame = visibleFrame(of: next.element)
+                if groupFrame?.insetBy(dx: -2, dy: -2).contains(point) == true {
+                    exposeGroupsContainingPointer += 1
+                }
+                if let frame = groupFrame,
                    let resolved = exactWindow(in: next.element) {
                     let hit = MissionControlAXHit(
                         thumbnailFrame: frame,
@@ -940,6 +1019,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
             ))
         }
         guard sawConcreteMarker else {
+            if let windowServerSnapshot { return windowServerSnapshot.resolution }
             return .outsideMissionControl(sceneDiagnosticCode(
                 prefix: "scene-marker-not-found",
                 visitedCount: visitedCount,
@@ -964,6 +1044,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         }
 
         guard let nearest = containingHits.first else {
+            if let windowServerSnapshot { return windowServerSnapshot.resolution }
             return .missionControlWithoutExactTarget(
                 sawUnresolvedMarker
                     ? "scene-unresolved-thumbnail"
@@ -984,13 +1065,31 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 return .missionControlWithoutExactTarget("scene-overlap-unresolved")
             }
         }
+        if let candidate = windowServerSnapshot?.unresolvedFrontmost {
+            // Geometry alone cannot distinguish two thumbnails from the same
+            // app if they overlap. Reject the cross-source path unless the AX
+            // tree has exactly one Exposé group beneath this pointer.
+            guard exposeGroupsContainingPointer == 1,
+                  MissionControlCrossSourceMatch.accepts(
+                windowServerFrame: candidate.thumbnailFrame,
+                windowServerOwnerPID: candidate.ownerPID,
+                exposeFrame: nearest.thumbnailFrame,
+                exposeOwnerPID: nearest.ownerPID,
+                originalWindowIsTransformed: isTransformedMissionControlFrame(
+                    candidate.thumbnailFrame,
+                    liveWindow: nearest.window
+                )
+            ) else {
+                return .missionControlWithoutExactTarget("cross-source-thumbnail-mismatch")
+            }
+        }
         return .valid(nearest)
     }
 
     private func resolveFromWindowServerSnapshot(
         point: CGPoint,
         dockPID: pid_t
-    ) -> MissionControlAXResolution? {
+    ) -> MissionControlWindowServerSnapshot? {
         let options: CGWindowListOption = [
             .optionOnScreenOnly,
             .excludeDesktopElements
@@ -1045,34 +1144,71 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 processIdentifier: ownerPID,
                 windowNumber: windowNumber
             ) else {
-                return .missionControlWithoutExactTarget(
-                    "window-server-frontmost-thumbnail-unresolved"
+                return MissionControlWindowServerSnapshot(
+                    resolution: .missionControlWithoutExactTarget(
+                        "window-server-frontmost-thumbnail-unresolved"
+                    ),
+                    unresolvedFrontmost: MissionControlWindowServerCandidate(
+                        windowNumber: windowNumber,
+                        ownerPID: ownerPID,
+                        thumbnailFrame: frame
+                    )
                 )
             }
             guard isTransformedMissionControlFrame(
                 frame,
                 liveWindow: liveWindow
             ) else {
-                return .missionControlWithoutExactTarget(
-                    "window-server-frontmost-thumbnail-not-transformed"
+                return MissionControlWindowServerSnapshot(
+                    resolution: .missionControlWithoutExactTarget(
+                        "window-server-frontmost-thumbnail-not-transformed"
+                    ),
+                    unresolvedFrontmost: nil
                 )
             }
 
-            return .valid(MissionControlAXHit(
-                thumbnailFrame: frame,
-                window: liveWindow,
-                windowNumber: windowNumber,
-                ownerPID: ownerPID,
-                canClose: elementAttribute(
-                    kAXCloseButtonAttribute,
-                    of: liveWindow
-                ) != nil
-            ))
+            return MissionControlWindowServerSnapshot(
+                resolution: .valid(MissionControlAXHit(
+                    thumbnailFrame: frame,
+                    window: liveWindow,
+                    windowNumber: windowNumber,
+                    ownerPID: ownerPID,
+                    canClose: elementAttribute(
+                        kAXCloseButtonAttribute,
+                        of: liveWindow
+                    ) != nil
+                )),
+                unresolvedFrontmost: nil
+            )
         }
 
-        return .missionControlWithoutExactTarget(
-            "window-server-no-thumbnail-hit-\(inspectedLayerZeroWindows)"
+        return MissionControlWindowServerSnapshot(
+            resolution: .missionControlWithoutExactTarget(
+                "window-server-no-thumbnail-hit-\(inspectedLayerZeroWindows)"
+            ),
+            unresolvedFrontmost: nil
         )
+    }
+
+    private func shouldAttemptCrossSourceLookup(
+        _ candidate: MissionControlWindowServerCandidate,
+        now: UInt64
+    ) -> Bool {
+        // An unresolved thumbnail can produce many pointer events. Bound the
+        // additional AX traversal without delaying another window's first try.
+        if let lastCrossSourceAttempt,
+           lastCrossSourceAttempt.windowNumber == candidate.windowNumber,
+           lastCrossSourceAttempt.ownerPID == candidate.ownerPID,
+           now >= lastCrossSourceAttempt.startedNanoseconds,
+           now - lastCrossSourceAttempt.startedNanoseconds < 400_000_000 {
+            return false
+        }
+        lastCrossSourceAttempt = (
+            candidate.windowNumber,
+            candidate.ownerPID,
+            now
+        )
+        return true
     }
 
     private func isTransformedMissionControlFrame(
@@ -2139,7 +2275,8 @@ final class MissionControlInteractionMonitor {
         _ actionTarget: ActionTarget
     ) -> TargetedActionResult {
         guard revalidatedTarget(actionTarget) != nil,
-              let dockPID = resolvedDockPID() else {
+              let dockPID = resolvedDockPID(),
+              let pointer = CGEvent(source: nil)?.location else {
             clearTarget(clearPendingKeyboardTarget: true)
             return .failed("窗口状态已变化，请重新选择")
         }
@@ -2150,14 +2287,14 @@ final class MissionControlInteractionMonitor {
             "Mission Control close requested windowID=\(expected.windowNumber, privacy: .public) ownerPID=\(expected.application.processIdentifier, privacy: .public)"
         )
 
-        // The affordance is bound to one exact PID + WindowServer ID. Hide our
-        // panels, then verify that exact identity and its current transformed
-        // frame instead of performing another generic center-point selection.
+        // Hide our panels, then verify the same exact original window against
+        // the captured pointer and current Mission Control thumbnail.
         closePanel.hide()
         axResolver.resolveExpectedTarget(
             windowNumber: expected.windowNumber,
             ownerPID: expected.application.processIdentifier,
             expectedThumbnailFrame: expected.thumbnailFrame,
+            expectedPointer: pointer,
             dockPID: dockPID
         ) { [weak self] resolution, elapsed in
             Task { @MainActor [weak self] in
@@ -2194,6 +2331,8 @@ final class MissionControlInteractionMonitor {
               case let .valid(hit) = resolution,
               let freshTarget = target(from: hit),
               targetsMatch(freshTarget, expected),
+              let pointer = CGEvent(source: nil)?.location,
+              expected.thumbnailFrame.insetBy(dx: -8, dy: -8).contains(pointer),
               isExactTargetCurrent(freshTarget) else {
             logger.notice(
                 "Mission Control close rejected windowID=\(expected.windowNumber, privacy: .public) resolution=\(resolution.diagnosticCode, privacy: .public) elapsedMs=\(Double(elapsedNanoseconds) / 1_000_000, privacy: .public)"
@@ -2247,9 +2386,51 @@ final class MissionControlInteractionMonitor {
         case let .valid(resolvedTarget):
             actionTarget = resolvedTarget
         }
-        guard let target = revalidatedTarget(actionTarget) else {
+        guard revalidatedTarget(actionTarget) != nil,
+              let dockPID = resolvedDockPID(),
+              let pointer = CGEvent(source: nil)?.location else {
             clearTarget(clearPendingKeyboardTarget: true)
             return .failed("窗口状态已变化，请重新选择")
+        }
+        closeValidationGeneration &+= 1
+        let generation = closeValidationGeneration
+        let expected = actionTarget.target
+        axResolver.resolveExpectedTarget(
+            windowNumber: expected.windowNumber,
+            ownerPID: expected.application.processIdentifier,
+            expectedThumbnailFrame: expected.thumbnailFrame,
+            expectedPointer: pointer,
+            dockPID: dockPID
+        ) { [weak self] resolution, _ in
+            Task { @MainActor [weak self] in
+                self?.finishValidatedQuit(
+                    resolution,
+                    expected: expected,
+                    generation: generation
+                )
+            }
+        }
+        return .completed("正在确认应用…")
+    }
+
+    private func finishValidatedQuit(
+        _ resolution: MissionControlAXResolution,
+        expected: Target,
+        generation: UInt64
+    ) {
+        guard closeValidationGeneration == generation else { return }
+        guard preferences.isEnabled,
+              preferences.missionControlEnabled,
+              preferences.isActionEnabled(.quitApp),
+              case let .valid(hit) = resolution,
+              let target = target(from: hit),
+              targetsMatch(target, expected),
+              let pointer = CGEvent(source: nil)?.location,
+              expected.thumbnailFrame.insetBy(dx: -8, dy: -8).contains(pointer),
+              isExactTargetCurrent(target) else {
+            clearTarget(clearPendingKeyboardTarget: true)
+            preferences.publishFeedback("窗口状态已变化，未执行退出")
+            return
         }
         let alert = NSAlert()
         alert.messageText = "退出“\(target.applicationName)”？"
@@ -2260,17 +2441,20 @@ final class MissionControlInteractionMonitor {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else {
             clearTarget(clearPendingKeyboardTarget: true)
-            return .completed("已取消退出 \(target.applicationName)")
+            preferences.publishFeedback("已取消退出 \(target.applicationName)")
+            return
         }
         guard isApplicationIdentityCurrent(target) else {
             clearTarget(clearPendingKeyboardTarget: true)
-            return .failed("应用状态已变化，未执行退出")
+            preferences.publishFeedback("应用状态已变化，未执行退出")
+            return
         }
         guard target.application.terminate() else {
-            return .failed("无法退出 \(target.applicationName)")
+            preferences.publishFeedback("无法退出 \(target.applicationName)")
+            return
         }
         clearTarget(clearPendingKeyboardTarget: true)
-        return .completed("已请求退出 \(target.applicationName)")
+        preferences.publishFeedback("已请求退出 \(target.applicationName)")
     }
 
     private func installMonitorsIfNeeded() {
