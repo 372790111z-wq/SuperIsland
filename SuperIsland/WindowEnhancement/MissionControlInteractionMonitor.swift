@@ -3488,7 +3488,7 @@ private final class MissionControlClosePanel {
         panel.collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
-            .transient,
+            .stationary,
             .ignoresCycle
         ]
     }
