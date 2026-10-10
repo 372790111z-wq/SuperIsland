@@ -169,6 +169,28 @@ private enum MissionControlAXResolution: @unchecked Sendable {
     }
 }
 
+/// The system WindowManager draws a narrow layer-zero frame above each
+/// Mission Control thumbnail. Only a tightly matching inner window can be
+/// treated as the framed thumbnail; an arbitrary window behind it cannot.
+enum MissionControlWindowManagerFrameMatch {
+    static func accepts(wrapper: CGRect, thumbnail: CGRect) -> Bool {
+        guard !wrapper.isNull, !wrapper.isInfinite,
+              !thumbnail.isNull, !thumbnail.isInfinite,
+              [wrapper.minX, wrapper.minY, wrapper.width, wrapper.height,
+               thumbnail.minX, thumbnail.minY, thumbnail.width, thumbnail.height]
+                  .allSatisfy(\.isFinite),
+              thumbnail.width >= 24, thumbnail.height >= 24 else { return false }
+
+        let margins = [
+            thumbnail.minX - wrapper.minX,
+            thumbnail.minY - wrapper.minY,
+            wrapper.maxX - thumbnail.maxX,
+            wrapper.maxY - thumbnail.maxY
+        ]
+        return margins.allSatisfy { (2...12).contains($0) }
+    }
+}
+
 private final class MissionControlMouseIngress: @unchecked Sendable {
     private let lock = NSLock()
     private var pendingDelivery: (@Sendable () -> Void)?
@@ -1003,6 +1025,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         }
 
         var inspectedLayerZeroWindows = 0
+        var windowManagerFrame: CGRect?
 
         // `CGWindowListCopyWindowInfo(.optionOnScreenOnly, ...)` returns
         // windows in front-to-back order. Mission Control thumbnails can
@@ -1033,6 +1056,25 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                   ownerPID != ProcessInfo.processInfo.processIdentifier,
                   frame.insetBy(dx: -2, dy: -2).contains(point) else {
                 continue
+            }
+
+            if isSystemWindowManager(ownerPID) {
+                guard windowManagerFrame == nil else {
+                    return .missionControlWithoutExactTarget(
+                        "window-server-overlapping-system-frames"
+                    )
+                }
+                windowManagerFrame = frame
+                continue
+            }
+            if let windowManagerFrame,
+               !MissionControlWindowManagerFrameMatch.accepts(
+                   wrapper: windowManagerFrame,
+                   thumbnail: frame
+               ) {
+                return .missionControlWithoutExactTarget(
+                    "window-server-system-frame-mismatch"
+                )
             }
 
             // The all-window snapshot already provides the window ID and its
@@ -1073,6 +1115,15 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         return .missionControlWithoutExactTarget(
             "window-server-no-thumbnail-hit-\(inspectedLayerZeroWindows)"
         )
+    }
+
+    private func isSystemWindowManager(_ processIdentifier: pid_t) -> Bool {
+        guard let application = NSRunningApplication(
+            processIdentifier: processIdentifier
+        ) else { return false }
+        return application.bundleIdentifier == "com.apple.WindowManager" &&
+            application.bundleURL?.standardizedFileURL.path ==
+                "/System/Library/CoreServices/WindowManager.app"
     }
 
     private func isTransformedMissionControlFrame(
@@ -2759,6 +2810,11 @@ final class MissionControlInteractionMonitor {
     }
 
     private func present(_ target: Target) {
+        if let currentTarget, !targetsMatch(currentTarget, target) {
+            // WindowManager animates a reused panel even after it was hidden.
+            closePanel.retire()
+            closePanel = MissionControlClosePanel(interactionState: closeInteractionState)
+        }
         currentTarget = target
         currentTargetResolvedNanoseconds = DispatchTime.now().uptimeNanoseconds
         guard preferences.isActionEnabled(.closeWindow),
@@ -3391,6 +3447,12 @@ private final class MissionControlClosePanel {
         highlightPanel.orderOut(nil)
     }
 
+    func retire() {
+        hide()
+        panel.close()
+        highlightPanel.close()
+    }
+
     func contains(_ point: CGPoint) -> Bool {
         panel.isVisible && panel.frame.insetBy(dx: -5, dy: -5).contains(point)
     }
@@ -3437,7 +3499,7 @@ private final class MissionControlClosePanel {
         panel.collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
-            .transient,
+            .stationary,
             .ignoresCycle
         ]
     }
