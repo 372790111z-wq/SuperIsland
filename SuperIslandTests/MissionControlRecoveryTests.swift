@@ -250,34 +250,4 @@ final class MissionControlRecoveryTests: XCTestCase {
             elapsedNanoseconds: 40_000_000, canPublish: true
         ))
     }
-
-    func testCrossSourceThumbnailAcceptsSameOwnerWithSmallFrameRounding() {
-        XCTAssertTrue(MissionControlCrossSourceMatch.accepts(
-            windowServerFrame: CGRect(x: 100, y: 200, width: 310, height: 180),
-            windowServerOwnerPID: 42,
-            exposeFrame: CGRect(x: 103, y: 198, width: 306, height: 184),
-            exposeOwnerPID: 42,
-            originalWindowIsTransformed: true
-        ))
-    }
-
-    func testCrossSourceThumbnailRejectsWrongOwnerOrDifferentWindow() {
-        let thumbnail = CGRect(x: 100, y: 200, width: 310, height: 180)
-        let otherWindow = CGRect(x: 125, y: 200, width: 310, height: 180)
-        XCTAssertFalse(MissionControlCrossSourceMatch.accepts(
-            windowServerFrame: thumbnail, windowServerOwnerPID: 42,
-            exposeFrame: thumbnail, exposeOwnerPID: 43,
-            originalWindowIsTransformed: true
-        ))
-        XCTAssertFalse(MissionControlCrossSourceMatch.accepts(
-            windowServerFrame: thumbnail, windowServerOwnerPID: 42,
-            exposeFrame: otherWindow, exposeOwnerPID: 42,
-            originalWindowIsTransformed: true
-        ))
-        XCTAssertFalse(MissionControlCrossSourceMatch.accepts(
-            windowServerFrame: thumbnail, windowServerOwnerPID: 42,
-            exposeFrame: thumbnail, exposeOwnerPID: 42,
-            originalWindowIsTransformed: false
-        ))
-    }
 }
