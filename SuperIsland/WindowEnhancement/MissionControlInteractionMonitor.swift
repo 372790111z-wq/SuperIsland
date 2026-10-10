@@ -2811,8 +2811,9 @@ final class MissionControlInteractionMonitor {
 
     private func present(_ target: Target) {
         if let currentTarget, !targetsMatch(currentTarget, target) {
-            // A visible panel otherwise slides between Mission Control thumbnails.
-            closePanel.hide()
+            // WindowManager animates a reused panel even after it was hidden.
+            closePanel.retire()
+            closePanel = MissionControlClosePanel(interactionState: closeInteractionState)
         }
         currentTarget = target
         currentTargetResolvedNanoseconds = DispatchTime.now().uptimeNanoseconds
@@ -3444,6 +3445,12 @@ private final class MissionControlClosePanel {
         onClose = nil
         panel.orderOut(nil)
         highlightPanel.orderOut(nil)
+    }
+
+    func retire() {
+        hide()
+        panel.close()
+        highlightPanel.close()
     }
 
     func contains(_ point: CGPoint) -> Bool {
