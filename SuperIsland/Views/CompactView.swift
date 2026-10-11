@@ -7,7 +7,10 @@ struct CompactView: View {
 
     var body: some View {
         Group {
-            if appState.shouldUseMinimalCompactLayout,
+            if appState.showsCompactVolumeHUD {
+                SystemHUDCompactView()
+                    .padding(.horizontal, 12)
+            } else if appState.shouldUseMinimalCompactLayout,
                let module = appState.compactPresentationModule {
                 minimalCompactContent(for: module)
             } else if appState.usesWideCompactLayout,

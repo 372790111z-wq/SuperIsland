@@ -186,7 +186,7 @@ final class VolumeManager: ObservableObject {
             self.userInitiatedHUDDeadline = nil
             return
         }
-        AppState.shared.showHUD(module: .volumeHUD)
+        AppState.shared.showVolumeHUD()
     }
 
     func noteUserInitiatedVolumeChange() {
@@ -282,7 +282,7 @@ final class VolumeManager: ObservableObject {
 
         updateVolume()
         if showsHUD {
-            AppState.shared.showHUD(module: .volumeHUD)
+            AppState.shared.showVolumeHUD()
         }
     }
 
@@ -305,7 +305,7 @@ final class VolumeManager: ObservableObject {
 
         updateMuteState()
         if showsHUD {
-            AppState.shared.showHUD(module: .volumeHUD)
+            AppState.shared.showVolumeHUD()
         }
     }
 

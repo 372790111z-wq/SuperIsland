@@ -243,6 +243,7 @@ final class AppState: ObservableObject {
     @Published var activeModule: ActiveModule? = nil {
         didSet { refreshEnergyState() }
     }
+    @Published private(set) var showsCompactVolumeHUD = false
     @Published var previousModule: ActiveModule? = nil
     @Published var fullExpandedSelectedTab: FullExpandedTab = .home {
         didSet { refreshEnergyState() }
@@ -319,6 +320,7 @@ final class AppState: ObservableObject {
     @AppStorage("energy.lowPowerSuggestionDoNotAskAgain") var lowPowerSuggestionDoNotAskAgain = false
 
     private var autoDismissWorkItem: DispatchWorkItem?
+    private var compactVolumeHUDDismissWorkItem: DispatchWorkItem?
     private var fullExpandedDismissWorkItem: DispatchWorkItem?
     private var hoverActivationWorkItem: DispatchWorkItem?
     private var systemEmojiInteractionWorkItem: DispatchWorkItem?
@@ -580,6 +582,7 @@ final class AppState: ObservableObject {
         guard !isZilanInteractionSuppressed else { return }
         guard currentState != .fullExpanded else { return }
 
+        hideCompactVolumeHUD()
         prepareFullExpandedPresentation(prefersHome: currentState == .compact)
         cancelAutoDismiss()
         cancelFullExpandedDismiss()
@@ -591,6 +594,7 @@ final class AppState: ObservableObject {
 
     func fullyExpand() {
         guard !isZilanInteractionSuppressed else { return }
+        hideCompactVolumeHUD()
         prepareFullExpandedPresentation(prefersHome: false)
         withAnimation(notchAnimation) {
             currentState = .fullExpanded
@@ -609,6 +613,7 @@ final class AppState: ObservableObject {
             return
         }
         cancelAutoDismiss()
+        hideCompactVolumeHUD()
         cancelFullExpandedDismiss()
         cancelHoverActivation()
         endSystemEmojiInteraction()
@@ -702,6 +707,30 @@ final class AppState: ObservableObject {
 
     // MARK: - HUD Management
 
+    /// A volume change only replaces compact content; it never resizes the island.
+    func showVolumeHUD() {
+        guard !isZilanInteractionSuppressed, volumeHUDEnabled else { return }
+        guard currentState == .compact else {
+            showHUD(module: .volumeHUD)
+            return
+        }
+
+        compactVolumeHUDDismissWorkItem?.cancel()
+        showsCompactVolumeHUD = true
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.showsCompactVolumeHUD = false
+            self?.compactVolumeHUDDismissWorkItem = nil
+        }
+        compactVolumeHUDDismissWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.hudAutoDismissDelay, execute: workItem)
+    }
+
+    private func hideCompactVolumeHUD() {
+        compactVolumeHUDDismissWorkItem?.cancel()
+        compactVolumeHUDDismissWorkItem = nil
+        showsCompactVolumeHUD = false
+    }
+
     func showHUD(module: ModuleType, autoDismiss: Bool = true, autoDismissDelay: TimeInterval? = nil) {
         showHUD(module: .builtIn(module), autoDismiss: autoDismiss, autoDismissDelay: autoDismissDelay)
     }
@@ -717,6 +746,7 @@ final class AppState: ObservableObject {
             return
         }
 
+        hideCompactVolumeHUD()
         cancelAutoDismiss()
 
         withAnimation(notchAnimation) {
