@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Darwin
 import OSLog
 import QuartzCore
 import SwiftUI
@@ -121,6 +122,124 @@ enum DockApplicationIdentityPolicy {
             ) == .orderedSame
         }
         return titleMatches.count == 1 ? titleMatches[0].processIdentifier : nil
+    }
+}
+
+/// Steam's launcher can register a regular App with PID -1 while its real UI
+/// belongs to a child Steam Helper. Only the helper from that exact running
+/// bundle and executable ancestry is eligible for a preview.
+struct SteamPreviewIdentityCandidate {
+    let processIdentifier: pid_t
+    let bundleIdentifier: String?
+    let bundlePath: String?
+    let executablePath: String?
+    let parentProcessIdentifier: pid_t
+    let parentExecutablePath: String?
+}
+
+enum SteamPreviewIdentityPolicy {
+    static func helperProcessIdentifiers(
+        mainProcessIdentifier: pid_t,
+        mainBundleIdentifier: String?,
+        mainBundlePath: String?,
+        mainExecutablePath: String?,
+        helpers: [SteamPreviewIdentityCandidate]
+    ) -> [pid_t] {
+        guard mainProcessIdentifier <= 0,
+              mainBundleIdentifier == "com.valvesoftware.steam",
+              let mainBundlePath, let mainExecutablePath else { return [] }
+        let expectedHelperPath = URL(fileURLWithPath: mainBundlePath)
+            .appendingPathComponent("Contents/Frameworks/Steam Helper.app")
+            .standardizedFileURL.resolvingSymlinksInPath().path
+        let matching = helpers.filter {
+            $0.processIdentifier > 0 &&
+                $0.bundleIdentifier == "com.valvesoftware.steam.helper" &&
+                $0.bundlePath == expectedHelperPath &&
+                $0.executablePath != nil &&
+                $0.executablePath?.hasPrefix(expectedHelperPath + "/Contents/MacOS/") == true &&
+                $0.parentProcessIdentifier > 1 &&
+                $0.parentExecutablePath == mainExecutablePath
+        }
+        // A second UI helper needs its own ownership rule. Do not merge an
+        // ambiguous set just because every process shares Steam's name.
+        guard matching.count == 1 else { return [] }
+        return [matching[0].processIdentifier]
+    }
+}
+
+enum SteamPreviewApplicationResolver {
+    static func isVerifiedHelper(_ application: NSRunningApplication,
+                                 running: [NSRunningApplication]) -> Bool {
+        guard application.processIdentifier > 0,
+              application.bundleIdentifier == "com.valvesoftware.steam.helper" else { return false }
+        let mains = running.filter {
+            $0.activationPolicy == .regular && !$0.isTerminated &&
+                $0.bundleIdentifier == "com.valvesoftware.steam"
+        }
+        guard mains.count == 1,
+              let helper = helper(for: mains[0], running: running) else { return false }
+        return helper.processIdentifier == application.processIdentifier
+    }
+
+    static func helper(for main: NSRunningApplication,
+                       running: [NSRunningApplication]) -> NSRunningApplication? {
+        guard main.processIdentifier <= 0,
+              main.bundleIdentifier == "com.valvesoftware.steam",
+              main.activationPolicy == .regular, !main.isTerminated,
+              let mainBundleURL = main.bundleURL?.standardizedFileURL.resolvingSymlinksInPath(),
+              let mainExecutable = Bundle(url: mainBundleURL)?.executableURL?
+                .standardizedFileURL.resolvingSymlinksInPath().path else { return nil }
+        let candidates = running.compactMap { application -> SteamPreviewIdentityCandidate? in
+            guard application.processIdentifier > 0,
+                  !application.isTerminated,
+                  application.bundleIdentifier == "com.valvesoftware.steam.helper" else { return nil }
+            let pid = application.processIdentifier
+            var info = proc_bsdinfo()
+            let length = withUnsafeMutablePointer(to: &info) {
+                proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, $0,
+                             Int32(MemoryLayout<proc_bsdinfo>.size))
+            }
+            guard length == MemoryLayout<proc_bsdinfo>.size,
+                  info.pbi_pid == UInt32(bitPattern: pid) else { return nil }
+            return SteamPreviewIdentityCandidate(
+                processIdentifier: pid,
+                bundleIdentifier: application.bundleIdentifier,
+                bundlePath: application.bundleURL?.standardizedFileURL
+                    .resolvingSymlinksInPath().path,
+                executablePath: executablePath(for: pid),
+                parentProcessIdentifier: pid_t(info.pbi_ppid),
+                parentExecutablePath: executablePath(for: pid_t(info.pbi_ppid))
+            )
+        }
+        let identifiers = SteamPreviewIdentityPolicy.helperProcessIdentifiers(
+            mainProcessIdentifier: main.processIdentifier,
+            mainBundleIdentifier: main.bundleIdentifier,
+            mainBundlePath: mainBundleURL.path,
+            mainExecutablePath: mainExecutable,
+            helpers: candidates
+        )
+        guard let pid = identifiers.first else { return nil }
+        return running.first { $0.processIdentifier == pid }
+    }
+
+    static func helper(forDockURL url: URL?,
+                       running: [NSRunningApplication]) -> NSRunningApplication? {
+        guard let url = url.flatMap(DockApplicationIdentityPolicy.normalizedApplicationURL),
+              Bundle(url: url)?.bundleIdentifier == "com.valvesoftware.steam" else { return nil }
+        let mains = running.filter {
+            $0.activationPolicy == .regular && !$0.isTerminated &&
+                $0.bundleIdentifier == "com.valvesoftware.steam"
+        }
+        guard mains.count == 1 else { return nil }
+        return helper(for: mains[0], running: running)
+    }
+
+    private static func executablePath(for pid: pid_t) -> String? {
+        guard pid > 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: 4_096)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return URL(fileURLWithPath: String(cString: buffer))
+            .standardizedFileURL.resolvingSymlinksInPath().path
     }
 }
 
@@ -1916,7 +2035,8 @@ final class WindowDockInteractionMonitor {
         let normalizedURL = applicationURL.flatMap(
             DockApplicationIdentityPolicy.normalizedApplicationURL
         )
-        let running = NSWorkspace.shared.runningApplications.filter {
+        let allRunning = NSWorkspace.shared.runningApplications
+        let running = allRunning.filter {
             !$0.isTerminated && $0.activationPolicy == .regular &&
                 $0.processIdentifier != ProcessInfo.processInfo.processIdentifier &&
                 !preferences.isExcluded($0)
@@ -1930,12 +2050,18 @@ final class WindowDockInteractionMonitor {
                 isRegular: true
             )
         }
-        return DockApplicationIdentityPolicy.previewProcessIdentifiers(
+        let matched = DockApplicationIdentityPolicy.previewProcessIdentifiers(
             targetBundleIdentifier: normalizedURL.flatMap { Bundle(url: $0)?.bundleIdentifier },
             targetBundlePath: normalizedURL?.resolvingSymlinksInPath().path,
             title: title,
             candidates: candidates
         ).compactMap { pid in running.first { $0.processIdentifier == pid } }
+        if !matched.isEmpty { return matched }
+        guard !preferences.excludedBundleIDs.contains("com.valvesoftware.steam"),
+              let helper = SteamPreviewApplicationResolver.helper(
+                forDockURL: normalizedURL, running: allRunning
+              ), !preferences.isExcluded(helper) else { return [] }
+        return [helper]
     }
 
     private func previewApplicationsAreCurrent(

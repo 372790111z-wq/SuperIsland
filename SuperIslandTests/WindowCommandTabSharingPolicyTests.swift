@@ -115,6 +115,30 @@ final class WindowCommandTabSharingPolicyTests: XCTestCase {
         .weakSelectedButton(title: "微信", isLeaf: true, searchComplete: true, hasStrongIdentity: false)
     }
 
+    func testUnrelatedInvalidRunningPIDDoesNotMaskTwoKnownWeChats() throws {
+        let staleSteam = Application(
+            processID: -1, bundlePath: "/Applications/Steam.app",
+            bundleIdentifier: "com.valvesoftware.steam"
+        )
+        let running = [primary, secondary, staleSteam]
+        let group = try XCTUnwrap(Policy.sharedWeChatGroup(
+            selected: [primary, secondary], running: running, evidence: weakEvidence
+        ))
+        XCTAssertEqual(group.processIDs, [primary.processID, secondary.processID])
+        XCTAssertNil(Policy.sharedWeChatGroup(
+            selected: running, running: running, evidence: weakEvidence
+        ))
+
+        let invalidSecondary = Application(
+            processID: -1, bundlePath: secondary.bundlePath,
+            bundleIdentifier: secondary.bundleIdentifier
+        )
+        XCTAssertNil(Policy.sharedWeChatGroup(
+            selected: [primary, invalidSecondary], running: [primary, invalidSecondary],
+            evidence: weakEvidence
+        ))
+    }
+
     func testEitherStrongKnownInstallationSharesTheSameTwoOwners() throws {
         for selected in [primary, secondary] {
             let group = try XCTUnwrap(Policy.sharedWeChatGroup(
@@ -134,6 +158,42 @@ final class WindowCommandTabSharingPolicyTests: XCTestCase {
                 evidence: .weakSelectedButton(title: title, isLeaf: true, searchComplete: true, hasStrongIdentity: false)
             ))
             XCTAssertEqual(group.members.map(\.application), [primary, secondary])
+        }
+    }
+
+    func testRecentActivationMapsTwoNativeTilesToDistinctWindowOwners() throws {
+        let group = try XCTUnwrap(Policy.sharedWeChatGroup(
+            selected: [primary, secondary], running: [primary, secondary], evidence: weakEvidence
+        ))
+        for recent in [primary, secondary] {
+            let first = try XCTUnwrap(Policy.memberAtSwitcherRank(
+                0, sameNameTileCount: 2, group: group, mostRecentlyActivated: recent
+            ))
+            let second = try XCTUnwrap(Policy.memberAtSwitcherRank(
+                1, sameNameTileCount: 2, group: group, mostRecentlyActivated: recent
+            ))
+            XCTAssertEqual(first.application, recent)
+            XCTAssertNotEqual(second.application, recent)
+            XCTAssertEqual(Set([first.installation, second.installation]), Set(Policy.Installation.allCases))
+        }
+    }
+
+    func testNativeTileOrderIsNotGuessedWithoutCurrentActivationEvidence() throws {
+        let group = try XCTUnwrap(Policy.sharedWeChatGroup(
+            selected: [primary, secondary], running: [primary, secondary], evidence: weakEvidence
+        ))
+        let stale = Application(processID: 21, bundlePath: secondary.bundlePath,
+                                bundleIdentifier: secondary.bundleIdentifier)
+        for recent in [nil, stale, Application(processID: 30,
+              bundlePath: "/Applications/Other.app", bundleIdentifier: "example.other")] {
+            XCTAssertNil(Policy.memberAtSwitcherRank(
+                0, sameNameTileCount: 2, group: group, mostRecentlyActivated: recent
+            ))
+        }
+        for (rank, count) in [(-1, 2), (2, 2), (0, 1), (0, 3)] {
+            XCTAssertNil(Policy.memberAtSwitcherRank(
+                rank, sameNameTileCount: count, group: group, mostRecentlyActivated: primary
+            ))
         }
     }
 

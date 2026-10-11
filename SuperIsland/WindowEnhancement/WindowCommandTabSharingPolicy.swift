@@ -149,8 +149,13 @@ enum WindowCommandTabSharingPolicy {
         running: [Application],
         evidence: SelectionEvidence
     ) -> Group? {
+        // NSWorkspace may retain an unrelated regular App with PID -1. It
+        // cannot own a window, but must not invalidate both known WeChat
+        // processes. Keep the full selected set strict so an invalid selected
+        // same-name tile still rejects the weak group.
+        let validRunning = running.filter { $0.processID > 0 }
         guard !selected.isEmpty,
-              let runningByPID = uniqueApplications(running),
+              let runningByPID = uniqueApplications(validRunning),
               let selectedByPID = uniqueApplications(selected),
               selectedByPID.values.allSatisfy({
                   runningByPID[$0.processID] == $0
@@ -190,6 +195,27 @@ enum WindowCommandTabSharingPolicy {
             return nil
         }
         return Group(members: members)
+    }
+
+    /// The native switcher orders App tiles by recent use. Resolve two
+    /// otherwise identical buttons only after the current monitor has observed
+    /// an exact activation of one member. The first same-name tile belongs to
+    /// that member, regardless of intervening activations of other Apps.
+    static func memberAtSwitcherRank(
+        _ rank: Int,
+        sameNameTileCount: Int,
+        group: Group,
+        mostRecentlyActivated: Application?
+    ) -> Member? {
+        guard group.members.count == 2,
+              sameNameTileCount == group.members.count,
+              (0..<sameNameTileCount).contains(rank),
+              let mostRecentlyActivated,
+              let recent = group.members.first(where: { $0.application == mostRecentlyActivated }) else {
+            return nil
+        }
+        if rank == 0 { return recent }
+        return group.members.first { $0.application != recent.application }
     }
 
     /// AppEx can become a regular, same-name application while its root is
