@@ -357,6 +357,7 @@ final class WindowCommandTabMonitor {
         cancel()
         removeNativePointerTap(force: true)
         nativeSwitcher.reset()
+        nativeSwitcher.clearActivationEvidence()
         cancelPrewarmTasks()
         WindowThumbnailProvider.clearAllCache(reason: .commandTabStopped)
         if let activationObserver {
@@ -918,6 +919,8 @@ final class WindowCommandTabMonitor {
         let applications = snapshot.applications.filter {
             !$0.isTerminated
                 && !preferences.isExcluded($0)
+                && !(preferences.excludedBundleIDs.contains("com.valvesoftware.steam")
+                     && $0.bundleIdentifier == "com.valvesoftware.steam.helper")
                 && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
         }
         guard !applications.isEmpty,
@@ -1912,10 +1915,22 @@ final class WindowCommandTabMonitor {
             }
         }
         let items = candidates.enumerated().map { index, candidate in
-            CommandTabDisplayItem(
+            let isSteamHelper = candidate.application.bundleIdentifier
+                == "com.valvesoftware.steam.helper"
+            let iconURL = isSteamHelper
+                ? NSWorkspace.shared.urlForApplication(
+                    withBundleIdentifier: "com.valvesoftware.steam"
+                  )
+                : candidate.application.bundleURL
+            return CommandTabDisplayItem(
                 id: index,
-                appName: candidate.isSharedWeChat ? "微信 · 全部窗口" : candidate.application.localizedName ?? "App",
-                icon: candidate.application.bundleURL.map { NSWorkspace.shared.icon(forFile: $0.path) },
+                appName: candidate.isSharedWeChat
+                    ? "微信 · 全部窗口"
+                    : isSteamHelper ? "Steam"
+                    : WindowCommandTabSharingPolicy.installation(
+                        for: weChatSharingApplication(candidate.application)
+                      )?.label ?? candidate.application.localizedName ?? "App",
+                icon: iconURL.map { NSWorkspace.shared.icon(forFile: $0.path) },
                 isLoading: previewLoading,
                 windows: previewLoading ? [] : candidate.windows.isEmpty ? previewOnlyWindows : (candidate.windows.enumerated().map { windowIndex, window in
                     CommandTabWindowDisplayItem(
@@ -3326,6 +3341,7 @@ final class WindowCommandTabMonitor {
                 return
             }
             Task { @MainActor [weak self] in
+                self?.nativeSwitcher.observeApplicationActivation(application)
                 // Returning from System Settings is a reliable low-frequency
                 // opportunity to observe a newly granted TCC permission. Do
                 // not poll continuously; only retry configuration while the
@@ -3430,10 +3446,17 @@ final class WindowCommandTabMonitor {
         }
     }
 
-    private func schedulePrewarm(for application: NSRunningApplication) {
+    private func schedulePrewarm(
+        for application: NSRunningApplication,
+        scheduleSteamRetry: Bool = true
+    ) {
+        let isSteamHelper = application.bundleIdentifier == "com.valvesoftware.steam.helper"
+            && SteamPreviewApplicationResolver.isVerifiedHelper(
+                application, running: NSWorkspace.shared.runningApplications
+            )
         guard preferences.isEnabled,
               preferences.cmdTabPlusEnabled || preferences.dockPreviewEnabled,
-              application.activationPolicy == .regular,
+              application.activationPolicy == .regular || isSteamHelper,
               !application.isTerminated,
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               !preferences.isExcluded(application),
@@ -3471,6 +3494,16 @@ final class WindowCommandTabMonitor {
             pendingPrewarmOrder.insert(processIdentifier, at: 0)
         }
         drainPrewarmQueueIfNeeded()
+        if isSteamHelper && scheduleSteamRetry {
+            // Steam may render its first foreground frame after the activation
+            // notification. Retry once while it is still active; never wake a
+            // background Steam window just to make a thumbnail.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard application.isActive else { return }
+                self?.schedulePrewarm(for: application, scheduleSteamRetry: false)
+            }
+        }
     }
 
     private func cancelPrewarmTasks() {
@@ -3756,6 +3789,8 @@ private final class NativeProcessSwitcherBridge {
         element: AXUIElement,
         values: ApplicationIdentityValues
     )] = []
+    private var lastKnownWeChatActivation: (processID: pid_t, launchDate: Date)?
+    private var lastObservedDockPID: pid_t?
 
     private struct ProcessSwitcherContext {
         let dockElement: AXUIElement
@@ -3769,7 +3804,25 @@ private final class NativeProcessSwitcherBridge {
         extendedIdentityCache.removeAll(keepingCapacity: false)
     }
 
+    func clearActivationEvidence() {
+        lastKnownWeChatActivation = nil
+        lastObservedDockPID = nil
+    }
+
+    func observeApplicationActivation(_ application: NSRunningApplication) {
+        guard !application.isTerminated,
+              application.processIdentifier > 0,
+              WindowCommandTabSharingPolicy.installation(
+                for: weChatSharingApplication(application)
+              ) != nil,
+              let launchDate = application.launchDate else { return }
+        lastKnownWeChatActivation = (application.processIdentifier, launchDate)
+    }
+
     func snapshot() -> SnapshotResult {
+        if let foreground = NSWorkspace.shared.frontmostApplication {
+            observeApplicationActivation(foreground)
+        }
         guard let context = processSwitcherContext() else {
             return .notVisible
         }
@@ -3799,6 +3852,9 @@ private final class NativeProcessSwitcherBridge {
     /// This path is intentionally independent of Dock's selected state so
     /// mouse hover can update the preview before a click or key press.
     func snapshot(at pointer: CGPoint) -> SnapshotResult {
+        if let foreground = NSWorkspace.shared.frontmostApplication {
+            observeApplicationActivation(foreground)
+        }
         guard let context = processSwitcherContext(),
               context.listFrame.insetBy(dx: -2, dy: -2).contains(pointer) else {
             return .notVisible
@@ -3856,8 +3912,13 @@ private final class NativeProcessSwitcherBridge {
               ).first,
               !dock.isTerminated else {
             reset()
+            clearActivationEvidence()
             return nil
         }
+        if let lastObservedDockPID, lastObservedDockPID != dock.processIdentifier {
+            clearActivationEvidence()
+        }
+        lastObservedDockPID = dock.processIdentifier
         let dockElement = AXUIElementCreateApplication(dock.processIdentifier)
         AXUIElementSetMessagingTimeout(dockElement, 0.12)
 
@@ -4337,12 +4398,24 @@ private final class NativeProcessSwitcherBridge {
 
         if let selectedApplications {
             let selection = SelectedApplication(applications: selectedApplications, anchorElement: anchorElement)
-            return .success(expandKnownWeChatSelection(selection, selectedElement: selectedElement, running: applications))
+            if selectedApplications.count == 1,
+               let helper = SteamPreviewApplicationResolver.helper(
+                for: selectedApplications[0], running: NSWorkspace.shared.runningApplications
+               ) {
+                return .success(SelectedApplication(
+                    applications: [helper], anchorElement: anchorElement
+                ))
+            }
+            return .success(expandKnownWeChatSelection(
+                selection, selectedElement: selectedElement, list: list, running: applications
+            ))
         }
         if sawAmbiguousScope, allAmbiguousScopesComplete,
            let diagnosticEvidence,
            diagnosticEvidence.firstDepth == 0,
-           let shared = weakSharedWeChatSelection(from: selectedElement, running: applications) {
+           let shared = weakSharedWeChatSelection(
+            from: selectedElement, in: list, running: applications
+           ) {
             return .success(shared)
         }
         if recordsIdentityFailure, sawAmbiguousScope, let diagnosticEvidence {
@@ -4361,38 +4434,25 @@ private final class NativeProcessSwitcherBridge {
     private func expandKnownWeChatSelection(
         _ selection: SelectedApplication,
         selectedElement: AXUIElement,
+        list: AXUIElement,
         running: [NSRunningApplication]
     ) -> SelectedApplication {
         guard selection.applications.allSatisfy({
             WindowCommandTabSharingPolicy.installation(for: weChatSharingApplication($0)) != nil
         }) else { return selection }
         let values = directIdentityValues(from: selectedElement, includeCustomIdentityAttributes: true)
-        let selected = selection.applications.map(weChatSharingApplication)
         let strongStrings = values.strings.filter { $0.contains("/") || $0.contains(".") }
         guard !values.processIdentifiers.isEmpty || !values.urls.isEmpty || !strongStrings.isEmpty else {
-            return weakSharedWeChatSelection(from: selectedElement, running: running) ?? selection
+            return weakSharedWeChatSelection(from: selectedElement, in: list, running: running) ?? selection
         }
-        // Unmatched/conflicting strong values must not be rescued by a name.
-        guard values.processIdentifiers.isEmpty || Set(values.processIdentifiers) == Set(selected.map(\.processID)),
-              values.urls.allSatisfy({ url in url.isFileURL && selected.contains { $0.bundlePath == url.standardizedFileURL.resolvingSymlinksInPath().path } }),
-              values.strings.filter({ $0.contains("/") || $0.contains(".") }).allSatisfy({ value in
-                  selection.applications.contains { app in
-                      value == app.bundleIdentifier || value == app.bundleURL?.path || value == app.bundleURL?.absoluteString
-                  }
-              }),
-              let group = WindowCommandTabSharingPolicy.sharedWeChatGroup(
-                selected: selected, running: running.map(weChatSharingApplication), evidence: .resolvedIdentity
-              ) else { return selection }
-        let byPID = Dictionary(uniqueKeysWithValues: running.map { ($0.processIdentifier, $0) })
-        return SelectedApplication(
-            applications: group.processIDs.compactMap { byPID[$0] },
-            anchorElement: selection.anchorElement,
-            isSharedWeChat: true
-        )
+        // A concrete PID, URL or bundle path already identifies one
+        // installation. Do not replace that identity with the shared group.
+        return selection
     }
 
     private func weakSharedWeChatSelection(
         from element: AXUIElement,
+        in list: AXUIElement,
         running: [NSRunningApplication]
     ) -> SelectedApplication? {
         guard stringAttribute(kAXRoleAttribute, of: element) == kAXButtonRole as String,
@@ -4433,7 +4493,44 @@ private final class NativeProcessSwitcherBridge {
             evidence: .weakSelectedButton(title: title, isLeaf: true, searchComplete: true, hasStrongIdentity: hasStrongIdentity)
         ) else { return nil }
         let byPID = Dictionary(uniqueKeysWithValues: running.map { ($0.processIdentifier, $0) })
+        if let selected = orderResolvedWeChatSelection(
+            for: element, in: list, group: group, byPID: byPID
+        ) {
+            return selected
+        }
         return SelectedApplication(applications: group.processIDs.compactMap { byPID[$0] }, anchorElement: element, isSharedWeChat: true)
+    }
+
+    private func orderResolvedWeChatSelection(
+        for element: AXUIElement,
+        in list: AXUIElement,
+        group: WindowCommandTabSharingPolicy.Group,
+        byPID: [pid_t: NSRunningApplication]
+    ) -> SelectedApplication? {
+        guard let lastKnownWeChatActivation,
+              let recent = byPID[lastKnownWeChatActivation.processID],
+              recent.launchDate == lastKnownWeChatActivation.launchDate else { return nil }
+        let sameNameTiles = children(of: list).filter {
+            stringAttribute(kAXRoleAttribute, of: $0) == kAXButtonRole as String
+                && (stringAttribute(kAXTitleAttribute, of: $0) == "微信"
+                    || stringAttribute(kAXTitleAttribute, of: $0) == "WeChat")
+        }
+        guard let rank = sameNameTiles.firstIndex(where: { CFEqual($0, element) }),
+              let member = WindowCommandTabSharingPolicy.memberAtSwitcherRank(
+                rank,
+                sameNameTileCount: sameNameTiles.count,
+                group: group,
+                mostRecentlyActivated: weChatSharingApplication(recent)
+              ),
+              let application = byPID[member.application.processID] else { return nil }
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "cmdTab", event: "weChatOrderResolved",
+            metadata: [
+                "tileRank": .integer(Int64(rank)),
+                "ownerPID": .integer(Int64(application.processIdentifier))
+            ]
+        )
+        return SelectedApplication(applications: [application], anchorElement: element)
     }
 
     private func selectionGroupIdentity(_ selection: SelectedApplication) -> String? {

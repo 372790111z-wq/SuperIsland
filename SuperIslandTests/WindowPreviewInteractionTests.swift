@@ -1311,6 +1311,49 @@ final class WindowPreviewInteractionTests: XCTestCase {
         ), [10])
     }
 
+    func testSteamPreviewRequiresInvalidLauncherAndExactChildHelper() {
+        let root = "/Users/test/Library/Application Support/Steam/Steam.AppBundle/Steam"
+        let mainExecutable = root + "/Contents/MacOS/steam_osx"
+        let helperRoot = root + "/Contents/Frameworks/Steam Helper.app"
+        let helper = SteamPreviewIdentityCandidate(
+            processIdentifier: 42347,
+            bundleIdentifier: "com.valvesoftware.steam.helper",
+            bundlePath: helperRoot,
+            executablePath: helperRoot + "/Contents/MacOS/Steam Helper",
+            parentProcessIdentifier: 42332,
+            parentExecutablePath: mainExecutable
+        )
+        func resolve(mainPID: pid_t = -1,
+                     helpers: [SteamPreviewIdentityCandidate]) -> [pid_t] {
+            SteamPreviewIdentityPolicy.helperProcessIdentifiers(
+                mainProcessIdentifier: mainPID,
+                mainBundleIdentifier: "com.valvesoftware.steam",
+                mainBundlePath: root,
+                mainExecutablePath: mainExecutable,
+                helpers: helpers
+            )
+        }
+        XCTAssertEqual(resolve(helpers: [helper]), [42347])
+        XCTAssertEqual(resolve(mainPID: 42332, helpers: [helper]), [])
+        XCTAssertEqual(resolve(helpers: [SteamPreviewIdentityCandidate(
+            processIdentifier: 42347,
+            bundleIdentifier: helper.bundleIdentifier,
+            bundlePath: helper.bundlePath,
+            executablePath: helper.executablePath,
+            parentProcessIdentifier: 42332,
+            parentExecutablePath: "/Applications/Other.app/Contents/MacOS/steam_osx"
+        )]), [])
+        XCTAssertEqual(resolve(helpers: [SteamPreviewIdentityCandidate(
+            processIdentifier: 42347,
+            bundleIdentifier: helper.bundleIdentifier,
+            bundlePath: "/Applications/Other Steam Helper.app",
+            executablePath: helper.executablePath,
+            parentProcessIdentifier: 42332,
+            parentExecutablePath: mainExecutable
+        )]), [])
+        XCTAssertEqual(resolve(helpers: [helper, helper]), [])
+    }
+
     func testDockSharedPreviewRejectsWholeGroupWithConflictingOrMissingBundle() {
         let targetIdentifiers: [String?] = ["com.google.Chrome", nil]
         let uncertainIdentifiers: [String?] = ["com.example.other", nil]

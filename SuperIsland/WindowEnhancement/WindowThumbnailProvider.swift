@@ -1768,7 +1768,16 @@ enum WindowThumbnailProvider {
                     expectedCacheGeneration: expectedCacheGeneration
                 )
             } else {
-                if captureResult.isEmptySurface {
+                let preserveSteamCache: Bool
+                if (captureResult.isEmptySurface || captureResult.uniformImage != nil),
+                   request.windowID != nil {
+                    preserveSteamCache = await isVerifiedInactiveSteamHelper(
+                        processIdentifier: applicationPID
+                    )
+                } else {
+                    preserveSteamCache = false
+                }
+                if captureResult.isEmptySurface && !preserveSteamCache {
                     discardCachedCapture(
                         keys: cacheKeysForStore(exactKey: key, applicationIdentity: applicationIdentity, request: request),
                         applicationIdentity: applicationIdentity,
@@ -1780,14 +1789,17 @@ enum WindowThumbnailProvider {
                 // owns the visible pixels. The shell identity remains the
                 // action target; this strict sibling/geometry matcher supplies
                 // pixels only and never changes activation or close identity.
-                if let relatedResult = await captureRelatedRendererFallback(
+                let relatedResult = await captureRelatedRendererFallback(
                     shellWindow: window,
                     applicationIdentity: applicationIdentity,
                     content: content,
                     expectedCacheGeneration: expectedCacheGeneration
-                ) {
+                )
+                if let relatedResult,
+                   !preserveSteamCache || relatedResult.image != nil {
                     results[index] = relatedResult
-                } else if let uniformImage = captureResult.uniformImage {
+                } else if let uniformImage = captureResult.uniformImage,
+                          !preserveSteamCache {
                     // A uniform but strongly evidenced document is accepted
                     // only after both exact-ID capture paths and the verified
                     // renderer path had a chance to supply real content.
@@ -1798,11 +1810,17 @@ enum WindowThumbnailProvider {
                         applicationIdentity: applicationIdentity,
                         expectedCacheGeneration: expectedCacheGeneration
                     )
-                } else if captureResult.isEmptySurface {
-                    // A live empty shell must not be resurrected from an older
-                    // successful image. Missing/off-Space windows still retain
-                    // their separately labelled recent-cache path above.
-                    results[index] = .captureFailed
+                } else if captureResult.isEmptySurface || captureResult.uniformImage != nil {
+                    // Steam's live helper window captures only a uniform frame
+                    // after deactivation. Reuse its exact-window foreground
+                    // image for the existing 60-second limit, visibly labelled
+                    // as recent. Every other live empty shell still fails.
+                    results[index] = preserveSteamCache
+                        ? recentCacheResult(
+                            for: request,
+                            applicationIdentity: applicationIdentity
+                          ) ?? .captureFailed
+                        : .captureFailed
                 } else {
                     results[index] = recentCacheResult(
                         for: request,
@@ -1825,6 +1843,20 @@ enum WindowThumbnailProvider {
             return repeated(.restartRequired, count: requests.count)
         case .authorized:
             return results
+        }
+    }
+
+    private static func isVerifiedInactiveSteamHelper(
+        processIdentifier: pid_t
+    ) async -> Bool {
+        await MainActor.run {
+            let running = NSWorkspace.shared.runningApplications
+            guard let application = running.first(where: {
+                $0.processIdentifier == processIdentifier
+            }), !application.isActive else { return false }
+            return SteamPreviewApplicationResolver.isVerifiedHelper(
+                application, running: running
+            )
         }
     }
 
