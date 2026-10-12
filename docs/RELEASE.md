@@ -2,9 +2,9 @@
 
 ## 当前维护版
 
-本分支最近安装的构建是 **20260922004644**，对外名称为 **SuperIsland**。
+本机最近安装并验收的构建是 **20261011235840**，对外名称为 **SuperIsland**。
 它使用本机签名，Bundle ID 保留为 `com.workview.SuperIsland.WE1Debug`，以沿用已有设置和权限身份。
-本仓库尚未发布该构建的 GitHub Release；本机 ZIP/DMG、源码推送与公开发行是不同步骤。
+该构建已作为[未公证 GitHub 测试版](https://github.com/372790111z-wq/SuperIsland/releases/tag/superisland-20261011235840-test)发布，仅提供 Apple Silicon ZIP。其他 Mac 可能被 Gatekeeper 阻止，尚未完成跨设备安装验收；源码推送、测试版下载与正式发行是不同步骤。
 
 已验证的平台是 Apple Silicon Mac，部署目标 macOS 14。最近构建工具为 Xcode 27.0。
 当前没有这批新增功能的 Intel 安装验证，不将下方保留的上游 Intel 脚本当成已验证产物。
@@ -55,8 +55,9 @@ xcodebuild -project SuperIsland.xcodeproj -scheme SuperIsland \
 
 - `git push` 保存源码、文档和所选检查点，不等于创建可下载安装的 Release。
 - 当前维护版的自动更新仍沿用独立的 `we1-构建号` tag 及 `SuperIsland-WE1-构建号-架构.dmg` 匹配协议，并核对下载应用身份和签名。内部兼容标记不影响应用对外名称。
+- 当前未公证测试版使用 `superisland-20261011235840-test` 标签和 ZIP 资产，不匹配上述自动更新协议。
 - 如果今后改为对外统一命名的在线更新包，需要一并安排旧客户端兼容，不能只更换远端文件名。
-- 对外发行前应另行验证 Developer ID 签名、公证、安装与升级，以及各目标架构；不要直接运行含上传行为的脚本作为本地打包步骤。
+- 正式对外发行前应另行验证 Developer ID 签名、公证、安装与升级，以及各目标架构；不要直接运行含上传行为的脚本作为本地打包步骤。
 - 历史 `superisland-*-installed` 和 `we1-*-accepted-*` 检查点用于追溯，不能单凭 tag 名宣称所有功能已验收。
 
 ## 保留的上游工具
