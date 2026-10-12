@@ -7,6 +7,7 @@
 <p align="center">Mac 灵动岛与窗口增强工具：查看信息、整理临时文件、切换窗口，用更少操作完成日常任务。</p>
 
 <p align="center">
+  <a href="https://github.com/372790111z-wq/SuperIsland/releases/tag/superisland-20261011235840-test">下载测试版</a> ·
   <a href="docs/WINDOW-ENHANCEMENTS.md">窗口与快捷键</a> ·
   <a href="docs/SHELF.md">暂存与 ZIP</a> ·
   <a href="docs/NOW_PLAYING.md">音乐</a> ·
@@ -14,12 +15,18 @@
   <a href="docs/RELEASE.md">构建与打包</a>
 </p>
 
+## 下载测试版
+
+Apple Silicon Mac（macOS 14+）：[下载 SuperIsland 安装 ZIP](https://github.com/372790111z-wq/SuperIsland/releases/download/superisland-20261011235840-test/SuperIsland-20261011235840-arm64.zip) · [SHA-256 校验文件](https://github.com/372790111z-wq/SuperIsland/releases/download/superisland-20261011235840-test/SHA256SUMS.txt) · [查看发布说明](https://github.com/372790111z-wq/SuperIsland/releases/tag/superisland-20261011235840-test)。解压 ZIP 后得到 `SuperIsland.app`。
+
+这是**未公证的测试版**，使用本机测试证书签名；在其他 Mac 上可能被 Gatekeeper 阻止，尚未完成跨设备安装验收。安装限制和校验值见发布说明。替换旧版前请先退出正在运行的 SuperIsland。
+
 ## 当前版本
 
 本仓库是在 [shobhit99/SuperIsland](https://github.com/shobhit99/SuperIsland) 基础上持续维护的版本。
-最新代码已合入本仓库的 [`main`](https://github.com/372790111z-wq/SuperIsland/tree/main)。[`fix/we1-codex-usage-refresh-20260921`](https://github.com/372790111z-wq/SuperIsland/tree/fix/we1-codex-usage-refresh-20260921) 保留为本轮开发分支。
+最新代码已合入本仓库的 [`main`](https://github.com/372790111z-wq/SuperIsland/tree/main)。
 
-最近安装验证的构建为 **20260922004644**，应用名称为 **SuperIsland**。源码、使用说明和本机验证记录保存在本仓库；该构建目前为本机签名包，尚未发布 GitHub Release，也未经过 Apple 公证。上游安装包不包含这里的新增功能。
+最近在本机安装并验收的构建为 **20261011235840**，应用名称为 **SuperIsland**。该构建已作为未公证测试版发布；源码和使用说明保存在本仓库。上游安装包不包含这里的新增功能。
 
 ## 可以做什么
 
