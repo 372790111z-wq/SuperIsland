@@ -54,6 +54,7 @@ struct SettingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             sidebar
+                .dataAnnotationID("app-localization-settings-ui")
             Rectangle()
                 .fill(settingsDivider)
                 .frame(width: 1)
@@ -67,7 +68,6 @@ struct SettingsView: View {
                   let requestedPane = SettingsPane(rawValue: rawValue) else { return }
             selectedPane = requestedPane
         }
-        .dataAnnotationID("app-localization-settings-ui")
     }
 
     // MARK: - Sidebar

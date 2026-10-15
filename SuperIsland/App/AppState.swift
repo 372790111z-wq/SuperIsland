@@ -243,7 +243,8 @@ final class AppState: ObservableObject {
     @Published var activeModule: ActiveModule? = nil {
         didSet { refreshEnergyState() }
     }
-    @Published private(set) var showsCompactVolumeHUD = false
+    @Published private(set) var compactSystemFeedback: SystemFeedbackKind?
+    var showsCompactVolumeHUD: Bool { compactSystemFeedback == .volume }
     @Published var previousModule: ActiveModule? = nil
     @Published var fullExpandedSelectedTab: FullExpandedTab = .home {
         didSet { refreshEnergyState() }
@@ -267,6 +268,7 @@ final class AppState: ObservableObject {
     // Module enabled states (persisted via UserDefaults)
     @AppStorage("module.nowPlaying.enabled") var nowPlayingEnabled = true
     @AppStorage("module.volumeHUD.enabled") var volumeHUDEnabled = true
+    @AppStorage("module.brightnessHUD.enabled") var brightnessHUDEnabled = true
     @AppStorage("module.battery.enabled") var batteryEnabled = true
     @AppStorage("module.shelf.enabled") var shelfEnabled = true
     @AppStorage("module.connectivity.enabled") var connectivityEnabled = true
@@ -275,6 +277,7 @@ final class AppState: ObservableObject {
     @AppStorage("module.weather.temperatureUnit") var temperatureUnit: TemperatureUnit = .celsius
     @AppStorage("module.notifications.enabled") var notificationsEnabled = true
     @AppStorage("module.notifications.showPreviews") var notificationPreviewsEnabled = true
+    @AppStorage("module.notifications.macOS.showPreviews") var macNotificationPreviewsEnabled = false
     @AppStorage("module.notifications.maxRetainedItems") var notificationMaxRetainedItems: Double = 10
     @AppStorage("module.notifications.enabledSources") private var notificationEnabledSourcesRaw = NotificationFeedSource.defaultEnabledRawValue
     @AppStorage("module.teleprompter.enabled") var teleprompterEnabled = false
@@ -321,6 +324,9 @@ final class AppState: ObservableObject {
 
     private var autoDismissWorkItem: DispatchWorkItem?
     private var compactVolumeHUDDismissWorkItem: DispatchWorkItem?
+    private var compactFeedbackGeneration: UInt64 = 0
+    private var pendingNotificationPresentation: (id: String, isAvailable: () -> Bool)?
+    private var automaticNotificationReturn: (module: ActiveModule?, tab: FullExpandedTab)?
     private var fullExpandedDismissWorkItem: DispatchWorkItem?
     private var hoverActivationWorkItem: DispatchWorkItem?
     private var systemEmojiInteractionWorkItem: DispatchWorkItem?
@@ -617,6 +623,11 @@ final class AppState: ObservableObject {
         cancelFullExpandedDismiss()
         cancelHoverActivation()
         endSystemEmojiInteraction()
+        if let original = automaticNotificationReturn {
+            activeModule = original.module
+            fullExpandedSelectedTab = original.tab
+            automaticNotificationReturn = nil
+        }
         withAnimation(notchAnimation) {
             currentState = .compact
         }
@@ -707,28 +718,79 @@ final class AppState: ObservableObject {
 
     // MARK: - HUD Management
 
-    /// A volume change only replaces compact content; it never resizes the island.
+    /// Replace compact content, widening around a physical notch when needed.
     func showVolumeHUD() {
         guard !isZilanInteractionSuppressed, volumeHUDEnabled else { return }
-        guard currentState == .compact else {
-            showHUD(module: .volumeHUD)
-            return
-        }
+        if currentState == .expanded, automaticNotificationReturn != nil, !isHovering { dismiss() }
+        guard currentState == .compact else { return }
+        showCompactSystemFeedback(.volume, duration: Constants.hudAutoDismissDelay)
+    }
 
+    func showBrightnessHUD(duration: TimeInterval = Constants.hudAutoDismissDelay) {
+        SystemFeedbackDiagnostics.write("brightnessPresentation", fields: ["enabled": brightnessHUDEnabled, "interactionSuppressed": isZilanInteractionSuppressed, "isCompact": currentState == .compact, "requestedDuration": duration])
+        guard !isZilanInteractionSuppressed, brightnessHUDEnabled else { return }
+        if currentState == .expanded, automaticNotificationReturn != nil, !isHovering { dismiss() }
+        guard currentState == .compact else { return }
+        showCompactSystemFeedback(.brightness, duration: duration)
+    }
+
+    private func showCompactSystemFeedback(_ kind: SystemFeedbackKind, duration: TimeInterval) {
+        guard !isShelfDragActive, !isSystemEmojiInteractionActive, presentationHoldModule == nil else { return }
         compactVolumeHUDDismissWorkItem?.cancel()
-        showsCompactVolumeHUD = true
+        compactFeedbackGeneration &+= 1
+        let generation = compactFeedbackGeneration
+        compactSystemFeedback = kind
         let workItem = DispatchWorkItem { [weak self] in
-            self?.showsCompactVolumeHUD = false
-            self?.compactVolumeHUDDismissWorkItem = nil
+            guard let self, self.compactFeedbackGeneration == generation else { return }
+            self.compactSystemFeedback = nil
+            self.compactVolumeHUDDismissWorkItem = nil
+            let pending = self.pendingNotificationPresentation
+            self.pendingNotificationPresentation = nil
+            if let pending {
+                self.presentIncomingNotification(pending.id, isAvailable: pending.isAvailable)
+            }
         }
         compactVolumeHUDDismissWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.hudAutoDismissDelay, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, duration), execute: workItem)
+    }
+
+    func hideCompactSystemFeedback(if kind: SystemFeedbackKind) {
+        guard compactSystemFeedback == kind else { return }
+        hideCompactVolumeHUD()
     }
 
     private func hideCompactVolumeHUD() {
+        compactFeedbackGeneration &+= 1
         compactVolumeHUDDismissWorkItem?.cancel()
         compactVolumeHUDDismissWorkItem = nil
-        showsCompactVolumeHUD = false
+        compactSystemFeedback = nil
+        pendingNotificationPresentation = nil
+    }
+
+    /// Notification data already lives in NotificationManager; queue only its ID
+    /// and a fresh availability check so removed/disabled events cannot replay.
+    func presentIncomingNotification(_ id: String, isAvailable: @escaping () -> Bool) {
+        guard notificationsEnabled, !isZilanInteractionSuppressed, isAvailable() else { return }
+        if compactSystemFeedback != nil {
+            pendingNotificationPresentation = (id, isAvailable)
+            return
+        }
+        guard !isHovering, !isShelfDragActive, !isSystemEmojiInteractionActive,
+              presentationHoldModule == nil else { return }
+        if currentState == .expanded, automaticNotificationReturn != nil,
+           activeBuiltInModule == .notifications {
+            scheduleAutoDismiss(after: Constants.notificationDisplayDuration)
+            return
+        }
+        guard currentState == .compact else { return }
+        automaticNotificationReturn = (activeModule, fullExpandedSelectedTab)
+        showHUD(module: .notifications, autoDismissDelay: Constants.notificationDisplayDuration)
+    }
+
+    func cancelPendingNotificationPresentation(_ id: String? = nil) {
+        if id == nil || pendingNotificationPresentation?.id == id {
+            pendingNotificationPresentation = nil
+        }
     }
 
     func showHUD(module: ModuleType, autoDismiss: Bool = true, autoDismissDelay: TimeInterval? = nil) {
@@ -740,6 +802,7 @@ final class AppState: ObservableObject {
         if case .builtIn(let builtIn) = module, !isModuleEnabled(builtIn) {
             return
         }
+        if module != .builtIn(.notifications) { automaticNotificationReturn = nil }
 
         if shouldDirectlyOpenNotificationsOnHover(for: module) {
             presentNotificationsFullExpanded()
@@ -1001,6 +1064,7 @@ final class AppState: ObservableObject {
                                           reason: .generationRejected)
             return
         }
+        automaticNotificationReturn = nil
         if currentState == .fullExpanded {
             cycleFullExpandedTab(forward: forward)
             return
@@ -1039,6 +1103,7 @@ final class AppState: ObservableObject {
         if case .builtIn(let builtIn) = module, !isModuleEnabled(builtIn) {
             return
         }
+        automaticNotificationReturn = nil
         withAnimation(contentSwapAnimation) {
             previousModule = activeModule
             activeModule = module
@@ -1058,6 +1123,7 @@ final class AppState: ObservableObject {
     }
 
     func showHomeTab() {
+        automaticNotificationReturn = nil
         withAnimation(contentSwapAnimation) {
             fullExpandedSelectedTab = .home
         }
@@ -1206,6 +1272,14 @@ final class AppState: ObservableObject {
         compactBaseSize.width
     }
 
+    var usesNotchSafeSystemFeedback: Bool {
+        compactSystemFeedback != nil && presentationHasNotch && compactMinimalSideExpansion > 0
+    }
+
+    var systemFeedbackCenterGapWidth: CGFloat {
+        max(compactBaseSize.width, (presentationNotchRect?.width ?? 0) + 8)
+    }
+
     // MARK: - Size Helpers
 
     var currentSize: CGSize {
@@ -1281,6 +1355,12 @@ final class AppState: ObservableObject {
                 return Constants.nonNotchCompactSize
             }
             let baseSize = compactBaseSize
+            if usesNotchSafeSystemFeedback {
+                return CGSize(
+                    width: systemFeedbackCenterGapWidth + compactMinimalSideExpansion * 2,
+                    height: baseSize.height
+                )
+            }
             guard shouldUseMinimalCompactLayout else {
                 return baseSize
             }
