@@ -12,12 +12,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let showMenuBarIcon: Bool
         let nowPlayingEnabled: Bool
         let volumeHUDEnabled: Bool
+        let brightnessHUDEnabled: Bool
         let batteryEnabled: Bool
         let shelfEnabled: Bool
         let connectivityEnabled: Bool
         let calendarEnabled: Bool
         let weatherEnabled: Bool
         let notificationsEnabled: Bool
+        let notificationEnabledSources: String
         let teleprompterEnabled: Bool
         let energyMode: String
         let disableBackgroundExtensionRefresh: Bool
@@ -31,12 +33,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showMenuBarIcon = bool("general.showMenuBarIcon", default: true)
             nowPlayingEnabled = bool("module.nowPlaying.enabled", default: true)
             volumeHUDEnabled = bool("module.volumeHUD.enabled", default: true)
+            brightnessHUDEnabled = bool("module.brightnessHUD.enabled", default: true)
             batteryEnabled = bool("module.battery.enabled", default: true)
             shelfEnabled = bool("module.shelf.enabled", default: true)
             connectivityEnabled = bool("module.connectivity.enabled", default: true)
             calendarEnabled = bool("module.calendar.enabled", default: true)
             weatherEnabled = bool("module.weather.enabled", default: true)
             notificationsEnabled = bool("module.notifications.enabled", default: true)
+            notificationEnabledSources = defaults.string(forKey: "module.notifications.enabledSources") ?? NotificationFeedSource.defaultEnabledRawValue
             teleprompterEnabled = bool("module.teleprompter.enabled", default: false)
             energyMode = defaults.string(forKey: "energy.mode") ?? EnergyMode.smart.rawValue
             disableBackgroundExtensionRefresh = bool(
@@ -391,6 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.runtimeDefaultsSnapshot = RuntimeDefaultsSnapshot()
                 self.applyMenuBarVisibility()
                 self.applyVolumeHUDSetting()
+                NotificationManager.shared.applyMacNotificationSource()
                 self.rebuildStatusMenu()
                 AppState.shared.refreshEnergyState()
                 ModuleRefreshScheduler.shared.refreshScheduling()
@@ -645,7 +650,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if enabled {
             _ = VolumeManager.shared
         }
-        MediaKeyInterceptor.shared.apply(enabled: enabled)
+        ScreenBrightnessManager.shared.apply(enabled: AppState.shared.brightnessHUDEnabled)
+        MediaKeyInterceptor.shared.apply(volumeEnabled: enabled, brightnessEnabled: AppState.shared.brightnessHUDEnabled)
+        ControlCenterSystemAdjustmentMonitor.shared.apply(volumeEnabled: enabled, brightnessEnabled: AppState.shared.brightnessHUDEnabled)
+        if !enabled { AppState.shared.hideCompactSystemFeedback(if: .volume) }
     }
 
     private func observePowerState() {

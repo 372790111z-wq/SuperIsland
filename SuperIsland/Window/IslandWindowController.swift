@@ -464,6 +464,14 @@ final class IslandWindowController {
             }
             .store(in: &cancellables)
 
+        appState.$compactSystemFeedback
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateCompactFrameIfNeeded()
+            }
+            .store(in: &cancellables)
+
         NowPlayingManager.shared.$title
             .removeDuplicates()
             .receive(on: RunLoop.main)

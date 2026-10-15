@@ -27,6 +27,7 @@ struct NotificationExpandedView: View {
         .onChange(of: allNotifications.map(\.id)) { _, _ in
             syncFullExpandedTopNotificationIfNeeded()
         }
+        .dataAnnotationID(appState.currentState == .fullExpanded ? "system-feedback-notification-list" : "system-feedback-notification-banner")
     }
 
     private var emptyState: some View {
@@ -125,6 +126,7 @@ struct NotificationExpandedView: View {
                     .foregroundColor(.white.opacity(0.58))
             }
             .buttonStyle(.plain)
+            .dataAnnotationID("system-feedback-notification-clear")
         }
         .frame(maxWidth: .infinity, minHeight: 18, maxHeight: 18, alignment: .center)
         .padding(.top, 2)
@@ -140,7 +142,8 @@ struct NotificationExpandedView: View {
     }
 
     private func notificationRow(_ notification: IslandNotification, featured: Bool, chrome: NotificationRowChrome) -> some View {
-        let shouldHandleTap = appState.currentState == .expanded || notification.tapAction != nil
+        let hasMacAction = notification.sourceID.hasPrefix("macOS:") && notification.bundleIdentifier != nil
+        let shouldHandleTap = appState.currentState == .expanded || notification.tapAction != nil || hasMacAction
         return SwipeToDismissNotificationRow(
             featured: featured,
             chrome: chrome,
@@ -148,7 +151,7 @@ struct NotificationExpandedView: View {
                 if appState.currentState == .expanded {
                     appState.fullyExpand()
                     appState.cancelFullExpandedDismiss()
-                } else if notification.tapAction != nil {
+                } else if notification.tapAction != nil || hasMacAction {
                     manager.activateNotification(notification)
                 }
             } : nil
