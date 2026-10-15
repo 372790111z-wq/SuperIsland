@@ -7,9 +7,13 @@ struct CompactView: View {
 
     var body: some View {
         Group {
-            if appState.showsCompactVolumeHUD {
-                SystemHUDCompactView()
-                    .padding(.horizontal, 12)
+            if let feedback = appState.compactSystemFeedback {
+                if appState.usesNotchSafeSystemFeedback {
+                    SystemHUDCompactView(kind: feedback, centerGapWidth: appState.systemFeedbackCenterGapWidth)
+                } else {
+                    SystemHUDCompactView(kind: feedback)
+                        .padding(.horizontal, 12)
+                }
             } else if appState.shouldUseMinimalCompactLayout,
                let module = appState.compactPresentationModule {
                 minimalCompactContent(for: module)

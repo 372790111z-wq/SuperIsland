@@ -21,6 +21,30 @@ struct MediaAppVolume: Identifiable, Equatable {
 final class VolumeManager: ObservableObject {
     static let shared = VolumeManager()
 
+    nonisolated static func canAdjustCurrentOutputVolume() -> Bool {
+        currentOutputPropertyIsSettable(kAudioHardwareServiceDeviceProperty_VirtualMainVolume)
+    }
+
+    nonisolated static func canAdjustCurrentOutputMute() -> Bool {
+        currentOutputPropertyIsSettable(kAudioDevicePropertyMute)
+    }
+
+    nonisolated private static func currentOutputPropertyIsSettable(_ selector: AudioObjectPropertySelector) -> Bool {
+        var device = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var defaultAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &defaultAddress, 0, nil, &size, &device) == noErr,
+              device != 0 else { return false }
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector, mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain
+        )
+        var settable = DarwinBoolean(false)
+        return AudioObjectIsPropertySettable(device, &address, &settable) == noErr && settable.boolValue
+    }
+
     @Published var volume: Float = 0
     @Published var isMuted: Bool = false
     @Published var outputDeviceName: String = "Unknown"
@@ -193,6 +217,20 @@ final class VolumeManager: ObservableObject {
         userInitiatedHUDDeadline = Date().addingTimeInterval(userInitiatedHUDGraceInterval)
     }
 
+    /// The system applied a delivered media key. Read after that change;
+    /// this fallback must never apply the key again.
+    func refreshAfterSystemKeyChange() {
+        noteUserInitiatedVolumeChange()
+        for delay in [0.06, 0.18] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                self.updateVolume()
+                self.updateMuteState()
+                self.showHUDForUserInitiatedChangeIfNeeded()
+            }
+        }
+    }
+
     private func startMediaMonitoring() {
         mediaRefreshToken = ModuleRefreshScheduler.shared.register(
             id: "volume.mediaApps",
@@ -220,7 +258,7 @@ final class VolumeManager: ObservableObject {
             defaultDeviceID, &address, 0, nil, &size, &vol
         )
 
-        if status == noErr {
+        if status == noErr, vol.isFinite, (0...1).contains(vol) {
             volume = vol
         }
     }

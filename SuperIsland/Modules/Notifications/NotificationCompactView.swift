@@ -2,7 +2,11 @@ import SwiftUI
 import AppKit
 
 struct NotificationCompactView: View {
-    @ObservedObject private var manager = NotificationManager.shared
+    @ObservedObject private var manager: NotificationManager
+
+    init(manager: NotificationManager? = nil) {
+        self.manager = manager ?? .shared
+    }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -28,6 +32,7 @@ struct NotificationCompactView: View {
                     .foregroundColor(.white.opacity(0.5))
             }
         }
+        .dataAnnotationID("system-feedback-notification-banner")
     }
 
     private func headline(for notification: IslandNotification) -> String {

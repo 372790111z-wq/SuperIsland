@@ -32,10 +32,26 @@ struct IslandNotification: Identifiable {
     let tapAction: NotificationTapAction?
 }
 
+enum NotificationPreviewPolicy {
+    static func display(_ notification: IslandNotification, globalPreviews: Bool, macPreviews: Bool) -> IslandNotification {
+        let isMac = notification.sourceID.hasPrefix("macOS:")
+        guard !globalPreviews || (isMac && !macPreviews) else { return notification }
+        return IslandNotification(
+            sourceID: notification.sourceID, appName: notification.appName,
+            bundleIdentifier: notification.bundleIdentifier, appIcon: notification.appIcon,
+            appIconURL: notification.appIconURL,
+            title: isMac && globalPreviews ? notification.title : notification.appName,
+            body: "消息预览已隐藏", senderName: isMac && globalPreviews ? notification.senderName : nil,
+            previewText: nil, avatarURL: nil, timestamp: notification.timestamp, tapAction: notification.tapAction
+        )
+    }
+}
+
 enum NotificationFeedSource: String, CaseIterable, Identifiable {
     case extensions
     case whatsApp
     case compatibleApps
+    case macOS
 
     var id: String { rawValue }
 
@@ -44,6 +60,7 @@ enum NotificationFeedSource: String, CaseIterable, Identifiable {
         case .extensions: return "Extension notifications"
         case .whatsApp: return "WhatsApp"
         case .compatibleApps: return "Compatible app broadcasts"
+        case .macOS: return "Mac 系统通知"
         }
     }
 
@@ -55,11 +72,13 @@ enum NotificationFeedSource: String, CaseIterable, Identifiable {
             return "Notifications from the bundled WhatsApp integration."
         case .compatibleApps:
             return "Notification-like events from apps that publish public distributed notifications."
+        case .macOS:
+            return "同步系统可见的新通知横幅，需要辅助功能权限；不读取历史或静默通知。"
         }
     }
 
     static var defaultEnabledRawValue: String {
-        allCases.map(\.rawValue).joined(separator: ",")
+        allCases.filter { $0 != .macOS }.map(\.rawValue).joined(separator: ",")
     }
 }
 
@@ -102,9 +121,11 @@ final class NotificationManager: ObservableObject {
     private let dismissedNotificationRetention: TimeInterval = 300
     private let lowInformationSuppressionWindow: TimeInterval = 10
     private var dismissedNotifications: [DismissedNotificationRecord] = []
-    private init() {
-        checkPermission()
-        startMonitoring()
+    init(startMonitoring: Bool = true) {
+        if startMonitoring {
+            checkPermission()
+            self.startMonitoring()
+        }
     }
 
     // MARK: - Permission
@@ -165,6 +186,23 @@ final class NotificationManager: ObservableObject {
 
         startWhatsAppLogMonitor()
         startDeliveredNotificationMonitor()
+        applyMacNotificationSource()
+    }
+
+    func applyMacNotificationSource() {
+        let enabled = AppState.shared.notificationsEnabled && AppState.shared.isNotificationSourceEnabled(.macOS)
+        MacNotificationBridge.shared.apply(enabled: enabled) { [weak self] id, banner in
+            guard let self, AppState.shared.notificationsEnabled,
+                  AppState.shared.isNotificationSourceEnabled(.macOS) else { return }
+            self.addNotification(IslandNotification(
+                sourceID: id, appName: banner.application.name,
+                bundleIdentifier: banner.application.bundleIdentifier.isEmpty ? nil : banner.application.bundleIdentifier,
+                appIcon: "app.badge", appIconURL: nil,
+                title: banner.title, body: banner.body, senderName: nil,
+                previewText: banner.body.isEmpty ? nil : banner.body,
+                avatarURL: nil, timestamp: Date(), tapAction: nil
+            ))
+        }
     }
 
     @objc private func handleDistributedNotification(_ notification: Notification) {
@@ -1098,7 +1136,15 @@ final class NotificationManager: ObservableObject {
                     : nil
             }
 
-            guard !self.shouldSuppressIncomingNotification(normalized) else {
+            guard AppState.shared.notificationsEnabled, self.isNotificationAllowed(normalized),
+                  !self.shouldSuppressIncomingNotification(normalized) else {
+                return
+            }
+
+            if normalized.sourceID.hasPrefix("macOS:"),
+               let index = self.recentNotifications.firstIndex(where: { $0.sourceID == normalized.sourceID }) {
+                self.recentNotifications[index] = normalized
+                if self.latestNotification?.sourceID == normalized.sourceID { self.latestNotification = normalized }
                 return
             }
 
@@ -1119,14 +1165,17 @@ final class NotificationManager: ObservableObject {
             if self.recentNotifications.count > self.maxRetainedNotifications {
                 self.recentNotifications.removeLast(self.recentNotifications.count - self.maxRetainedNotifications)
             }
-            AppState.shared.showHUD(
-                module: .notifications,
-                autoDismissDelay: Constants.notificationDisplayDuration
-            )
+            let eventID = mergedNotification.sourceID
+            AppState.shared.presentIncomingNotification(eventID) { [weak self] in
+                guard let self, let event = self.recentNotifications.first(where: { $0.sourceID == eventID }) else { return false }
+                return AppState.shared.notificationsEnabled && self.isNotificationAllowed(event)
+            }
         }
     }
 
     func applyFeedPreferences() {
+        applyMacNotificationSource()
+        AppState.shared.cancelPendingNotificationPresentation()
         recentNotifications = recentNotifications
             .map { normalizedNotification($0) }
             .filter { isNotificationAllowed($0) }
@@ -1171,6 +1220,7 @@ final class NotificationManager: ObservableObject {
     }
 
     func clearNotification(_ id: String) {
+        AppState.shared.cancelPendingNotificationPresentation(id)
         if let dismissedNotification = recentNotifications.first(where: { $0.id == id })
             ?? (latestNotification?.id == id ? latestNotification : nil) {
             rememberDismissedNotification(dismissedNotification)
@@ -1183,6 +1233,7 @@ final class NotificationManager: ObservableObject {
     }
 
     func clearAll() {
+        AppState.shared.cancelPendingNotificationPresentation()
         var seenSourceIDs: Set<String> = []
         let notificationsToDismiss = (recentNotifications + [latestNotification].compactMap { $0 }).filter { notification in
             seenSourceIDs.insert(notification.sourceID).inserted
@@ -1193,6 +1244,17 @@ final class NotificationManager: ObservableObject {
     }
 
     func activateNotification(_ notification: IslandNotification) {
+        if notification.sourceID.hasPrefix("macOS:"), let id = notification.bundleIdentifier,
+           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
+            NSWorkspace.shared.openApplication(at: url, configuration: .init()) { _, error in
+                if error != nil {
+                    Task { @MainActor in
+                        MacNotificationBridge.shared.reportOpeningFailure()
+                    }
+                }
+            }
+            return
+        }
         guard let tapAction = notification.tapAction else {
             return
         }
@@ -1215,6 +1277,7 @@ final class NotificationManager: ObservableObject {
     }
 
     private func feedSource(for notification: IslandNotification) -> NotificationFeedSource {
+        if notification.sourceID.hasPrefix("macOS:") { return .macOS }
         if isWhatsAppNotification(notification) {
             return .whatsApp
         }
@@ -1227,22 +1290,8 @@ final class NotificationManager: ObservableObject {
     }
 
     func displayNotification(_ notification: IslandNotification) -> IslandNotification {
-        guard !AppState.shared.notificationPreviewsEnabled else { return notification }
-
-        return IslandNotification(
-            sourceID: notification.sourceID,
-            appName: notification.appName,
-            bundleIdentifier: notification.bundleIdentifier,
-            appIcon: notification.appIcon,
-            appIconURL: notification.appIconURL,
-            title: notification.appName,
-            body: "Preview hidden",
-            senderName: nil,
-            previewText: nil,
-            avatarURL: nil,
-            timestamp: notification.timestamp,
-            tapAction: notification.tapAction
-        )
+        NotificationPreviewPolicy.display(notification, globalPreviews: AppState.shared.notificationPreviewsEnabled,
+                                          macPreviews: AppState.shared.macNotificationPreviewsEnabled)
     }
 
     private func normalizedNotification(_ notification: IslandNotification) -> IslandNotification {
@@ -1424,10 +1473,11 @@ final class NotificationManager: ObservableObject {
         }
     }
 
-    private func notificationsMatch(_ existing: IslandNotification, _ incoming: IslandNotification) -> Bool {
+    func notificationsMatch(_ existing: IslandNotification, _ incoming: IslandNotification) -> Bool {
         if existing.sourceID == incoming.sourceID {
             return true
         }
+        if existing.sourceID.hasPrefix("macOS:") || incoming.sourceID.hasPrefix("macOS:") { return false }
 
         if existing.appName.localizedCaseInsensitiveCompare(incoming.appName) == .orderedSame &&
             existing.title == incoming.title &&
@@ -1462,6 +1512,7 @@ final class NotificationManager: ObservableObject {
         if dismissedNotifications.contains(where: { $0.sourceID == notification.sourceID }) {
             return true
         }
+        if notification.sourceID.hasPrefix("macOS:") { return false }
 
         if dismissedNotifications.contains(where: { dismissed in
             notificationsAreSemanticallyEquivalent(notification, dismissed: dismissed)
