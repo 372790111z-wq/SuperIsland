@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SuperIsland · 系统提示与 Mac 通知需求稿</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#26292b;background:#f4f5f6;font-synthesis:none;--line:#e3e5e7;--muted:#6c747b;--green:#246c55}
+*{box-sizing:border-box}body{margin:0}button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #6b9cd1;outline-offset:3px}button:disabled{cursor:default;opacity:.5}header{max-width:1392px;margin:auto;padding:35px 36px 22px;display:flex;gap:20px;justify-content:space-between;align-items:center}h1{font-size:26px;letter-spacing:-.7px;margin:9px 0}h2{font-size:15px;margin:0 0 16px}p{line-height:1.7;margin:8px 0;font-size:13px}.eyebrow{font-size:11px;letter-spacing:1.5px;color:var(--muted)}.sub{color:var(--muted)}.draft{border:1px solid #d9dee1;border-radius:8px;padding:10px 13px;font-size:12px;white-space:nowrap}.layout{max-width:1392px;margin:0 auto;padding:0 36px 36px;display:grid;grid-template-columns:minmax(0,1fr) 335px;gap:22px}.surface{background:#fff;border:1px solid var(--line);border-radius:14px;padding:20px}.surface+.surface{margin-top:14px}.toolbar{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:14px}.segmented{display:flex;padding:3px;border-radius:8px;background:#edf0f1;gap:3px}.segmented button{border:0;background:none;font-size:12px;padding:7px 12px;border-radius:6px;color:#667077}.segmented button[aria-pressed=true]{background:#fff;box-shadow:0 1px 3px #17212a15;color:#23282c}.status{font-size:11px;color:var(--muted);white-space:nowrap}.desktop{position:relative;height:445px;background:#c6d1d6;overflow:hidden;border-radius:11px;border:1px solid #b5c0c6}.desktop:before{content:"";position:absolute;width:140%;height:72%;left:-20%;top:48%;border-radius:50%;background:#b2c1c9;transform:rotate(-10deg)}.desktop:after{content:"";position:absolute;width:130%;height:60%;left:10%;top:70%;border-radius:50%;background:#a1b5bf;transform:rotate(14deg)}.menubar{height:26px;position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:0 16px;background:#e4eaed95;font-size:10px;color:#3b4850}.menu-left{display:flex;gap:14px}.menu-right{display:flex;gap:12px}.island{position:absolute;left:50%;top:26px;transform:translateX(-50%);z-index:4;width:220px;height:36px;background:#050505;color:#fff;border-radius:0 0 18px 18px;box-shadow:0 5px 16px #0002;overflow:hidden;transition:width .28s ease,height .28s ease,border-radius .28s ease;display:flex;align-items:center;justify-content:center;padding:0 12px;border:0;text-align:left}.island.expanded{width:min(408px,calc(100% - 26px));height:88px;border-radius:0 0 22px 22px;padding:18px}.island.history{width:min(520px,calc(100% - 26px));height:230px;border-radius:0 0 24px 24px;padding:20px;align-items:stretch}.hud{display:flex;align-items:center;gap:9px;width:100%}.hud svg{width:16px;height:16px;flex:none}.track{height:4px;flex:1;background:#ffffff35;border-radius:3px;overflow:hidden}.fill{background:#fff;height:100%;transition:width .12s ease}.percentage{font-variant-numeric:tabular-nums;font-size:10px;color:#ffffffc0;min-width:30px;text-align:right}.idle{display:flex;align-items:center;gap:10px;width:100%;font-size:11px}.idle .battery{margin-left:auto;color:#a7c1af}.tiny-waves{display:flex;align-items:center;gap:2px;height:15px}.tiny-waves i{display:block;width:2px;background:#fff;border-radius:1px;height:5px}.tiny-waves i:nth-child(2){height:12px}.tiny-waves i:nth-child(3){height:8px}.notif{width:100%;display:flex;gap:10px;align-items:flex-start}.app-icon{display:flex;align-items:center;justify-content:center;width:25px;height:25px;border-radius:7px;background:#426a98;color:#fff;font-size:13px;flex:none}.notification-text{flex:1;min-width:0}.appname{font-size:9px;color:#ffffff80;margin-bottom:3px}.headline{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.body-text{font-size:10px;color:#ffffffb0;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.time{font-size:9px;color:#ffffff70;white-space:nowrap}.native{display:none;position:absolute;z-index:3;top:107px;right:16px;width:235px;border:1px solid #fff8;background:#eff3f6eb;border-radius:12px;padding:12px;box-shadow:0 4px 12px #0001;color:#273a46;gap:9px}.native .appname{color:#6c747b}.native .body-text{color:#586872}.native.visible{display:flex}.work-window{position:absolute;left:10%;right:13%;top:175px;height:172px;background:#f8fafbef;border:1px solid #ffffff80;border-radius:10px;z-index:1;box-shadow:0 15px 25px #35485515}.window-top{display:flex;align-items:center;padding:11px 13px;border-bottom:1px solid #e0e6ea;gap:5px}.dot{height:7px;width:7px;border-radius:50%;background:#d1d8dc}.window-top span{margin:auto;font-size:10px;color:#7a868d}.doc-lines{padding:23px 25px}.doc-line{height:5px;background:#d7e0e5;border-radius:3px;margin:10px 0;width:90%}.doc-line:first-child{width:45%;height:9px;background:#a8bbc6;margin-bottom:19px}.doc-line:last-child{width:68%}.stage-label{position:absolute;z-index:2;bottom:18px;left:0;right:0;text-align:center;color:#526874;font-size:11px}.caption{display:flex;justify-content:space-between;gap:14px;margin-top:13px;min-height:34px;font-size:12px;color:#657078;line-height:1.6}.badge{display:inline-block;padding:3px 7px;border-radius:5px;font-size:10px;margin-right:5px;background:#edf5f0;color:#35684f}.badge.proposal{background:#fff3df;color:#846227}.badge.unknown{background:#eef0f3;color:#647183}.split{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:16px}.rule{padding:15px;border:1px solid var(--line);border-radius:10px}.rule strong{font-size:13px}.rule p{font-size:12px;color:var(--muted);margin-bottom:0}.row{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:15px 0}.row label{font-size:12px}.value{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}input[type=range]{width:100%;accent-color:#3c6e5b;height:18px;cursor:pointer}input[type=checkbox]{accent-color:var(--green);width:15px;height:15px;cursor:pointer}.buttons{display:flex;gap:8px;margin-top:10px}.btn{border:1px solid #d9dfe2;background:#fff;border-radius:7px;padding:8px 12px;font-size:12px;color:#39474f}.btn.primary{background:#2c5d4b;border-color:#2c5d4b;color:#fff}.btn.square{flex:1}.hr{height:1px;background:var(--line);margin:18px 0}select{border:1px solid #d9dfe2;border-radius:7px;background:#fff;padding:8px;font-size:12px;color:#3b4851;max-width:100%;width:100%}.toggle-row{display:flex;align-items:center;justify-content:space-between;font-size:12px;gap:10px;margin:12px 0}.callout{background:#f2f5f6;padding:11px;border-radius:8px;margin-top:12px;font-size:11px;line-height:1.7;color:#626f76}.note{font-size:11px;line-height:1.65;color:var(--muted)}.activity{margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:#fafcfc;min-height:62px;font-size:12px;line-height:1.7;color:#54656e}.activity strong{font-size:11px;color:#263b43;display:block;margin-bottom:3px}.history-content{width:100%;display:flex;flex-direction:column;gap:10px}.history-head{display:flex;align-items:center;justify-content:space-between;font-size:12px}.history-head button{border:0;background:none;color:#aab4bc;font-size:10px;padding:3px}.history-rows{overflow:auto;display:flex;flex-direction:column;gap:7px;flex:1}.history-row{border:1px solid #ffffff14;background:#ffffff07;border-radius:8px;padding:9px;display:flex;align-items:center;gap:8px}.history-row .notification-text{cursor:pointer}.dismiss{background:none;border:0;color:#929ca3;padding:5px;flex:none}.empty{color:#ffffff70;text-align:center;margin:auto;font-size:12px}.history-footer{font-size:9px;color:#ffffff70}.foot{font-size:11px;line-height:1.7;color:var(--muted);margin-top:16px}.foot a{color:#506a7a}.panels [hidden]{display:none}.mock-label{font-size:10px;color:#819098}.setting-group .toggle-row{margin:0;padding:12px 0;border-bottom:1px solid #edf0f1}.setting-group .toggle-row:last-child{border:0}.legend{display:flex;flex-wrap:wrap;gap:7px;margin-top:13px}.legend span{font-size:10px}.section-note{margin-top:17px;font-size:12px;line-height:1.8;color:#68747c}.section-note b{color:#3c4951}
+@media(max-width:1050px){.layout{grid-template-columns:minmax(0,1fr) 300px;padding:0 22px 24px}header{padding:26px 22px 18px}.menu-left .extra{display:none}}
+@media(max-width:760px){header{align-items:flex-start;flex-direction:column;gap:10px}h1{font-size:23px}.layout{grid-template-columns:1fr;padding:0 14px 22px}.surface{padding:15px}.desktop{height:390px}.split{grid-template-columns:1fr}.toolbar{flex-wrap:wrap}.native{width:206px;right:10px;top:111px}.work-window{left:8%;right:8%;top:190px;height:135px}.doc-lines{padding:12px 20px}.draft{padding:6px 10px}.caption{flex-direction:column;gap:3px}.menu-right .extra{display:none}.stage-label{font-size:10px}.island.history{height:210px}.status{white-space:normal}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<header><div><div class="eyebrow">SUPERISLAND / REQUIREMENT PREVIEW</div><h1>系统提示与 Mac 通知</h1><p class="sub">调节时看见变化，消息到达时及时知道。</p></div><div class="draft">交互需求稿 · v0.1 · 尚未实现</div></header>
+<main class="layout">
+<section>
+ <div class="surface">
+  <div class="toolbar"><div class="segmented" role="group" aria-label="演示类型"><button id="tab-hud" aria-pressed="true">音量 / 亮度</button><button id="tab-notification" aria-pressed="false">Mac 通知</button></div><span class="status" id="view-status">收起状态 · 220 × 36</span></div>
+  <div class="desktop" id="desktop">
+   <div class="menubar"><div class="menu-left"><b>●</b><b>访达</b><span>文件</span><span class="extra">编辑</span><span class="extra">显示</span></div><div class="menu-right"><span>⌁</span><span>▰</span><span class="extra">周三 14:30</span></div></div>
+   <div class="island" id="island" tabindex="0" role="button" aria-label="打开通知列表"></div>
+   <div class="native" id="native-banner"><span class="app-icon">讯</span><div class="notification-text"><div class="appname">协作 App · 现在</div><div class="headline">演示联系人</div><div class="body-text" id="native-body">新的消息</div></div></div>
+   <div class="work-window" aria-hidden="true"><div class="window-top"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>日常工作</span></div><div class="doc-lines"><div class="doc-line"></div><div class="doc-line"></div><div class="doc-line"></div><div class="doc-line"></div></div></div>
+   <div class="stage-label">模拟 Mac 桌面 · 不连接系统、不读取真实通知</div>
+  </div>
+  <div class="caption"><span id="caption">调节右侧数值，观察灵动岛内的短暂提示。</span><span id="timer-status">提示结束后恢复原内容</span></div>
+  <div class="activity" role="status" aria-live="polite"><strong>当前反馈</strong><span id="activity-text">准备就绪。所有数值和消息都是演示数据。</span></div>
+  <div class="buttons"><button class="btn" id="restore">立即恢复</button><button class="btn" id="open-history">查看通知列表</button><button class="btn" id="reset">重置演示</button></div>
+ </div>
+ <div class="split">
+  <div class="rule"><span class="badge">已确认</span><strong>音量与亮度</strong><p>调节时在岛内显示图标、进度条和百分比，随后恢复原内容。亮度首版覆盖 Mac 内置屏幕。</p></div>
+  <div class="rule"><span class="badge">目标已确认</span><strong>联通 Mac 通知</strong><p>把 macOS 收到的通知呈现在岛内。这里演示横幅同步；通用来源的实际接入仍待验证。</p></div>
+ </div>
+ <div class="surface" style="margin-top:16px">
+  <h2>这一稿需要确认的边界</h2>
+  <div class="section-note"><span class="badge proposal">沿用 / 建议</span><b>提示时长与并发：</b>音量、亮度沿用 1.5 秒，连续调节重新计时；通知沿用 2 秒。建议调节提示优先，期间收到的消息先进入列表，调节结束再展示。</div>
+  <div class="section-note"><span class="badge proposal">建议</span><b>通知展示：</b>保留系统原生横幅，岛内先显示 App、发送者或标题；正文预览可单独开启，系统隐藏正文时不补取。点击岛内消息打开来源 App 的动作尚未验证。</div>
+  <div class="section-note"><span class="badge unknown">待实测</span><b>接入覆盖：</b>辅助功能可能读取系统可见横幅，不能据此承诺所有 App、勿扰期间的静默消息、锁屏通知或历史补录。仅有通知权限不足以读取其他 App 的通知。</div>
+  <div class="legend"><span class="badge">已确认 = 用户明确决定</span><span class="badge proposal">建议 = 交互待确认</span><span class="badge unknown">待实测 = 技术能力未知</span></div>
+  <div class="foot">依据：当前源码 main / 1806409 与现有组件。Apple 的 <a href="https://developer.apple.com/documentation/usernotifications/unusernotificationcenter/getdeliverednotifications(completionhandler:)" target="_blank" rel="noreferrer">通知读取接口</a>只返回本应用已送达的通知。此稿只演示产品行为，不能证明系统接入成功。</div>
+ </div>
+</section>
+<aside>
+ <div class="surface panels">
+  <div id="hud-panel">
+   <h2>调节提示 <span class="mock-label">/ 模拟</span></h2>
+   <div class="row"><label for="volume">系统音量</label><output class="value" id="volume-value">25%</output></div>
+   <input id="volume" type="range" min="0" max="100" value="25" step="1" aria-label="模拟系统音量">
+   <div class="buttons"><button class="btn square" id="volume-down" aria-label="调低音量">−</button><button class="btn square" id="mute">静音</button><button class="btn square" id="volume-up" aria-label="调高音量">＋</button></div>
+   <div class="hr"></div>
+   <div class="row"><label for="brightness">屏幕亮度</label><output class="value" id="brightness-value">60%</output></div>
+   <input id="brightness" type="range" min="0" max="100" value="60" step="1" aria-label="模拟内置屏幕亮度">
+   <div class="buttons"><button class="btn square" id="brightness-down" aria-label="调低亮度">−</button><button class="btn square" id="brightness-up" aria-label="调高亮度">＋</button></div>
+   <div class="row"><label for="display-type">硬件场景</label></div><select id="display-type"><option value="built-in">Mac 内置屏幕</option><option value="external">仅外接显示器 / 暂不支持</option><option value="failed">读取亮度失败</option></select>
+   <div class="callout">沿用当前收起尺寸，不因调节而放大岛。连续点击、拖动滑杆和上下限都可演示。</div>
+  </div>
+  <div id="notification-panel" hidden>
+   <h2>Mac 通知 <span class="mock-label">/ 模拟</span></h2>
+   <label for="notification-state" class="note">接入场景</label><select id="notification-state" style="margin-top:7px"><option value="visible">辅助功能已允许 · 系统可见横幅</option><option value="permission">辅助功能未允许</option><option value="unreadable">系统隐藏正文</option><option value="silent">勿扰 / 没有可见横幅</option><option value="failure">系统横幅不可读取</option><option value="locked">锁屏 · 暂停岛内展示</option></select>
+   <label class="toggle-row" for="preview"><span>显示正文预览 <span class="mock-label">/ 建议默认关闭</span></span><input type="checkbox" id="preview"></label>
+   <div class="buttons"><button class="btn primary" id="send-notification">模拟新通知</button><button class="btn" id="duplicate-notification">重复同一条</button></div>
+   <div class="buttons"><button class="btn" id="simultaneous">调节时收到通知</button></div>
+   <div class="callout" id="notification-explanation">模拟从系统可见横幅同步通知。接入实际 macOS 的能力尚未验证，以下按钮不会发送真实消息。</div>
+   <div class="row"><span class="note">岛内演示列表</span><span class="value" id="notification-count">0 条</span></div>
+  </div>
+ </div>
+ <div class="surface">
+  <h2>模块设置 <span class="mock-label">/ 仅影响此稿</span></h2>
+  <div class="setting-group"><label class="toggle-row" for="volume-enabled"><span>音量提示</span><input id="volume-enabled" type="checkbox" checked></label><label class="toggle-row" for="brightness-enabled"><span>亮度提示</span><input id="brightness-enabled" type="checkbox" checked></label><label class="toggle-row" for="notifications-enabled"><span>Mac 通知同步</span><input id="notifications-enabled" type="checkbox" checked></label></div>
+  <p class="note">以上开关不会修改本机设置，也不会申请权限。进入正式实现后，新增通知来源应通过现有模块设置管理。</p>
+ </div>
+ <p class="note">查看方式：先拖动音量和亮度，再切到 Mac 通知尝试不同场景。通知列表中的关闭操作只影响演示数据。</p>
+</aside>
+</main>
+<script>
+(()=>{
+ const $=id=>document.getElementById(id);
+ const speaker='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 8c3 2 3 6 0 8m3-11c5 4 5 10 0 14"/></svg>';
+ const muted='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 9h4l5-4v14l-5-4H4zM17 9l5 6m0-6l-5 6"/></svg>';
+ const sun='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 1v3m0 16v3M1 12h3m16 0h3M4 4l2 2m12 12l2 2M4 20l2-2M18 6l2-2"/></svg>';
+ let state={volume:25,brightness:60,muted:false,mode:'idle',items:[],queued:null,sequence:0,timer:null,nativeTimer:null,last:null};
+ const report=text=>{$('activity-text').textContent=text;};
+ const escape=text=>String(text).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ function cancelTimer(){clearTimeout(state.timer);state.timer=null;}
+ function updateCount(){$('notification-count').textContent=state.items.length+' 条';}
+ function content(item){return item.hidden?'内容已由系统隐藏':$('preview').checked?item.body:'有一条新消息';}
+ function render(){
+  const el=$('island');el.classList.toggle('expanded',state.mode==='notification');el.classList.toggle('history',state.mode==='history');
+  if(state.mode==='volume'||state.mode==='brightness'){
+   const volume=state.mode==='volume',value=volume?(state.muted?0:state.volume):state.brightness;
+   el.innerHTML='<div class="hud">'+(volume?(state.muted||value===0?muted:speaker):sun)+'<div class="track"><div class="fill" style="width:'+value+'%"></div></div><span class="percentage">'+value+'%</span></div>';
+   el.setAttribute('aria-label',(volume?'音量':'亮度')+(volume&&state.muted?'已静音':value+'%'));
+  }else if(state.mode==='notification'&&state.last){
+   const n=state.last;el.innerHTML='<div class="notif"><span class="app-icon">讯</span><div class="notification-text"><div class="appname">协作 App</div><div class="headline">'+escape(n.title)+'</div><div class="body-text">'+escape(content(n))+'</div></div><span class="time">现在</span></div>';el.setAttribute('aria-label','查看通知列表');
+  }else if(state.mode==='history'){
+   el.innerHTML='<div class="history-content"><div class="history-head"><span>通知 · '+state.items.length+'</span><button id="close-history">收起</button></div><div class="history-rows">'+(state.items.length?state.items.map(n=>'<div class="history-row"><span class="app-icon">讯</span><div class="notification-text" tabindex="0" role="button" data-open="'+n.id+'" aria-label="模拟打开来源 App"><div class="appname">协作 App</div><div class="headline">'+escape(n.title)+'</div><div class="body-text">'+escape(content(n))+'</div></div><button class="dismiss" data-dismiss="'+n.id+'" aria-label="从演示列表移除此通知">×</button></div>').join(''):'<div class="empty">没有通知</div>')+'</div><div class="history-footer">演示数据 · 清除仅影响岛内列表 <button class="dismiss" id="clear-history">全部清除</button></div></div>';el.setAttribute('aria-label','通知列表');
+  }else{el.innerHTML='<div class="idle"><span class="tiny-waves"><i></i><i></i><i></i><i></i></span><span>正在播放</span><span class="battery">▰ 82%</span></div>';el.setAttribute('aria-label','打开通知列表');}
+  $('view-status').textContent=state.mode==='history'?'通知列表 · 点击收起':state.mode==='notification'?'通知横幅 · 约 2 秒':'收起状态 · 220 × 36';
+  $('volume').value=state.volume;$('volume-value').textContent=state.muted?'静音':state.volume+'%';$('mute').textContent=state.muted?'取消静音':'静音';$('brightness').value=state.brightness;$('brightness-value').textContent=$('display-type').value==='built-in'?state.brightness+'%':'不可用';updateCount();
+ }
+ function restore(){cancelTimer();state.mode='idle';render();$('caption').textContent='已恢复调节前的内容。';$('timer-status').textContent='提示结束后恢复原内容';}
+ function schedule(delay){cancelTimer();state.timer=setTimeout(()=>{state.timer=null;if(state.queued){const n=state.queued;state.queued=null;showNotification(n);}else{restore();report('提示结束，已恢复原内容。演示通知仍可在列表中查看。');}},delay);}
+ function hud(kind){
+  if(!$(kind+'-enabled').checked){report((kind==='volume'?'音量':'亮度')+'提示已关闭。本次只更新演示数值，不显示岛内提示。');return;}
+  if(kind==='brightness'&&$('display-type').value!=='built-in'){report($('display-type').value==='external'?'仅外接显示器不在首版范围，不显示虚构亮度。':'读取内置屏幕亮度失败：保留原内容，不显示虚构数值。');return;}
+  if(state.mode==='notification'&&state.last)state.queued=state.last;
+  state.mode=kind;render();schedule(1500);$('caption').textContent=kind==='volume'?'音量反馈仅替换岛内内容。':'内置屏幕亮度反馈仅替换岛内内容。';$('timer-status').textContent='最后一次调节后 1.5 秒恢复（沿用 / 建议）';report((kind==='volume'?'音量':'亮度')+'已更新，连续调节会重新计时。');
+ }
+ function setVolume(value){state.volume=Math.max(0,Math.min(100,Math.round(value)));state.muted=false;render();hud('volume');}
+ function setBrightness(value){if($('display-type').value!=='built-in'){hud('brightness');return;}state.brightness=Math.max(0,Math.min(100,Math.round(value)));render();hud('brightness');}
+ function showNotification(n){state.mode='notification';state.last=n;render();schedule(2000);$('caption').textContent='系统通知同步到岛内；点击岛查看演示列表。';$('timer-status').textContent='通知约 2 秒后恢复（沿用 / 建议）';}
+ function showNative(n){$('native-body').textContent=n.hidden?'内容已由系统隐藏':n.body;$('native-banner').classList.add('visible');clearTimeout(state.nativeTimer);state.nativeTimer=setTimeout(()=>$('native-banner').classList.remove('visible'),3000);}
+ function notify(duplicate=false){
+  if(!$('notifications-enabled').checked){report('Mac 通知同步已关闭，不把通知加入岛内演示列表。');return;}
+  const scene=$('notification-state').value;
+  const failures={permission:'辅助功能未允许：暂未接通。正式版本需由用户在系统设置中允许后重新检测。',silent:'没有可见横幅：此候选接入无法确认静默通知，不生成岛内消息。',failure:'横幅读取失败：保持原内容，接入覆盖待实测。',locked:'锁屏场景：建议暂停岛内通知展示，不读取或补取隐藏正文。'};
+  if(failures[scene]){report(failures[scene]);return;}
+  if(duplicate&&!state.last){report('尚无通知可重复，请先模拟一条新通知。');return;}
+  const n=duplicate?state.last:{id:++state.sequence,title:'演示联系人 '+state.sequence,body:'演示消息：材料已准备好，请有空时查看。',hidden:scene==='unreadable'};
+  if(state.items.some(item=>item.id===n.id)){report('识别为同一条演示通知，列表数量保持 '+state.items.length+' 条，不重复弹出。');return;}
+  state.items.unshift(n);state.last=n;updateCount();showNative(n);
+  if(state.mode==='volume'||state.mode==='brightness'){state.queued=n;report('收到新通知，已加入演示列表；等待调节提示结束再展示（候选优先级）。');}
+  else if(state.mode==='history'){render();report('新通知已加入当前演示列表。');}
+  else{showNotification(n);report(n.hidden?'同步一条演示通知；系统隐藏的正文保持隐藏。':'同步一条演示通知；岛内正文由预览开关决定。');}
+ }
+ function history(){cancelTimer();state.queued=null;state.mode='history';render();$('caption').textContent='查看、移除演示通知，或模拟打开来源 App。';$('timer-status').textContent='打开列表期间不自动收起';}
+ function tab(value){const notifications=value==='notification';$('tab-hud').setAttribute('aria-pressed',String(!notifications));$('tab-notification').setAttribute('aria-pressed',String(notifications));$('hud-panel').hidden=notifications;$('notification-panel').hidden=!notifications;}
+ $('tab-hud').onclick=()=>tab('hud');$('tab-notification').onclick=()=>tab('notification');
+ $('volume').oninput=e=>setVolume(+e.target.value);$('volume-down').onclick=()=>setVolume(state.volume-6);$('volume-up').onclick=()=>setVolume(state.volume+6);$('mute').onclick=()=>{state.muted=!state.muted;render();hud('volume');};
+ $('brightness').oninput=e=>setBrightness(+e.target.value);$('brightness-down').onclick=()=>setBrightness(state.brightness-6);$('brightness-up').onclick=()=>setBrightness(state.brightness+6);
+ $('display-type').onchange=()=>{restore();const supported=$('display-type').value==='built-in';$('brightness').disabled=!supported;$('brightness-value').textContent=supported?state.brightness+'%':'不可用';report(supported?'当前演示支持 Mac 内置屏幕。':$('display-type').value==='external'?'首版不支持仅外接显示器；不显示虚构亮度。':'模拟读取亮度失败；不显示虚构亮度。');};
+ $('send-notification').onclick=()=>notify();$('duplicate-notification').onclick=()=>notify(true);$('simultaneous').onclick=()=>{if(!$('volume-enabled').checked||!$('notifications-enabled').checked){report('请先开启音量提示和 Mac 通知同步，再演示并发。');return;}setVolume(state.volume===100?94:state.volume+6);notify();};
+ $('preview').onchange=()=>{render();report($('preview').checked?'已开启演示正文预览；系统隐藏的正文仍保持隐藏。':'已隐藏岛内演示正文，仅显示 App 和发送者 / 标题。');};
+ $('notification-state').onchange=()=>{restore();state.queued=null;$('native-banner').classList.remove('visible');$('notification-explanation').textContent=$('notification-state').value==='visible'?'模拟系统可见横幅。实际接入尚未验证，不会读取真实通知。':'异常场景只演示产品反馈，不代表系统权限或通知状态真的改变。';};
+ ['volume','brightness','notifications'].forEach(kind=>$(kind+'-enabled').onchange=()=>{if((kind===state.mode||kind==='notifications'&&(state.mode==='notification'||state.mode==='history'))&&!$(kind+'-enabled').checked){restore();}if(kind==='notifications'&&!$('notifications-enabled').checked)state.queued=null;report('演示模块开关已更新，本机设置未改变。');});
+ $('restore').onclick=()=>{state.queued=null;restore();report('已手动恢复原内容。');};$('open-history').onclick=history;
+ $('island').onclick=e=>{if(state.mode==='volume'||state.mode==='brightness'){report('调节提示展示中；点按不会打开通知列表。');return;}if(e.target.id==='close-history'){state.queued=null;restore();return;}if(e.target.id==='clear-history'){state.items=[];state.last=null;state.queued=null;render();report('演示列表已清空；macOS 通知保持不变。');return;}const dismissed=e.target.closest('[data-dismiss]');if(dismissed){const id=+dismissed.dataset.dismiss;state.items=state.items.filter(n=>n.id!==id);if(state.last?.id===id)state.last=state.items[0]||null;if(state.queued?.id===id)state.queued=null;render();report('已从演示列表移除一条通知；系统通知保持不变。');return;}if(e.target.closest('[data-open]')){report('模拟打开来源 App。此按钮不会启动本机应用；定位具体会话的能力待验证。');return;}if(state.mode!=='history')history();};
+ $('island').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){if(e.target.closest('[data-open]')){e.preventDefault();report('模拟打开来源 App；没有启动本机应用。');return;}if(e.target===$('island')){e.preventDefault();$('island').click();}}if(e.key==='Escape'){state.queued=null;restore();}};
+ $('reset').onclick=()=>{cancelTimer();clearTimeout(state.nativeTimer);state={volume:25,brightness:60,muted:false,mode:'idle',items:[],queued:null,sequence:0,timer:null,nativeTimer:null,last:null};['volume','brightness','notifications'].forEach(kind=>$(kind+'-enabled').checked=true);$('preview').checked=false;$('display-type').value='built-in';$('brightness').disabled=false;$('notification-state').value='visible';$('notification-explanation').textContent='模拟从系统可见横幅同步通知。接入实际 macOS 的能力尚未验证，以下按钮不会发送真实消息。';$('native-banner').classList.remove('visible');tab('hud');restore();report('演示已重置，全部为模拟数据。');};
+ render();
+})();
+</script>
+</body>
+</html>

@@ -9,6 +9,9 @@ struct ModuleSettingsView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var calendarManager = CalendarManager.shared
     @ObservedObject private var notificationManager = NotificationManager.shared
+    @ObservedObject private var brightnessManager = ScreenBrightnessManager.shared
+    @ObservedObject private var mediaKeys = MediaKeyInterceptor.shared
+    @ObservedObject private var macNotificationBridge = MacNotificationBridge.shared
     @ObservedObject private var nowPlayingManager = NowPlayingManager.shared
     @ObservedObject private var shelf = ShelfStore.shared
     @ObservedObject private var teleprompter = TeleprompterManager.shared
@@ -33,7 +36,11 @@ struct ModuleSettingsView: View {
                     }
                 }
                 SettingRowDivider()
-                SettingToggleRow(title: "音量 HUD", isOn: $appState.volumeHUDEnabled)
+                SettingToggleRow(title: "音量 HUD", description: mediaKeys.statusText, isOn: $appState.volumeHUDEnabled)
+                    .dataAnnotationID("system-feedback-volume-toggle")
+                SettingRowDivider()
+                SettingToggleRow(title: "屏幕亮度提示", description: brightnessManager.statusText + " · " + mediaKeys.brightnessKeyStatusText, isOn: $appState.brightnessHUDEnabled)
+                    .dataAnnotationID("system-feedback-brightness-toggle")
             }
 
             SettingSectionLabel(title: "首页")
@@ -117,11 +124,24 @@ struct ModuleSettingsView: View {
                     notificationRetentionRow
                     ForEach(NotificationFeedSource.allCases) { source in
                         SettingRowDivider()
-                        SettingToggleRow(
-                            title: source.title,
-                            description: source.description,
-                            isOn: notificationSourceBinding(for: source)
-                        )
+                        if source == .macOS {
+                            SettingToggleRow(title: source.title, description: source.description, isOn: notificationSourceBinding(for: source))
+                                .dataAnnotationID("system-feedback-mac-notifications-toggle")
+                            if appState.isNotificationSourceEnabled(.macOS) {
+                                SettingRowDivider()
+                                macNotificationStatusRow
+                                SettingRowDivider()
+                                SettingToggleRow(
+                                    title: "Mac 通知显示正文",
+                                    description: appState.notificationPreviewsEnabled ? "仅显示系统已提供的正文；默认关闭。" : "请先开启上方“显示预览”；系统隐藏正文仍保持隐藏。",
+                                    isOn: macNotificationPreviewsBinding
+                                )
+                                .disabled(!appState.notificationPreviewsEnabled)
+                                .dataAnnotationID("system-feedback-notification-preview")
+                            }
+                        } else {
+                            SettingToggleRow(title: source.title, description: source.description, isOn: notificationSourceBinding(for: source))
+                        }
                     }
                 }
             }
@@ -172,14 +192,17 @@ struct ModuleSettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .dataAnnotationID("app-localization-settings-ui")
         .onAppear {
+            brightnessManager.refresh()
+            macNotificationBridge.refreshStatus()
             notificationManager.checkPermission()
             calendarManager.refreshAccessStatus()
             refreshTeleprompterPermissionState()
             autoRequestTeleprompterPermissionsIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            brightnessManager.refresh()
+            macNotificationBridge.refreshStatus()
             notificationManager.checkPermission()
             calendarManager.refreshAccessStatus()
             refreshTeleprompterPermissionState()
@@ -479,6 +502,32 @@ struct ModuleSettingsView: View {
         )
     }
 
+    private var macNotificationPreviewsBinding: Binding<Bool> {
+        Binding(get: { appState.macNotificationPreviewsEnabled }, set: {
+            appState.macNotificationPreviewsEnabled = $0
+            notificationManager.applyFeedPreferences()
+        })
+    }
+
+    private var macNotificationStatusRow: some View {
+        HStack(spacing: 12) {
+            Text(macNotificationBridge.statusText)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if macNotificationBridge.needsAccessibility {
+                Button("打开系统设置") { PermissionsManager.shared.openAccessibilitySettings() }
+                    .font(.system(size: 12))
+            } else {
+                Button("重新检测") { macNotificationBridge.refreshStatus() }
+                    .font(.system(size: 12))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .dataAnnotationID("system-feedback-mac-notifications-status")
+    }
+
     private var notificationMaxRetainedBinding: Binding<Double> {
         Binding(
             get: { appState.notificationMaxRetainedItems },
@@ -494,6 +543,7 @@ struct ModuleSettingsView: View {
             get: { appState.notificationsEnabled },
             set: { newValue in
                 appState.notificationsEnabled = newValue
+                notificationManager.applyMacNotificationSource()
                 guard newValue else {
                     NotificationManager.shared.clearAll()
                     return
