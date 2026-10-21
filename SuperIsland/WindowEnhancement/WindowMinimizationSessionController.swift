@@ -50,6 +50,7 @@ final class WindowMinimizationSessionController {
         var setMinimized: (AXUIElement, Bool) -> AXError
         var raiseWindow: (AXUIElement) -> Void
         var now: () -> Date
+        var observeMinimizationCompletion: (@escaping @MainActor () -> Void) -> (() -> Void)
     }
 
     private enum Phase {
@@ -83,9 +84,14 @@ final class WindowMinimizationSessionController {
 
     private let environment: Environment
     private var session: Session?
+    private var cancelMinimizationObservation: (() -> Void)?
 
     init(environment: Environment? = nil) {
         self.environment = environment ?? Self.liveEnvironment()
+    }
+
+    deinit {
+        cancelMinimizationObservation?()
     }
 
     var activeMode: Mode? { session?.mode }
@@ -98,6 +104,34 @@ final class WindowMinimizationSessionController {
 
     func resetWithoutRestoring() {
         session = nil
+        updateMinimizationObservation()
+    }
+
+    /// AX accepts minimization before animation/readback completes. Observe
+    /// the true state while it exists, so a later Dock restore is distinguishable
+    /// from the initial stale false readback. Never infer completion from time.
+    private func observePendingMinimizations() {
+        guard var current = session else { return }
+        for index in current.windows.indices {
+            guard current.windows[index].phase == .minimizeRequested,
+                  case let .found(window) = resolve(current.windows[index]),
+                  environment.minimized(window) == true else { continue }
+            current.windows[index].phase = .minimized
+        }
+        session = current
+        updateMinimizationObservation()
+    }
+
+    private func updateMinimizationObservation() {
+        guard session?.windows.contains(where: { $0.phase == .minimizeRequested }) == true else {
+            cancelMinimizationObservation?()
+            cancelMinimizationObservation = nil
+            return
+        }
+        guard cancelMinimizationObservation == nil else { return }
+        cancelMinimizationObservation = environment.observeMinimizationCompletion { [weak self] in
+            self?.observePendingMinimizations()
+        }
     }
 
     func toggle(
@@ -118,14 +152,15 @@ final class WindowMinimizationSessionController {
         )
     }
 
-    /// A previously accepted restore may finish after its immediate readback.
-    /// Retire only positively restored references here, so the next press can
-    /// start a new batch. Missing/terminated references go through restore()
-    /// instead, preventing a vanished old batch from adopting new windows.
+    /// Dock/preview restores and delayed accepted restores both finish a
+    /// window's ownership in this batch. Retire positively restored references
+    /// before choosing the next action. An unconfirmed minimize may still be
+    /// in flight, so it must receive a compensating restore instead. Missing
+    /// references still go through restore(), never adopting new windows.
     private func reconcileCompletedRestores() {
         guard var current = session else { return }
         current.windows.removeAll { reference in
-            guard reference.phase == .restoreRequested,
+            guard reference.phase != .minimizeRequested,
                   case let .found(window) = resolve(reference) else { return false }
             return environment.minimized(window) == false
         }
@@ -213,6 +248,7 @@ final class WindowMinimizationSessionController {
             originalFrontmostPID: originalFrontmostPID,
             windows: minimized
         )
+        updateMinimizationObservation()
         return .minimized(mode: mode, succeeded: confirmed, pending: pending, failed: failed)
     }
 
@@ -305,6 +341,7 @@ final class WindowMinimizationSessionController {
                 windows: retryable,
                 activationHandled: activationHandled
             )
+        updateMinimizationObservation()
         guard !session.windows.isEmpty else {
             return .nothingToRestore(mode: session.mode)
         }
@@ -354,7 +391,20 @@ final class WindowMinimizationSessionController {
                 )
             },
             raiseWindow: { AXUIElementPerformAction($0, kAXRaiseAction as CFString) },
-            now: Date.init
+            now: Date.init,
+            observeMinimizationCompletion: { observe in
+                let started = Date()
+                let timer = Timer(timeInterval: 0.05, repeats: true) { timer in
+                    MainActor.assumeIsolated { observe() }
+                    // Fast reads cover ordinary animations. An unresponsive
+                    // app stays owned without causing a permanent 20 Hz poll.
+                    if Date().timeIntervalSince(started) >= 2, timer.isValid {
+                        timer.fireDate = Date().addingTimeInterval(1)
+                    }
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                return { timer.invalidate() }
+            }
         )
     }
 
@@ -446,14 +496,10 @@ final class WindowMinimizationSessionController {
     }
 
     private static func windowNumber(of element: AXUIElement) -> Int? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            "AXWindowNumber" as CFString,
-            &value
-        ) == .success,
-        let number = value as? NSNumber else { return nil }
-        return number.intValue
+        // Codex and other apps can omit AXWindowNumber and AXIdentifier.
+        // Use the shared exact resolver so a refreshed AX proxy can still be
+        // matched to this window, with conflicting IDs rejected as elsewhere.
+        windowDirectWindowNumber(of: element).map(Int.init)
     }
 
     private static func stringAttribute(
