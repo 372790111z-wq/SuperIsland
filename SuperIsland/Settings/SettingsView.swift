@@ -11,7 +11,7 @@ extension Notification.Name {
 }
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, modules, appearance, extensions, windowEnhancement, advanced
+    case general, modules, appearance, extensions, windowEnhancement, screenshotLine, advanced
     var id: String { rawValue }
 
     var title: String {
@@ -21,6 +21,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .appearance: "外观"
         case .extensions: "扩展"
         case .windowEnhancement: "窗口增强"
+        case .screenshotLine: "截图挂绳"
         case .advanced:   "高级"
         }
     }
@@ -32,6 +33,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .appearance: "paintbrush"
         case .extensions: "puzzlepiece.extension"
         case .windowEnhancement: "rectangle.split.3x1.fill"
+        case .screenshotLine: "tshirt"
         case .advanced:   "wrench.and.screwdriver"
         }
     }
@@ -171,6 +173,7 @@ struct SettingsView: View {
         case .appearance: AppearanceSettingsView()
         case .extensions: ExtensionsSettingsView()
         case .windowEnhancement: WindowEnhancementSettingsView()
+        case .screenshotLine: ScreenshotLineSettingsView()
         case .advanced: AdvancedSettingsView()
         }
     }

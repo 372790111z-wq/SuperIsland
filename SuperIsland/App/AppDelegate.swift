@@ -78,6 +78,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Bundle.main.bundleIdentifier == "com.workview.SuperIsland.WE1Debug"
     }
 
+    private static var isScreenshotLineQAMode: Bool {
+        isWE1DebugBundle && ProcessInfo.processInfo.environment["SCREENSHOT_LINE_QA_MODE"] == "1"
+    }
+
     static var isRunningUnitTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
             NSClassFromString("XCTestCase") != nil
@@ -119,6 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !Self.isRunningUnitTests else { return }
+        if !Self.isWE1DebugBundle || Self.isScreenshotLineQAMode { ScreenshotLineFeature.shared.stop() }
         zilanSuppressionReceiver?.stop()
         WindowEnhancementController.shared.stop()
         if didInitializeNowPlayingManager {
@@ -222,8 +227,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             observeMenuBarSetting()
             observePowerState()
             initializeManagers()
+            if Self.isScreenshotLineQAMode {
+                ScreenshotLineFeature.shared.openSettings = { Self.showSettingsWindow(initialPane: .screenshotLine) }
+                ScreenshotLineFeature.shared.start(appName: "SuperIsland")
+            }
             DispatchQueue.main.async {
-                Self.showSettingsWindow(initialPane: .windowEnhancement)
+                Self.showSettingsWindow(initialPane: Self.isScreenshotLineQAMode ? .screenshotLine : .windowEnhancement)
             }
             return
         }
@@ -233,6 +242,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeMenuBarSetting()
         observePowerState()
         initializeManagers()
+        ScreenshotLineFeature.shared.openSettings = { Self.showSettingsWindow(initialPane: .screenshotLine) }
+        ScreenshotLineFeature.shared.start(appName: "SuperIsland")
     }
 
     private func startZilanSuppressionReceiver() {
