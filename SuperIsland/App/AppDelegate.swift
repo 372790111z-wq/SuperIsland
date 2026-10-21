@@ -123,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !Self.isRunningUnitTests else { return }
-        if !Self.isWE1DebugBundle || Self.isScreenshotLineQAMode { ScreenshotLineFeature.shared.stop() }
+        ScreenshotLineFeature.shared.stop()
         zilanSuppressionReceiver?.stop()
         WindowEnhancementController.shared.stop()
         if didInitializeNowPlayingManager {
@@ -227,10 +227,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             observeMenuBarSetting()
             observePowerState()
             initializeManagers()
-            if Self.isScreenshotLineQAMode {
-                ScreenshotLineFeature.shared.openSettings = { Self.showSettingsWindow(initialPane: .screenshotLine) }
-                ScreenshotLineFeature.shared.start(appName: "SuperIsland")
-            }
+            ScreenshotLineFeature.shared.openSettings = { Self.showSettingsWindow(initialPane: .screenshotLine) }
+            ScreenshotLineFeature.shared.start(appName: "SuperIsland")
             DispatchQueue.main.async {
                 Self.showSettingsWindow(initialPane: Self.isScreenshotLineQAMode ? .screenshotLine : .windowEnhancement)
             }
