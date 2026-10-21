@@ -6,6 +6,87 @@ import XCTest
 final class WindowMinimizationSessionControllerTests: XCTestCase {
     private typealias Controller = WindowMinimizationSessionController
 
+    func testDesktopFocusRestoresFrontmostBatchApplicationInsteadOfFinder() {
+        let fixture = Fixture()
+        fixture.frontmostPID = 303 // Finder owns the desktop, with no focused ordinary window.
+        fixture.addWindow(1, pid: 101)
+        fixture.addWindow(2, pid: 202)
+        fixture.addWindow(3, pid: 303) // A background Finder window is also in the batch.
+        let controller = fixture.controller()
+        for _ in 0..<3 {
+            assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 3)
+            assertRestored(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 3)
+        }
+        XCTAssertEqual(fixture.activated, [101, 101, 101])
+        XCTAssertEqual(fixture.raised, [3, 2, 1, 3, 2, 1, 3, 2, 1])
+    }
+
+    func testDesktopFallbackSkipsFailedRestoresAndInitiallyMinimizedWindows() {
+        let fixture = Fixture()
+        fixture.frontmostPID = 303
+        fixture.runningPIDs.insert(303)
+        fixture.addWindow(0, pid: 404, minimized: true)
+        fixture.addWindow(1, pid: 101)
+        fixture.addWindow(2, pid: 202)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 2)
+        fixture.onWrite = { window, value in
+            guard window.id != 1 else { return .cannotComplete }
+            window.minimized = value
+            return .success
+        }
+        assertRestored(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1, failed: 1)
+        XCTAssertEqual(fixture.activated, [202])
+        XCTAssertTrue(controller.hasActiveSession)
+        XCTAssertFalse(fixture.writes.contains(.init(0, false)))
+    }
+
+    func testDesktopFallbackActivatesAcceptedAsynchronousRestore() {
+        let fixture = Fixture()
+        fixture.frontmostPID = 303
+        fixture.runningPIDs.insert(303)
+        fixture.addWindow(1)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1)
+        fixture.onWrite = { _, _ in .success }
+        assertRestored(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 0, pending: 1)
+        XCTAssertEqual(fixture.activated, [101])
+    }
+
+    func testOrdinaryFocusedFinderWindowKeepsFinderActivation() {
+        let fixture = Fixture()
+        fixture.frontmostPID = 303
+        fixture.addWindow(1)
+        fixture.focused = fixture.addWindow(2, pid: 303).element
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 2)
+        assertRestored(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 2)
+        XCTAssertEqual(fixture.activated, [303])
+    }
+
+    func testOtherModeKeepsFocusedApplicationEvenWhenNotInBatch() {
+        let fixture = Fixture()
+        fixture.frontmostPID = 303
+        fixture.focused = fixture.addWindow(1, pid: 303).element
+        fixture.addWindow(2)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .others, excludingBundleIdentifiers: []), confirmed: 1, mode: .others)
+        assertRestored(controller.toggle(mode: .others, excludingBundleIdentifiers: []), confirmed: 1, mode: .others)
+        XCTAssertEqual(fixture.activated, [303])
+    }
+
+    func testOtherModeFailedRestoreDoesNotActivateFocusedApplication() {
+        let fixture = Fixture()
+        fixture.frontmostPID = 303
+        fixture.focused = fixture.addWindow(1, pid: 303).element
+        fixture.addWindow(2)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .others, excludingBundleIdentifiers: []), confirmed: 1, mode: .others)
+        fixture.onWrite = { _, _ in .cannotComplete }
+        assertRestored(controller.toggle(mode: .others, excludingBundleIdentifiers: []), confirmed: 0, failed: 1, mode: .others)
+        XCTAssertTrue(fixture.activated.isEmpty)
+    }
+
     func testAcceptedMinimizeWithStaleFalseReadbackStillRestoresTheOwnedWindow() {
         let fixture = Fixture()
         let window = fixture.addWindow(1)
@@ -396,6 +477,7 @@ final class WindowMinimizationSessionControllerTests: XCTestCase {
         var writes: [Write] = []
         var raised: [Int] = []
         var activated: [pid_t] = []
+        var frontmostPID: pid_t? = 101
         var focused: AXUIElement?
         var onWrite: ((Window, Bool) -> AXError)?
         var date = Date(timeIntervalSince1970: 100)
@@ -421,7 +503,7 @@ final class WindowMinimizationSessionControllerTests: XCTestCase {
                         .init(processIdentifier: $0, bundleIdentifier: "test.\($0)")
                     }
                 },
-                frontmostProcessIdentifier: { 101 },
+                frontmostProcessIdentifier: { self.frontmostPID },
                 isApplicationRunning: { self.runningPIDs.contains($0) },
                 activateApplication: { self.activated.append($0) },
                 windowOrder: { Dictionary(uniqueKeysWithValues: self.windows.enumerated().map { ($1.id, $0) }) },
