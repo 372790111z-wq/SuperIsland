@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import OSLog
 
 /// Owns one reversible hide/minimize batch.
 ///
@@ -50,6 +51,8 @@ final class WindowMinimizationSessionController {
         var setMinimized: (AXUIElement, Bool) -> AXError
         var raiseWindow: (AXUIElement) -> Void
         var now: () -> Date
+        var observeMinimizationCompletion: (@escaping @MainActor () -> Void) -> (() -> Void)
+        var diagnostic: (String) -> Void = { _ in }
     }
 
     private enum Phase {
@@ -83,9 +86,14 @@ final class WindowMinimizationSessionController {
 
     private let environment: Environment
     private var session: Session?
+    private var cancelMinimizationObservation: (() -> Void)?
 
     init(environment: Environment? = nil) {
         self.environment = environment ?? Self.liveEnvironment()
+    }
+
+    deinit {
+        cancelMinimizationObservation?()
     }
 
     var activeMode: Mode? { session?.mode }
@@ -98,12 +106,41 @@ final class WindowMinimizationSessionController {
 
     func resetWithoutRestoring() {
         session = nil
+        updateMinimizationObservation()
+    }
+
+    /// AX accepts minimization before animation/readback completes. Observe
+    /// the true state while it exists, so a later Dock restore is distinguishable
+    /// from the initial stale false readback. Never infer completion from time.
+    private func observePendingMinimizations() {
+        guard var current = session else { return }
+        for index in current.windows.indices {
+            guard current.windows[index].phase == .minimizeRequested,
+                  case let .found(window) = resolve(current.windows[index]),
+                  environment.minimized(window) == true else { continue }
+            current.windows[index].phase = .minimized
+        }
+        session = current
+        updateMinimizationObservation()
+    }
+
+    private func updateMinimizationObservation() {
+        guard session?.windows.contains(where: { $0.phase == .minimizeRequested }) == true else {
+            cancelMinimizationObservation?()
+            cancelMinimizationObservation = nil
+            return
+        }
+        guard cancelMinimizationObservation == nil else { return }
+        cancelMinimizationObservation = environment.observeMinimizationCompletion { [weak self] in
+            self?.observePendingMinimizations()
+        }
     }
 
     func toggle(
         mode: Mode,
         excludingBundleIdentifiers: Set<String>
     ) -> Outcome {
+        environment.diagnostic("toggle mode=\(mode) owned=\(session?.windows.count ?? 0)")
         reconcileCompletedRestores()
         if let session {
             // A hide batch is a single reversible transaction. Triggering
@@ -118,14 +155,15 @@ final class WindowMinimizationSessionController {
         )
     }
 
-    /// A previously accepted restore may finish after its immediate readback.
-    /// Retire only positively restored references here, so the next press can
-    /// start a new batch. Missing/terminated references go through restore()
-    /// instead, preventing a vanished old batch from adopting new windows.
+    /// Dock/preview restores and delayed accepted restores both finish a
+    /// window's ownership in this batch. Retire positively restored references
+    /// before choosing the next action. An unconfirmed minimize may still be
+    /// in flight, so it must receive a compensating restore instead. Missing
+    /// references still go through restore(), never adopting new windows.
     private func reconcileCompletedRestores() {
         guard var current = session else { return }
         current.windows.removeAll { reference in
-            guard reference.phase == .restoreRequested,
+            guard reference.phase != .minimizeRequested,
                   case let .found(window) = resolve(reference) else { return false }
             return environment.minimized(window) == false
         }
@@ -136,9 +174,10 @@ final class WindowMinimizationSessionController {
         mode: Mode,
         excludingBundleIdentifiers: Set<String>
     ) -> Outcome {
+        let currentFocus = environment.focusedWindow()
         let focusedWindow: AXUIElement?
         if mode.keepingFocusedWindow {
-            guard let focused = environment.focusedWindow() else {
+            guard let focused = currentFocus else {
                 return .missingFocusedWindow
             }
             focusedWindow = focused
@@ -147,7 +186,14 @@ final class WindowMinimizationSessionController {
         }
 
         let frontOrder = environment.windowOrder()
-        let originalFrontmostPID = environment.frontmostProcessIdentifier()
+        let frontmostPID = environment.frontmostProcessIdentifier()
+        // Desktop focus is not a window to return to. The frontmost Finder PID
+        // alone does not identify a focused ordinary window.
+        // Preserve a real focused app; otherwise restore focus to a batch member.
+        let hasOrdinaryFocus = currentFocus.map {
+            environment.isOrdinaryWindow($0) && environment.processIdentifier($0) == frontmostPID
+        } ?? false
+        let originalFrontmostPID = mode.keepingFocusedWindow || hasOrdinaryFocus ? frontmostPID : nil
         let applications = environment.applications().filter { application in
             guard application.processIdentifier != environment.ownProcessIdentifier else { return false }
             guard let bundleIdentifier = application.bundleIdentifier else { return true }
@@ -199,6 +245,7 @@ final class WindowMinimizationSessionController {
                 } else {
                     pending += 1
                 }
+                environment.diagnostic("minimize pid=\(reference.processIdentifier) id=\(reference.windowNumber ?? -1) phase=\(reference.phase)")
                 minimized.append(reference)
             }
         }
@@ -213,6 +260,7 @@ final class WindowMinimizationSessionController {
             originalFrontmostPID: originalFrontmostPID,
             windows: minimized
         )
+        updateMinimizationObservation()
         return .minimized(mode: mode, succeeded: confirmed, pending: pending, failed: failed)
     }
 
@@ -222,6 +270,7 @@ final class WindowMinimizationSessionController {
         var failed = 0
         var missing = 0
         var retryable: [WindowReference] = []
+        var activationCandidates: [pid_t] = []
 
         // Restore back-to-front, then raise in the same order. The final raise
         // therefore returns the original front-most member of this batch to
@@ -230,18 +279,22 @@ final class WindowMinimizationSessionController {
             $0.frontToBackOrder > $1.frontToBackOrder
         }
         for var reference in ordered {
+            let identity = "pid=\(reference.processIdentifier) id=\(reference.windowNumber ?? -1) phase=\(reference.phase)"
             let window: AXUIElement
             switch resolve(reference) {
             case let .found(resolved):
                 window = resolved
             case .applicationTerminated:
+                environment.diagnostic("restore terminated \(identity)")
                 missing += 1
                 continue
             case .temporarilyUnavailable:
+                environment.diagnostic("restore identityUnavailable \(identity)")
                 failed += 1
                 retryable.append(reference)
                 continue
             case .notFoundInSuccessfulSnapshot:
+                environment.diagnostic("restore identityNotFound \(identity)")
                 let now = environment.now()
                 reference.missingObservationCount += 1
                 if reference.firstMissingObservationAt == nil {
@@ -257,25 +310,36 @@ final class WindowMinimizationSessionController {
                 continue
             }
             guard let isMinimized = environment.minimized(window) else {
+                environment.diagnostic("restore minimizedUnknown \(identity)")
                 if reference.phase == .restoreRequested { pending += 1 } else { failed += 1 }
                 retryable.append(reference)
                 continue
             }
+            environment.diagnostic("restore resolved \(identity) minimized=\(isMinimized)")
             if !isMinimized, reference.phase != .minimizeRequested {
                 // The user or target App already restored this window. It no
                 // longer needs mutation, but it is still a successful final
                 // state for the batch.
+                activationCandidates.append(reference.processIdentifier)
                 restored += 1
                 continue
             }
             // Even a still-false minimizeRequested window needs a compensating
             // false write: its accepted true request may still be in flight.
-            guard environment.canMinimize(window),
-                  environment.setMinimized(window, false) == .success else {
+            guard environment.canMinimize(window) else {
+                environment.diagnostic("restore notSettable \(identity)")
                 failed += 1
                 retryable.append(reference)
                 continue
             }
+            let restoreError = environment.setMinimized(window, false)
+            guard restoreError == .success else {
+                environment.diagnostic("restore writeFailed \(identity) error=\(restoreError.rawValue)")
+                failed += 1
+                retryable.append(reference)
+                continue
+            }
+            activationCandidates.append(reference.processIdentifier)
             reference.phase = .restoreRequested
             guard environment.minimized(window) == false else {
                 pending += 1
@@ -287,10 +351,17 @@ final class WindowMinimizationSessionController {
         }
 
         var activationHandled = session.activationHandled
-        if !activationHandled, restored > 0 || pending > 0,
-           let originalFrontmostPID = session.originalFrontmostPID,
-           environment.isApplicationRunning(originalFrontmostPID) {
-            environment.activateApplication(originalFrontmostPID)
+        let preferredPID = session.originalFrontmostPID.flatMap { pid -> pid_t? in
+            guard environment.isApplicationRunning(pid),
+                  session.mode.keepingFocusedWindow || activationCandidates.contains(pid) else { return nil }
+            return pid
+        }
+        // Candidates follow back-to-front order and include only accepted or
+        // completed restores. Never activate an unrelated or failed window's app.
+        let activationPID = preferredPID ?? activationCandidates.last(where: environment.isApplicationRunning)
+        if !activationHandled, !activationCandidates.isEmpty, let activationPID {
+            environment.diagnostic("restore activate pid=\(activationPID)")
+            environment.activateApplication(activationPID)
             activationHandled = true
         }
 
@@ -305,9 +376,11 @@ final class WindowMinimizationSessionController {
                 windows: retryable,
                 activationHandled: activationHandled
             )
+        updateMinimizationObservation()
         guard !session.windows.isEmpty else {
             return .nothingToRestore(mode: session.mode)
         }
+        environment.diagnostic("restored succeeded=\(restored) pending=\(pending) failed=\(failed) missing=\(missing)")
         return .restored(
             mode: session.mode,
             succeeded: restored,
@@ -354,7 +427,26 @@ final class WindowMinimizationSessionController {
                 )
             },
             raiseWindow: { AXUIElementPerformAction($0, kAXRaiseAction as CFString) },
-            now: Date.init
+            now: Date.init,
+            observeMinimizationCompletion: { observe in
+                let started = Date()
+                let timer = Timer(timeInterval: 0.05, repeats: true) { timer in
+                    MainActor.assumeIsolated { observe() }
+                    // Fast reads cover ordinary animations. An unresponsive
+                    // app stays owned without causing a permanent 20 Hz poll.
+                    if Date().timeIntervalSince(started) >= 2, timer.isValid {
+                        timer.fireDate = Date().addingTimeInterval(1)
+                    }
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                return { timer.invalidate() }
+            },
+            diagnostic: { message in
+                // Only numeric identities, states and AX error codes; never
+                // window titles, document paths or keyboard input.
+                Logger(subsystem: "com.workview.SuperIsland", category: "WindowMinimization")
+                    .notice("\(message, privacy: .public)")
+            }
         )
     }
 
@@ -446,14 +538,10 @@ final class WindowMinimizationSessionController {
     }
 
     private static func windowNumber(of element: AXUIElement) -> Int? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            "AXWindowNumber" as CFString,
-            &value
-        ) == .success,
-        let number = value as? NSNumber else { return nil }
-        return number.intValue
+        // Codex and other apps can omit AXWindowNumber and AXIdentifier.
+        // Use the shared exact resolver so a refreshed AX proxy can still be
+        // matched to this window, with conflicting IDs rejected as elsewhere.
+        windowDirectWindowNumber(of: element).map(Int.init)
     }
 
     private static func stringAttribute(
