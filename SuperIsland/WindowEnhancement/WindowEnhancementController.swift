@@ -6,6 +6,27 @@ import CoreGraphics
 import Foundation
 import QuartzCore
 
+/// A Chrome crash report places the AppKit fullscreen-titlebar abort on the
+/// AX attribute setter path. Avoid that path while native validation is pending.
+/// Route Chrome through its window's full-screen button, including recovery.
+/// Never retry a failed/timed-out button dispatch through a second control path.
+enum WindowFullScreenRequest {
+    static func apply(
+        current: Bool?, desired: Bool, bundleIdentifier: String?,
+        attributeIsSettable: () -> Bool,
+        setAttribute: () -> Bool,
+        pressButton: () -> Bool
+    ) -> Bool {
+        guard let current else { return false }
+        guard current != desired else { return true }
+        let requiresNativeButton = bundleIdentifier == nil
+            || bundleIdentifier == "com.google.Chrome"
+            || bundleIdentifier?.hasPrefix("com.google.Chrome.") == true
+        if !requiresNativeButton, attributeIsSettable() { return setAttribute() }
+        return pressButton()
+    }
+}
+
 /// Full-screen AX flags can change before the native Space animation and frame
 /// restoration finish. This barrier is shared by all three display-move stages;
 /// no stage can advance from one successful AX readback alone.
@@ -1836,21 +1857,8 @@ final class WindowEnhancementController {
             return .failure("无法确认窗口全屏状态")
         }
 
-        if currentState != desiredState {
-            if isAttributeSettable("AXFullScreen", of: window) {
-                let value: CFBoolean = desiredState ? kCFBooleanTrue : kCFBooleanFalse
-                guard AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, value) == .success else {
-                    return .failure(desiredState ? "未能确认进入全屏" : "未能确认退出全屏")
-                }
-            } else {
-                guard let button = axElementAttribute("AXFullScreenButton", of: window),
-                      axBoolAttribute(kAXEnabledAttribute, of: button) != false,
-                      AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else {
-                    return .failure(desiredState
-                        ? "暂无法操作全屏"
-                        : "暂无法退出全屏")
-                }
-            }
+        guard requestFullScreenState(desiredState, on: window, currentState: currentState) else {
+            return .failure(desiredState ? "暂无法安全进入全屏" : "暂无法安全退出全屏")
         }
 
         let deadline = Date().addingTimeInterval(Self.fullScreenTransitionTimeout)
@@ -2057,9 +2065,9 @@ final class WindowEnhancementController {
 
         if axBoolAttribute("AXFullScreen", of: window) == true {
             // A timed-out exit request may still be queued by the target App.
-            // Reassert the desired final state through the settable attribute;
-            // button-only windows cannot safely cancel an unseen pending toggle,
-            // so recovery remains explicitly unverified for those windows.
+            // Do not issue another toggle while the window is still fullscreen.
+            // Require a quiet interval below and compensate only an observed
+            // late exit through the same application-specific request policy.
             guard reinforceFullScreenIntent(on: window) else { return .failed }
             if let sourceScreen = screen(withDisplayID: sourceDisplayID),
                let currentFrame = frame(of: window),
@@ -2279,13 +2287,30 @@ final class WindowEnhancementController {
         return usableAXFrame(for: screen)
     }
 
+    private func requestFullScreenState(_ desiredState: Bool, on window: AXUIElement, currentState: Bool?) -> Bool {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(window, &pid) == .success, pid > 0 else { return false }
+        return WindowFullScreenRequest.apply(
+            current: currentState, desired: desiredState,
+            bundleIdentifier: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+            attributeIsSettable: { self.isAttributeSettable("AXFullScreen", of: window) },
+            setAttribute: {
+                AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString,
+                    desiredState ? kCFBooleanTrue : kCFBooleanFalse) == .success
+            },
+            pressButton: {
+                guard let button = self.axElementAttribute("AXFullScreenButton", of: window),
+                      self.axBoolAttribute(kAXEnabledAttribute, of: button) != false else { return false }
+                return AXUIElementPerformAction(button, kAXPressAction as CFString) == .success
+            }
+        )
+    }
+
     private func reinforceFullScreenIntent(on window: AXUIElement) -> Bool {
-        guard isAttributeSettable("AXFullScreen", of: window) else { return false }
-        return AXUIElementSetAttributeValue(
-            window,
-            "AXFullScreen" as CFString,
-            kCFBooleanTrue
-        ) == .success
+        // A button is a toggle, not an idempotent setter. If still fullscreen,
+        // do nothing; stableFullScreenRestoreOutcome compensates a late exit
+        // only after observing it and continues to require stable geometry.
+        requestFullScreenState(true, on: window, currentState: axBoolAttribute("AXFullScreen", of: window))
     }
 
     private func stableFullScreenRestoreOutcome(
