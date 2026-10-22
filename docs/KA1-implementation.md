@@ -122,3 +122,14 @@ Qoder CN、WorkBuddy、ZCode 均已收到真实桌面任务的官方 hook 事件
 待验收：真实系统注册/授权与XPC、合盖任务连续性、保护/异常恢复、来源最终完成及自动释放、Mac mini；编译/协议和原型均不替代这些验收。不宣称27项已接通或合盖已可用。后续正式候选本机安装需具体授权，Chrome已验收安装版继续保留。
 
 打包校验补充：初次Release因继承测试覆盖率被packager拦截，已显式关闭覆盖率与调试动态库重建。随后真实包读回发现外层codesign --deep重写了helper的自定义标识；已改为先签嵌套代码、重签helper/事件工具固定标识、最后只重封外层App，并将这两项标识验证加入打包与ZIP解压回读。验证不通过的早期包保留在忽略的build目录，不用于安装。
+
+
+## 2026-10-22 合盖授权入口修正
+
+本机候选20261022170144经明确授权后点击“继续系统授权”，设置页显示“系统尚未启用辅助程序”，未进入登录项授权；系统服务没有运行，SleepDisabled仍为0。系统日志出现该daemon的record not found。源码检查发现authorize仅在notRegistered时调用register，notFound会被跳过；因此此前结果不能视为一次真实register失败，也不能由此断言是签名/公证拒绝。
+
+修正为只在用户显式授权入口，对notRegistered或notFound调用官方register；已有enabled不重复登记，requiresApproval打开登录项并保持关闭。注册返回后共用一次状态读取；错误仅显示NSError域/代码，未解决状态显示状态码，不输出description/userInfo中的私人路径。没有自动注销、修改系统信任或绕过批准。
+
+新增KeepAwakeLidAuthorizationTests覆盖7种授权路径，与既有7项helper恢复回归一起14项通过，0失败；独立日志为build/KA1AuthorizationTests.noindex/test.log。测试使用注入closure，不注册真实服务、不打开系统设置、不改电源。Chrome全屏修复源码没有改动。本修正尚待重新打包安装后验证真正的系统注册结果；物理合盖仍未验收。
+
+本机SDK说明daemon需公证；Apple官方本机开发示例同时使用Apple签发的开发证书。当前候选为本机自签，codesign通过只证明自身完整性及自有XPC身份，不证明平台接受它。应先取得真实register的domain/code，再区分包装、系统批准、开发签名或发布公证问题。

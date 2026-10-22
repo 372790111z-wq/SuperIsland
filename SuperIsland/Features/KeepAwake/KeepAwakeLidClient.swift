@@ -27,6 +27,8 @@ final class KeepAwakeLidClient: ObservableObject {
     private let signingRequirement: ([String]) -> String?
     private let remoteProxyFactory: RemoteProxyFactory?
     private let requestTimeout: TimeInterval
+    private let registerService: () throws -> Void
+    private let openSystemSettings: () -> Void
     private var service: SMAppService { .daemon(plistName: KeepAwakeHelperIdentity.plist) }
     var registered: Bool { serviceStatus() == .enabled || serviceStatus() == .requiresApproval }
     var requiresApproval: Bool { serviceStatus() == .requiresApproval }
@@ -34,11 +36,15 @@ final class KeepAwakeLidClient: ObservableObject {
 
     init(serviceStatus: @escaping () -> SMAppService.Status = { SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).status },
          signingRequirement: @escaping ([String]) -> String? = { KeepAwakeHelperIdentity.requirement(identifiers: $0) },
-         remoteProxyFactory: RemoteProxyFactory? = nil, requestTimeout: TimeInterval = 8) {
+         remoteProxyFactory: RemoteProxyFactory? = nil, requestTimeout: TimeInterval = 8,
+         registerService: @escaping () throws -> Void = { try SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).register() },
+         openSystemSettings: @escaping () -> Void = { SMAppService.openSystemSettingsLoginItems() }) {
         self.serviceStatus = serviceStatus
         self.signingRequirement = signingRequirement
         self.remoteProxyFactory = remoteProxyFactory
         self.requestTimeout = requestTimeout
+        self.registerService = registerService
+        self.openSystemSettings = openSystemSettings
     }
 
     func authorize() {
@@ -46,16 +52,32 @@ final class KeepAwakeLidClient: ObservableObject {
             message = "当前包未使用证书签名，不能授权合盖辅助程序。请使用经过签名验证的安装包。"; return
         }
         do {
-            if serviceStatus() == .notRegistered { try service.register() }
-            if serviceStatus() == .requiresApproval {
-                message = "请在系统登录项中允许 SuperIsland 辅助程序，再点击启用。"
-                SMAppService.openSystemSettingsLoginItems(); return
+            // An explicit authorization click must reach register() even when
+            // status cannot yet resolve a backing service record. Registration
+            // supplies the authoritative packaging/signature error, if any.
+            switch serviceStatus() {
+            case .notRegistered, .notFound: try registerService()
+            case .enabled, .requiresApproval: break
+            @unknown default:
+                enabled = false; message = "系统返回了未知辅助程序状态，未启用合盖运行。"; return
             }
-            guard serviceStatus() == .enabled else { message = "系统尚未启用辅助程序。"; return }
+            let status = serviceStatus()
+            if status == .requiresApproval {
+                enabled = false
+                message = "请在系统登录项中允许 SuperIsland 辅助程序，再点击启用。"
+                openSystemSettings(); return
+            }
+            guard status == .enabled else { enabled = false; message = "系统尚未启用辅助程序（状态 \(status.rawValue)）。"; return }
             enableIntent = true; intentGeneration &+= 1
             blocked = false; enabled = true
             message = "辅助程序已注册；等待保持请求，合盖效果需实机验收。"
-        } catch { enabled = false; message = "合盖授权失败：" + error.localizedDescription }
+        } catch {
+            enabled = false
+            let code = error as NSError
+            // Error descriptions/userInfo can contain paths or other caller
+            // data. Preserve only framework domain/code for diagnosis.
+            message = "合盖授权失败：\(code.domain)（代码 \(code.code)）。"
+        }
     }
     func disable() {
         enableIntent = false; intentGeneration &+= 1
