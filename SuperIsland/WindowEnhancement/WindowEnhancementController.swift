@@ -6,23 +6,24 @@ import CoreGraphics
 import Foundation
 import QuartzCore
 
-/// A Chrome crash report places the AppKit fullscreen-titlebar abort on the
-/// AX attribute setter path. Avoid that path while native validation is pending.
-/// Route Chrome through its window's full-screen button, including recovery.
-/// Never retry a failed/timed-out button dispatch through a second control path.
+/// Chrome can crash through both AXFullScreen writes and the macOS 27 green
+/// window-button menu. Route it through its own toggleFullScreen menu command,
+/// with exact focused-window validation, including recovery.
+/// Never retry a failed/timed-out dispatch through a second control path.
 enum WindowFullScreenRequest {
     static func apply(
         current: Bool?, desired: Bool, bundleIdentifier: String?,
         attributeIsSettable: () -> Bool,
         setAttribute: () -> Bool,
-        pressButton: () -> Bool
+        pressButton: () -> Bool,
+        pressApplicationMenu: () -> Bool = { false }
     ) -> Bool {
         guard let current else { return false }
         guard current != desired else { return true }
-        let requiresNativeButton = bundleIdentifier == nil
-            || bundleIdentifier == "com.google.Chrome"
+        let isChrome = bundleIdentifier == "com.google.Chrome"
             || bundleIdentifier?.hasPrefix("com.google.Chrome.") == true
-        if !requiresNativeButton, attributeIsSettable() { return setAttribute() }
+        if isChrome { return pressApplicationMenu() }
+        if bundleIdentifier != nil, attributeIsSettable() { return setAttribute() }
         return pressButton()
     }
 }
@@ -2302,8 +2303,41 @@ final class WindowEnhancementController {
                 guard let button = self.axElementAttribute("AXFullScreenButton", of: window),
                       self.axBoolAttribute(kAXEnabledAttribute, of: button) != false else { return false }
                 return AXUIElementPerformAction(button, kAXPressAction as CFString) == .success
-            }
+            },
+            pressApplicationMenu: { self.pressChromeFullScreenMenu(on: window, pid: pid) }
         )
+    }
+
+    private func pressChromeFullScreenMenu(on window: AXUIElement, pid: pid_t) -> Bool {
+        let application = AXUIElementCreateApplication(pid)
+        guard let number = Self.axWindowNumber(of: window) else { return false }
+        // App menus act on the focused window, unlike window-specific controls.
+        // Never activate an arbitrary window or dispatch after focus changed.
+        func stillTargetsWindow() -> Bool {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                  let focused = axElementAttribute(kAXFocusedWindowAttribute, of: application) else { return false }
+            return exactPID(of: focused) == pid && Self.axWindowNumber(of: focused) == number
+        }
+        guard stillTargetsWindow(), let menuBar = axElementAttribute(kAXMenuBarAttribute, of: application) else { return false }
+        func children(_ element: AXUIElement) -> [AXUIElement] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
+            return value as? [AXUIElement] ?? []
+        }
+        // Read only top-level menu items, without labels or nested History,
+        // bookmarks or extension submenus. Chrome exposes its native
+        // selector as AXIdentifier; both alternate entries perform the same action.
+        for topLevel in children(menuBar).prefix(16) {
+            for menu in children(topLevel).prefix(1) {
+                for item in children(menu).prefix(80) {
+                    guard axStringAttribute("AXIdentifier", of: item) == "toggleFullScreen:",
+                          axBoolAttribute(kAXEnabledAttribute, of: item) == true else { continue }
+                    guard stillTargetsWindow() else { return false }
+                    return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+                }
+            }
+        }
+        return false
     }
 
     private func reinforceFullScreenIntent(on window: AXUIElement) -> Bool {
@@ -2780,10 +2814,9 @@ final class WindowEnhancementController {
     }
 
     private static func axWindowNumber(of element: AXUIElement) -> Int? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, "AXWindowNumber" as CFString, &value) == .success,
-              let number = value as? NSNumber else { return nil }
-        return number.intValue
+        // Chrome omits the public number/identifier. Reuse the shared exact
+        // native resolver, including its conflict rejection, as Cmd+D already does.
+        windowDirectWindowNumber(of: element).map(Int.init)
     }
 
     private static func axStringValue(_ name: String, of element: AXUIElement) -> String? {
