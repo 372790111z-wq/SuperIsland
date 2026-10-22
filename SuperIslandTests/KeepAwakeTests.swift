@@ -414,7 +414,7 @@ final class KeepAwakeLeaseTests: XCTestCase {
 }
 
 final class KeepAwakeEventToolTests: XCTestCase {
-    func testCodexMetadataLifecycleDoesNotInventCompletionOrEndParent() throws {
+    func testCodexMetadataMappingAndToolRejectsUnattributedParent() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("KA1Codex-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         var mailbox = KeepAwakeMailbox(root: directory)
@@ -424,7 +424,7 @@ final class KeepAwakeEventToolTests: XCTestCase {
                 ("SessionStart", "", nil), ("UserPromptSubmit", "", .running),
                 ("PreToolUse", "Bash", .running), ("PermissionRequest", "Bash", .waiting),
                 ("PostToolUse", "Bash", .running), ("PreToolUse", "request_user_input", .waiting),
-                ("PreCompact", "", .running), ("PostCompact", "", .running),
+                ("PreCompact", "", .running), ("PostCompact", "", .idle),
                 ("SubagentStart", "", nil), ("SubagentStop", "", nil),
                 ("Stop", "", .idle), ("Interrupt", "", .idle), ("SessionEnd", "", .idle),
                 ("UnknownFutureEvent", "", nil)
@@ -437,6 +437,7 @@ final class KeepAwakeEventToolTests: XCTestCase {
                 let payload: [String: Any] = ["session_id": "private-parent", "hook_event_name": name,
                     "tool_name": tool, "prompt": "PRIVATE-PROMPT", "last_assistant_message": "PRIVATE-ANSWER",
                     "transcript_path": "/private/transcript", "stop_hook_active": true]
+                XCTAssertEqual(KeepAwakeHookContract.eventState(source: source, input: payload), expected?.rawValue, name)
                 try process.run()
                 try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject: payload))
                 try input.fileHandleForWriting.close(); process.waitUntilExit()
@@ -449,9 +450,7 @@ final class KeepAwakeEventToolTests: XCTestCase {
                     }
                 }
                 let events = mailbox.read()
-                XCTAssertEqual(events.count, expected == nil ? 0 : 1, name)
-                XCTAssertEqual(events.first?.state, expected, name)
-                if expected != nil { XCTAssertEqual(events.first?.source, source) }
+                XCTAssertTrue(events.isEmpty, "An XCTest process is not a verified Codex client: \(name)")
             }
         }
     }

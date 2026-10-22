@@ -4,6 +4,10 @@ import UserNotifications
 
 @MainActor
 final class KeepAwakeService: ObservableObject {
+    enum ConnectionFailure: LocalizedError {
+        case cleanupPending
+        var errorDescription: String? { "该来源仍有配置待清理，请先重试清理后再接入。" }
+    }
     static let shared = KeepAwakeService()
     @Published private(set) var engine = KeepAwakeEngine()
     @Published private(set) var decision = KeepAwakeEngine.Decision(hold: false, title: "保持唤醒已关闭", detail: "打开自动模式或开始手动计时。")
@@ -11,11 +15,21 @@ final class KeepAwakeService: ObservableObject {
     @Published private(set) var actualHold = false
     @Published private(set) var runtimeError: String?
     @Published private(set) var connections: Set<String> = []
+    @Published private(set) var cleanupPendingSources: Set<String> = []
     @Published private(set) var receivedSources: Set<String> = []
     @Published private(set) var activity: [String] = []
     @Published private(set) var notificationStatus = "尚未检查通知权限"
     @Published private(set) var localSourceStatus = "等待首次只读检查"
     @Published private(set) var recoveryInProgress = false
+    @Published private(set) var codexStatus = "当前任务状态通道未接通"
+    private var codexTask: Task<Void, Never>?
+    private var codexGeneration: UInt64 = 0
+    private var nextCodexPoll: TimeInterval = 0
+    private var codexSequence: UInt64 = 0
+    private var codexLedger = KeepAwakeCodexMonitor.Ledger()
+    private let codexSampler: @MainActor () async throws -> KeepAwakeCodexMonitor.Snapshot
+    private let codexAvailability: @MainActor () -> Bool
+    private let hookUninstaller: @MainActor (KeepAwakeSource) throws -> Void
     private var resumeGeneration: UInt64 = 0
     private var localSourceTask: Task<Void, Never>?
     private var localSourceGeneration = 0
@@ -34,11 +48,21 @@ final class KeepAwakeService: ObservableObject {
     private var lastLog = ""
     private static let preferencesKey = "keepAwake.preferences.v1"
     private static let sourcesKey = "keepAwake.sources.v1"
+    private static let cleanupKey = "keepAwake.cleanupPending.v1"
 
     init(defaults: UserDefaults = .standard, root: URL? = nil,
-         localSampler: @escaping @MainActor () async -> KeepAwakeKimiMonitor.Snapshot = { await KeepAwakeKimiMonitor.sample() }) {
+         localSampler: @escaping @MainActor () async -> KeepAwakeKimiMonitor.Snapshot = { await KeepAwakeKimiMonitor.sample() },
+         codexSampler: @escaping @MainActor () async throws -> KeepAwakeCodexMonitor.Snapshot = {
+             try await Task.detached(priority: .utility) { try KeepAwakeCodexRPC.sample() }.value
+         },
+         codexAvailability: @escaping @MainActor () -> Bool = { KeepAwakeCodexRPC.endpointAvailable() },
+         hookUninstaller: @escaping @MainActor (KeepAwakeSource) throws -> Void = { try KeepAwakeHookInstaller.uninstall(source: $0) }) {
         self.defaults = defaults
         self.localSampler = localSampler
+        self.codexSampler = codexSampler
+        self.codexAvailability = codexAvailability
+        self.hookUninstaller = hookUninstaller
+        cleanupPendingSources = Set(defaults.stringArray(forKey: Self.cleanupKey) ?? [])
         let support = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.workview.SuperIsland")
             .appendingPathComponent("KeepAwake")
@@ -52,10 +76,11 @@ final class KeepAwakeService: ObservableObject {
         lidObserver = lid.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         let saved = defaults.stringArray(forKey: Self.sourcesKey) ?? []
         let deferred = Set(KeepAwakeSource.all.filter(\.isDeferred).map(\.id))
-        let retained = saved.filter { !deferred.contains($0) }
+        let retained = saved.filter { !deferred.contains($0) && !cleanupPendingSources.contains($0) }
         if retained != saved { defaults.set(retained, forKey: Self.sourcesKey) }
         for source in retained {
-            guard let item = KeepAwakeSource.all.first(where: { $0.id == source }), item.canConnect else { continue }
+            guard let item = KeepAwakeSource.all.first(where: { $0.id == source }),
+                  item.id == "codex-desktop" ? codexAvailability() : item.canConnect else { continue }
             do {
                 if !item.readsLocalStatus { try mailbox.connect(source: source) }
                 connections.insert(source)
@@ -82,6 +107,7 @@ final class KeepAwakeService: ObservableObject {
     }
     func shutdown() {
         cancelResume()
+        codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
         localSourceGeneration += 1; localSourceTask?.cancel(); localSourceTask = nil
         timer?.invalidate(); timer = nil; engine.stop(); lid.disable()
         power.apply(hold: false, policy: .system, notebook: isNotebook)
@@ -141,6 +167,20 @@ final class KeepAwakeService: ObservableObject {
         tick()
     }
     func connect(_ source: KeepAwakeSource) throws {
+        guard !cleanupPendingSources.contains(source.id) else { throw ConnectionFailure.cleanupPending }
+        if source.id == "codex-desktop" {
+            // Repeated actions must preserve the ledger's sequence and open
+            // guards; resetting only one side could reject the next task.
+            guard !connections.contains(source.id) else { return }
+            guard codexAvailability() else { throw KeepAwakeCodexRPC.Failure.unavailable }
+            engine.disconnect(source: source.id); receivedSources.remove(source.id)
+            codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
+            codexLedger = .init(); codexSequence = 0; nextCodexPoll = 0
+            codexStatus = "等待官方本机接口的首次只读检查"
+            connections.insert(source.id); saveSources()
+            record("Codex 本机状态接入已启用；仅监测同一共享服务中的本机任务。")
+            tick(); return
+        }
         guard source.canConnect else { throw CocoaError(.featureUnsupported) }
         if source.readsLocalStatus {
             connections.insert(source.id); saveSources(); nextLocalPoll = 0
@@ -152,6 +192,9 @@ final class KeepAwakeService: ObservableObject {
             try KeepAwakeHookInstaller.install(source: source, credential: mailbox.credentialsDirectory.appendingPathComponent(source.id + ".json"))
         } catch {
             try? mailbox.disconnect(source: source.id)
+            if source.id == "codex-cli", case KeepAwakeCodexInstaller.Failure.transactionPending = error {
+                cleanupPendingSources.insert(source.id); saveCleanup()
+            }
             throw error
         }
         engine.disconnect(source: source.id); receivedSources.remove(source.id)
@@ -163,22 +206,39 @@ final class KeepAwakeService: ObservableObject {
         // Stop accepting events first, even if external configuration restoration fails.
         engine.disconnect(source: source.id); connections.remove(source.id); receivedSources.remove(source.id)
         saveSources()
+        if source.id == "codex-desktop" {
+            codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
+            codexLedger = .init(); codexStatus = "当前任务状态通道未接通"
+            tick(); return
+        }
         if source.readsLocalStatus {
             localSourceGeneration += 1; localSourceTask?.cancel(); localSourceTask = nil
             localSourceStatus = "未接入"; tick(); return
         }
         defer { tick() }
+        // Persist the cleanup obligation before external writes. A failed
+        // uninstall stays retryable while incoming events remain rejected.
+        cleanupPendingSources.insert(source.id); saveCleanup()
         try mailbox.disconnect(source: source.id)
-        try KeepAwakeHookInstaller.uninstall(source: source)
+        try hookUninstaller(source)
+        cleanupPendingSources.remove(source.id); saveCleanup()
         record(source.name + " 已断开；其他 hook 配置保持不变。")
     }
     private func saveSources() { defaults.set(connections.sorted(), forKey: Self.sourcesKey) }
+    private func saveCleanup() { defaults.set(cleanupPendingSources.sorted(), forKey: Self.cleanupKey) }
     func sourceStatus(_ source: KeepAwakeSource) -> String {
+        if cleanupPendingSources.contains(source.id) { return "已停止接收 · 配置清理待重试" }
         if source.isDeferred { return "暂缓接入" }
+        if source.id == "codex-desktop" {
+            return connections.contains(source.id) ? codexStatus :
+                (source.canConnect ? "检测到本机接口 · 尚未核验接入" : "当前任务状态通道未接通")
+        }
         guard connections.contains(source.id) else { return source.canConnect ? "未接入" : "待验证接口" }
         if source.readsLocalStatus { return localSourceStatus }
         if engine.capacityExceededSources.contains(source.id) { return "任务记录已满 · 继续保持，请核实后重新接入" }
-        guard receivedSources.contains(source.id) else { return "配置已写入 · 等待事件" }
+        guard receivedSources.contains(source.id) else {
+            return source.id == "codex-cli" ? "配置已写入 · 请在 Codex 审阅信任，等待真实事件" : "配置已写入 · 等待事件"
+        }
         let sessions = engine.sessions.values.filter { $0.event.source == source.id }
         let now = KeepAwakeClock.now()
         if sessions.contains(where: { $0.isUnfinished && ($0.event.state == .idle || now >= $0.lastSeen + KeepAwakeEngine.staleAfter) }) { return "状态待核实 · 任务未结束，继续保持" }
@@ -190,11 +250,13 @@ final class KeepAwakeService: ObservableObject {
         environment = KeepAwakePower.environment()
         let now = KeepAwakeClock.now()
         pollLocalSource(now: now)
+        pollCodexSource(now: now)
         for event in mailbox.read() where connections.contains(event.source) {
             let previous = engine.sessions[event.storageKey]
             if engine.receive(event, now: now) {
                 receivedSources.insert(event.source)
-                if previous?.isUnfinished == true && event.state == .completed && engine.enabled {
+                if previous?.isUnfinished == true && event.state == .completed && engine.enabled &&
+                    !KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) {
                     notifyCompletion(source: event.source, session: event.session, sequence: event.sequence)
                 }
             }
@@ -213,6 +275,48 @@ final class KeepAwakeService: ObservableObject {
         }
         let stateKey = decision.title + (runtimeError ?? "")
         if lastLog != stateKey { lastLog = stateKey; record(decision.title) }
+    }
+    private func pollCodexSource(now: TimeInterval) {
+        let source = "codex-desktop"
+        guard started, connections.contains(source), codexTask == nil, now >= nextCodexPoll else { return }
+        let generation = codexGeneration
+        nextCodexPoll = now + 5
+        codexTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let snapshot: KeepAwakeCodexMonitor.Snapshot
+            let status: String
+            do {
+                snapshot = try await self.codexSampler()
+                let active = snapshot.threads.filter { $0.status == "active" }
+                let waiting = active.filter { !$0.activeFlags.isEmpty }
+                status = active.isEmpty ? "官方本机接口已连接 · 没有已知运行任务" :
+                    "本机运行 \(active.count) 个线程，其中 \(waiting.count) 个等待交互或状态确认"
+            } catch {
+                snapshot = .init(threads: [])
+                // Transport errors contain no raw server response, path, or message body.
+                status = (error as? KeepAwakeCodexRPC.Failure)?.localizedDescription ?? "Codex 状态读取失败；已开始任务继续保持。"
+            }
+            guard !Task.isCancelled, generation == self.codexGeneration, self.connections.contains(source) else { return }
+            self.codexTask = nil
+            let arrived = KeepAwakeClock.now()
+            self.nextCodexPoll = arrived + 5
+            self.codexSequence &+= 1
+            for event in self.codexLedger.consume(snapshot: snapshot, now: arrived, sequence: self.codexSequence) {
+                let previous = self.engine.sessions[event.storageKey]
+                if self.engine.receive(event, now: arrived) {
+                    self.receivedSources.insert(source)
+                    if previous?.isUnfinished == true && event.state == .completed && self.engine.enabled &&
+                        !KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) {
+                        self.notifyCompletion(source: source, session: event.session, sequence: event.sequence)
+                    }
+                }
+            }
+            let unfinished = self.engine.sessions.values.filter { $0.event.source == source && $0.isUnfinished }
+            let unknown = self.engine.capacityExceededSources.contains(source) || unfinished.contains { $0.event.state == .idle }
+            self.codexStatus = unknown || (!unfinished.isEmpty && snapshot.threads.allSatisfy({ $0.status != "active" })) ?
+                "任务状态待核实 · 继续保持；" + status : status
+            self.tick()
+        }
     }
     func pollLocalSource(now: TimeInterval) {
         let source = KeepAwakeKimiMonitor.sourceID

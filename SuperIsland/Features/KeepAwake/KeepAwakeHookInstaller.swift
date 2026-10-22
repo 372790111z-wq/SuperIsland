@@ -23,6 +23,7 @@ enum KeepAwakeHookInstaller {
         case "gemini": home.appendingPathComponent(".gemini/settings.json")
         case "opencode": home.appendingPathComponent(".config/opencode/plugins/superisland-keep-awake.js")
         case "pi": home.appendingPathComponent(".pi/agent/extensions/superisland-keep-awake.js")
+        case "codex": KeepAwakeCodexInstaller.configurationURL(home: home)
         default: home.appendingPathComponent(".claude/settings.json")
         }
     }
@@ -31,6 +32,10 @@ enum KeepAwakeHookInstaller {
         guard source.hookFamily != nil else { throw Failure.unavailable }
         let tool = executable ?? Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/KeepAwakeEventTool")
         guard FileManager.default.isExecutableFile(atPath: tool.path) else { throw Failure.unavailable }
+        if source.hookFamily == "codex" {
+            try KeepAwakeCodexInstaller.install(source: source, credential: credential, home: home, tool: tool)
+            return
+        }
         if source.hookFamily == "opencode" || source.hookFamily == "pi" {
             try installPlugin(source: source, credential: credential, home: home, tool: tool)
             return
@@ -69,6 +74,10 @@ enum KeepAwakeHookInstaller {
     }
     static func uninstall(source: KeepAwakeSource, home: URL = FileManager.default.homeDirectoryForCurrentUser) throws {
         guard source.hookFamily != nil else { return }
+        if source.hookFamily == "codex" {
+            try KeepAwakeCodexInstaller.uninstall(source: source, home: home)
+            return
+        }
         guard FileManager.default.fileExists(atPath: path(source: source, home: home).path) else { return }
         if source.hookFamily == "opencode" || source.hookFamily == "pi" {
             let url = path(source: source, home: home)
