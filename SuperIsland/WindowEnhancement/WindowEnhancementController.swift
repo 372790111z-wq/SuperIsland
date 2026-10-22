@@ -491,6 +491,12 @@ final class WindowEnhancementController {
         }
     }
 
+    /// Only the isolated probe may sequence commands at the exact completion boundary.
+    func awaitDiagnosticMutationCompletion() async {
+        guard AppDelegate.isFullScreenProbe else { return }
+        await activeWindowMutationTask?.value
+    }
+
     func perform(action: WindowQuickAction) {
         guard preferences.isActionEnabled(action) else {
             feedback("\(action.title)已关闭")
