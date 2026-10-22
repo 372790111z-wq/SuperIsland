@@ -1451,6 +1451,18 @@ enum WindowServerPrivateBridge {
 final class WindowServerInventoryService: @unchecked Sendable {
     static let shared = WindowServerInventoryService()
 
+    /// Fresh, bounded, single-window read; do not reuse the hover inventory's
+    /// cache while a native fullscreen/Space transition is in progress.
+    func fullScreenSpaceSnapshot(for windowID: CGWindowID) -> WindowFullScreenSpaceSnapshot? {
+        guard windowID > 0, let resolvers = Self.skyLightResolvers else { return nil }
+        let connection = resolvers.mainConnectionID()
+        guard connection != 0,
+              let displays = resolvers.copyManagedDisplaySpaces(connection)?.takeRetainedValue() as? [[String: Any]],
+              let spaces = copySpaceIDs(for: windowID, connectionID: connection, resolver: resolvers.copySpacesForWindows)
+        else { return nil }
+        return WindowFullScreenSpaceSnapshot.parse(displays: displays, windowSpaces: spaces)
+    }
+
     private struct SkyLightResolvers {
         let mainConnectionID: WindowInventoryCGSMainConnectionID
         let getWindowOwner: WindowInventoryCGSGetWindowOwner

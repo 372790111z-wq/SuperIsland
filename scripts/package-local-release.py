@@ -96,6 +96,10 @@ def main():
     # Branding does not transfer ownership of production OAuth/deep links.
     info.pop('CFBundleURLTypes', None)
     (candidate / 'Contents/Info.plist').write_bytes(plistlib.dumps(info, sort_keys=False))
+    lid_helper = candidate / 'Contents/MacOS/KeepAwakeHelper'
+    if lid_helper.exists():
+        run('codesign', '--force', '--sign', args.signing_identity, '--timestamp=none',
+            '--identifier', 'com.workview.SuperIsland.KeepAwakeHelper', '--options', 'runtime', lid_helper)
     run('codesign', '--force', '--deep', '--sign', args.signing_identity, '--timestamp=none',
         '--entitlements', root / 'SuperIsland/SuperIsland.entitlements', candidate)
     run('codesign', '--verify', '--deep', '--strict', candidate)

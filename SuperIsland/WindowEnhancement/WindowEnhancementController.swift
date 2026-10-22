@@ -6,6 +6,28 @@ import CoreGraphics
 import Foundation
 import QuartzCore
 
+/// Chrome can crash through both AXFullScreen writes and the macOS 27 green
+/// window-button menu. Route it through its own toggleFullScreen menu command,
+/// with exact focused-window validation, including recovery.
+/// Never retry a failed/timed-out dispatch through a second control path.
+enum WindowFullScreenRequest {
+    static func apply(
+        current: Bool?, desired: Bool, bundleIdentifier: String?,
+        attributeIsSettable: () -> Bool,
+        setAttribute: () -> Bool,
+        pressButton: () -> Bool,
+        pressApplicationMenu: () -> Bool = { false }
+    ) -> Bool {
+        guard let current else { return false }
+        guard current != desired else { return true }
+        let isChrome = bundleIdentifier == "com.google.Chrome"
+            || bundleIdentifier?.hasPrefix("com.google.Chrome.") == true
+        if isChrome { return pressApplicationMenu() }
+        if bundleIdentifier != nil, attributeIsSettable() { return setAttribute() }
+        return pressButton()
+    }
+}
+
 /// Full-screen AX flags can change before the native Space animation and frame
 /// restoration finish. This barrier is shared by all three display-move stages;
 /// no stage can advance from one successful AX readback alone.
@@ -22,6 +44,8 @@ enum WindowFullScreenDisplayReadiness {
         let displayID: CGDirectDisplayID?
         let frame: CGRect
         let isActionable: Bool
+        var nativeStateReady = true
+        var nativeSpaceID: UInt64? = nil
     }
 
     enum PlacementRequirement {
@@ -56,6 +80,7 @@ enum WindowFullScreenDisplayReadiness {
         let deadline = now() + maximumDuration
         var anchorFrame: CGRect?
         var quietSince: TimeInterval?
+        var anchorSpaceID: UInt64?
         func matches(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
             abs(lhs.minX - rhs.minX) <= tolerance &&
                 abs(lhs.minY - rhs.minY) <= tolerance &&
@@ -81,7 +106,7 @@ enum WindowFullScreenDisplayReadiness {
             guard !shouldRecover() else { return .recoveryRequested }
             let bounds = targetBounds()
             guard placement == .stableWindowed || bounds != nil else { return .targetUnavailable }
-            if let current = observe(), current.isActionable,
+            if let current = observe(), current.isActionable, current.nativeStateReady,
                current.isFullScreen == expectedFullScreen,
                current.frame.width > 0, current.frame.height > 0,
                current.frame.minX.isFinite, current.frame.minY.isFinite,
@@ -89,8 +114,9 @@ enum WindowFullScreenDisplayReadiness {
                placementMatches(current, bounds: bounds) {
                 // Compare with the start of the quiet interval, not just the
                 // previous sample: slow cumulative drift must also restart it.
-                if anchorFrame.map({ matches(current.frame, $0) }) != true {
+                if anchorFrame.map({ matches(current.frame, $0) }) != true || anchorSpaceID != current.nativeSpaceID {
                     anchorFrame = current.frame
+                    anchorSpaceID = current.nativeSpaceID
                     quietSince = now()
                 }
                 if let quietSince, now() - quietSince >= quietDuration {
@@ -98,6 +124,7 @@ enum WindowFullScreenDisplayReadiness {
                 }
             } else {
                 anchorFrame = nil
+                anchorSpaceID = nil
                 quietSince = nil
             }
             guard await pause() else { return .interrupted }
@@ -287,6 +314,11 @@ final class WindowEnhancementController {
     }
 
     func execute(targetID: String) {
+        if targetID == WindowQuickAction.nextDisplay.shortcutID || targetID == WindowQuickAction.previousDisplay.shortcutID {
+            WindowInteractionDiagnosticRecorder.shared.record(component: "chromeBaselineShortcut", event: "received",
+                metadata: ["target": .code(targetID),
+                           "frontmostPID": .integer(Int64(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0))])
+        }
         guard preferences.isEnabled else {
             feedback("窗口增强已关闭")
             return
@@ -462,6 +494,12 @@ final class WindowEnhancementController {
         case .movedOnly, .resizedOnly, .constrained, .failed:
             return .safeWindowed
         }
+    }
+
+    /// Only the isolated probe may sequence commands at the exact completion boundary.
+    func awaitDiagnosticMutationCompletion() async {
+        guard AppDelegate.isFullScreenProbe else { return }
+        await activeWindowMutationTask?.value
     }
 
     func perform(action: WindowQuickAction) {
@@ -1748,6 +1786,13 @@ final class WindowEnhancementController {
         stage: String
     ) async -> WindowStabilityOutcome {
         var preferred = preferredElement
+        let bundleID = NSRunningApplication(processIdentifier: identity.processIdentifier)?.bundleIdentifier
+        let requiresNativeState = bundleID == "com.google.Chrome" || bundleID?.hasPrefix("com.google.Chrome.") == true
+        let displayUUID = CGDisplayCreateUUIDFromDisplayID(expectedDisplayID).map {
+            CFUUIDCreateString(kCFAllocatorDefault, $0.takeRetainedValue()) as String
+        }
+        var lastNativeReady: Bool?
+        var lastNativeSpaceID: UInt64?
         recordFullScreenDisplayStage(
             "\(stage)_wait_start", identity: identity, window: preferred,
             sourceDisplayID: sourceDisplayID, targetDisplayID: expectedDisplayID,
@@ -1769,17 +1814,30 @@ final class WindowEnhancementController {
                       let fullScreen = self.axBoolAttribute("AXFullScreen", of: window),
                       let currentFrame = self.frame(of: window) else { return nil }
                 preferred = window
+                var nativeReady = true
+                var nativeSpaceID: UInt64?
+                if requiresNativeState {
+                    let state = self.fullScreenNativeState(identity: identity, axFrame: currentFrame)
+                    nativeSpaceID = state.snapshot?.spaceID
+                    nativeReady = state.frameMatches &&
+                        (placement == .stableWindowed || displayUUID != nil) &&
+                        state.snapshot?.matches(fullScreen: expectedFullScreen,
+                            displayIdentifier: placement == .stableWindowed ? nil : displayUUID) == true
+                    lastNativeReady = nativeReady
+                    lastNativeSpaceID = nativeSpaceID
+                }
                 return .init(
                     isFullScreen: fullScreen,
                     displayID: self.displayID(forAXFrame: currentFrame), frame: currentFrame,
-                    isActionable: fullScreen || self.windowSupports(window, requirement: .move)
+                    isActionable: fullScreen || self.windowSupports(window, requirement: .move),
+                    nativeStateReady: nativeReady, nativeSpaceID: nativeSpaceID
                 )
             }
         )
         recordFullScreenDisplayStage(
             "\(stage)_wait_\(result.rawValue)", identity: identity, window: preferred,
             sourceDisplayID: sourceDisplayID, targetDisplayID: expectedDisplayID,
-            generation: generation
+            generation: generation, nativeReady: lastNativeReady, nativeSpaceID: lastNativeSpaceID
         )
         switch result {
         case .ready: return .stable(preferred)
@@ -1789,13 +1847,29 @@ final class WindowEnhancementController {
         }
     }
 
+    private func fullScreenNativeState(
+        identity: WindowIdentity, axFrame: CGRect
+    ) -> (snapshot: WindowFullScreenSpaceSnapshot?, frameMatches: Bool) {
+        guard let number = identity.windowNumber, let windowID = CGWindowID(exactly: number),
+              let rows = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+              rows.count == 1, let row = rows.first,
+              (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == identity.processIdentifier,
+              let bounds = row[kCGWindowBounds as String] as? NSDictionary,
+              let nativeFrame = CGRect(dictionaryRepresentation: bounds as CFDictionary)
+        else { return (nil, false) }
+        return (WindowServerInventoryService.shared.fullScreenSpaceSnapshot(for: windowID),
+                frameMatches(nativeFrame, axFrame))
+    }
+
     private func recordFullScreenDisplayStage(
         _ event: String,
         identity: WindowIdentity,
         window: AXUIElement,
         sourceDisplayID: CGDirectDisplayID,
         targetDisplayID: CGDirectDisplayID,
-        generation: UInt64
+        generation: UInt64,
+        nativeReady: Bool? = nil,
+        nativeSpaceID: UInt64? = nil
     ) {
         var metadata: [String: WindowInteractionDiagnosticValue] = [
             "targetPID": .integer(Int64(identity.processIdentifier)),
@@ -1804,6 +1878,8 @@ final class WindowEnhancementController {
             "sourceDisplayID": .integer(Int64(sourceDisplayID)),
             "targetDisplayID": .integer(Int64(targetDisplayID)),
         ]
+        if let nativeReady { metadata["nativeReady"] = .flag(nativeReady) }
+        if let nativeSpaceID { metadata["nativeSpaceID"] = .integer(Int64(clamping: nativeSpaceID)) }
         if let fullScreen = axBoolAttribute("AXFullScreen", of: window) {
             metadata["fullScreen"] = .flag(fullScreen)
         }
@@ -1836,21 +1912,8 @@ final class WindowEnhancementController {
             return .failure("无法确认窗口全屏状态")
         }
 
-        if currentState != desiredState {
-            if isAttributeSettable("AXFullScreen", of: window) {
-                let value: CFBoolean = desiredState ? kCFBooleanTrue : kCFBooleanFalse
-                guard AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, value) == .success else {
-                    return .failure(desiredState ? "未能确认进入全屏" : "未能确认退出全屏")
-                }
-            } else {
-                guard let button = axElementAttribute("AXFullScreenButton", of: window),
-                      axBoolAttribute(kAXEnabledAttribute, of: button) != false,
-                      AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else {
-                    return .failure(desiredState
-                        ? "暂无法操作全屏"
-                        : "暂无法退出全屏")
-                }
-            }
+        guard requestFullScreenState(desiredState, on: window, currentState: currentState) else {
+            return .failure(desiredState ? "暂无法安全进入全屏" : "暂无法安全退出全屏")
         }
 
         let deadline = Date().addingTimeInterval(Self.fullScreenTransitionTimeout)
@@ -2004,6 +2067,11 @@ final class WindowEnhancementController {
         originalWindowedFrame: CGRect?,
         generation: UInt64
     ) async -> WindowMutationCompletion {
+        WindowInteractionDiagnosticRecorder.shared.record(component: "chromeBaselineFailure", event: "recovery_started",
+            metadata: ["generation": .integer(Int64(clamping: generation)),
+                       "enterRequestRejected": .flag(reason.contains("安全进入全屏")),
+                       "transitionTimedOut": .flag(reason.contains("超时")),
+                       "stabilityFailure": .flag(reason.contains("未稳定"))])
         guard isWindowMutationCurrent(generation) else { return .unresolved }
         let restoreOutcome = await restoreOriginalFullScreen(
             identity: identity,
@@ -2057,9 +2125,9 @@ final class WindowEnhancementController {
 
         if axBoolAttribute("AXFullScreen", of: window) == true {
             // A timed-out exit request may still be queued by the target App.
-            // Reassert the desired final state through the settable attribute;
-            // button-only windows cannot safely cancel an unseen pending toggle,
-            // so recovery remains explicitly unverified for those windows.
+            // Do not issue another toggle while the window is still fullscreen.
+            // Require a quiet interval below and compensate only an observed
+            // late exit through the same application-specific request policy.
             guard reinforceFullScreenIntent(on: window) else { return .failed }
             if let sourceScreen = screen(withDisplayID: sourceDisplayID),
                let currentFrame = frame(of: window),
@@ -2279,13 +2347,72 @@ final class WindowEnhancementController {
         return usableAXFrame(for: screen)
     }
 
+    private func requestFullScreenState(_ desiredState: Bool, on window: AXUIElement, currentState: Bool?) -> Bool {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(window, &pid) == .success, pid > 0 else { return false }
+        return WindowFullScreenRequest.apply(
+            current: currentState, desired: desiredState,
+            bundleIdentifier: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+            attributeIsSettable: { self.isAttributeSettable("AXFullScreen", of: window) },
+            setAttribute: {
+                AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString,
+                    desiredState ? kCFBooleanTrue : kCFBooleanFalse) == .success
+            },
+            pressButton: {
+                guard let button = self.axElementAttribute("AXFullScreenButton", of: window),
+                      self.axBoolAttribute(kAXEnabledAttribute, of: button) != false else { return false }
+                return AXUIElementPerformAction(button, kAXPressAction as CFString) == .success
+            },
+            pressApplicationMenu: { self.pressChromeFullScreenMenu(on: window, pid: pid) }
+        )
+    }
+
+    private func pressChromeFullScreenMenu(on window: AXUIElement, pid: pid_t) -> Bool {
+        func trace(_ event: String) {
+            WindowInteractionDiagnosticRecorder.shared.record(component: "chromeBaselineMenu", event: event,
+                metadata: ["targetPID": .integer(Int64(pid)),
+                           "windowID": .integer(Int64(Self.axWindowNumber(of: window) ?? 0)),
+                           "frontmostPID": .integer(Int64(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0))])
+        }
+        let application = AXUIElementCreateApplication(pid)
+        guard let number = Self.axWindowNumber(of: window) else { return false }
+        // App menus act on the focused window, unlike window-specific controls.
+        // Never activate an arbitrary window or dispatch after focus changed.
+        func stillTargetsWindow() -> Bool {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                  let focused = axElementAttribute(kAXFocusedWindowAttribute, of: application) else { return false }
+            return exactPID(of: focused) == pid && Self.axWindowNumber(of: focused) == number
+        }
+        guard stillTargetsWindow(), let menuBar = axElementAttribute(kAXMenuBarAttribute, of: application) else { trace("focus_or_menu_unavailable"); return false }
+        func children(_ element: AXUIElement) -> [AXUIElement] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
+            return value as? [AXUIElement] ?? []
+        }
+        // Read only top-level menu items, without labels or nested History,
+        // bookmarks or extension submenus. Chrome exposes its native
+        // selector as AXIdentifier; both alternate entries perform the same action.
+        for topLevel in children(menuBar).prefix(16) {
+            for menu in children(topLevel).prefix(1) {
+                for item in children(menu).prefix(80) {
+                    guard axStringAttribute("AXIdentifier", of: item) == "toggleFullScreen:",
+                          axBoolAttribute(kAXEnabledAttribute, of: item) == true else { continue }
+                    guard stillTargetsWindow() else { trace("focus_changed"); return false }
+                    let accepted = AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+                    trace(accepted ? "accepted" : "dispatch_error")
+                    return accepted
+                }
+            }
+        }
+        trace("enabled_selector_missing")
+        return false
+    }
+
     private func reinforceFullScreenIntent(on window: AXUIElement) -> Bool {
-        guard isAttributeSettable("AXFullScreen", of: window) else { return false }
-        return AXUIElementSetAttributeValue(
-            window,
-            "AXFullScreen" as CFString,
-            kCFBooleanTrue
-        ) == .success
+        // A button is a toggle, not an idempotent setter. If still fullscreen,
+        // do nothing; stableFullScreenRestoreOutcome compensates a late exit
+        // only after observing it and continues to require stable geometry.
+        requestFullScreenState(true, on: window, currentState: axBoolAttribute("AXFullScreen", of: window))
     }
 
     private func stableFullScreenRestoreOutcome(
@@ -2755,10 +2882,9 @@ final class WindowEnhancementController {
     }
 
     private static func axWindowNumber(of element: AXUIElement) -> Int? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, "AXWindowNumber" as CFString, &value) == .success,
-              let number = value as? NSNumber else { return nil }
-        return number.intValue
+        // Chrome omits the public number/identifier. Reuse the shared exact
+        // native resolver, including its conflict rejection, as Cmd+D already does.
+        windowDirectWindowNumber(of: element).map(Int.init)
     }
 
     private static func axStringValue(_ name: String, of element: AXUIElement) -> String? {
