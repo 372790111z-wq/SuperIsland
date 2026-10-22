@@ -214,7 +214,7 @@ def verify_signatures(app, bundle_id, command=run):
             prefix = Path(directory) / (str(index) + "-cert-")
             # Extract only the PUBLIC certificate embedded in our output;
             # never read, copy or export a Keychain private key.
-            command("codesign", "-d", "--extract-certificates", prefix, target)
+            command("codesign", "-d", "--extract-certificates=" + str(prefix), target)
             leaf = Path(str(prefix) + "0")
             require(leaf.is_file() and leaf.stat().st_size > 0, "Ad-hoc or unsigned test package is unsupported")
             certificate = leaf.read_bytes()

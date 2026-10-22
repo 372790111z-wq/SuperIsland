@@ -124,6 +124,32 @@ class KeepAwakeTestPackageTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(PACKAGE.PackageError):
                 PACKAGE.validate_core_signatures(changed, bundle_id)
 
+    def testCertificateExtractionAttachesOptionalPrefixAndHasOneTarget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.fixture(Path(directory))
+            extractions = []
+            def command(*args):
+                self.assertEqual(args[0], "codesign")
+                self.assertNotIn("--extract-certificates", args,
+                                 "A separate optional argument is parsed as another target")
+                options = [value for value in args if isinstance(value, str) and value.startswith("--extract-certificates=")]
+                if options:
+                    self.assertEqual(len(args), 4)
+                    self.assertEqual(len(options), 1)
+                    self.assertIn(Path(args[-1]), (app, app / "Contents/MacOS/KeepAwakeHelper",
+                                                  app / "Contents/MacOS/KeepAwakeEventTool"))
+                    prefix = options[0].split("=", 1)[1]
+                    Path(prefix + "0").write_bytes(b"public-certificate-fixture")
+                    extractions.append(args)
+                target = Path(args[-1])
+                identifier = "com.workview.SuperIsland.WE1Debug" if target == app else "com.workview.SuperIsland." + target.name
+                return subprocess.CompletedProcess(args, 0, stdout="",
+                                                   stderr="Identifier=" + identifier + "\nflags=0x10000(runtime)\n")
+            records = PACKAGE.verify_signatures(app, "com.workview.SuperIsland.WE1Debug", command)
+            self.assertEqual(len(extractions), 3)
+            self.assertEqual(set(records), set(PACKAGE.CORE))
+            self.assertEqual(len({value["certificate_sha256"] for value in records.values()}), 1)
+
     def testNativeDependenciesCannotPointIntoAnotherAppHomeOrHomebrew(self):
         for dependency in ("/opt/homebrew/lib/libfixture.dylib", "/usr/local/lib/libfixture.dylib",
                            "/Applications/Other.app/Contents/Frameworks/libfixture.dylib", "/Users/fixture/libfixture.dylib"):
