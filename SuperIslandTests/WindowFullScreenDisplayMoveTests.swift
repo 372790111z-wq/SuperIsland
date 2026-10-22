@@ -133,7 +133,7 @@ final class WindowFullScreenDisplayMoveTests: XCTestCase {
         XCTAssertEqual(stillOversized.outcome, .timedOut)
     }
 
-    func testChromeEnterAndExitNeverWriteFullScreenAttribute() {
+    func testChromeEnterAndExitUseOnlyApplicationMenu() {
         for bundle in ["com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.canary"] {
             for desired in [false, true] {
                 var presses = 0
@@ -141,19 +141,21 @@ final class WindowFullScreenDisplayMoveTests: XCTestCase {
                     current: !desired, desired: desired, bundleIdentifier: bundle,
                     attributeIsSettable: { XCTFail("Chrome must not use the direct setter"); return true },
                     setAttribute: { XCTFail("Chrome setter caused native abort"); return true },
-                    pressButton: { presses += 1; return true }))
+                    pressButton: { XCTFail("Chrome must not use the green window button"); return true },
+                    pressApplicationMenu: { presses += 1; return true }))
                 XCTAssertEqual(presses, 1)
             }
         }
     }
 
-    func testChromeFailedButtonDoesNotRetryThroughUnsafeSetter() {
+    func testChromeFailedMenuDoesNotRetryThroughUnsafeControls() {
         var presses = 0
         XCTAssertFalse(WindowFullScreenRequest.apply(
             current: true, desired: false, bundleIdentifier: "com.google.Chrome",
             attributeIsSettable: { XCTFail("No unsafe fallback"); return true },
             setAttribute: { XCTFail("No unsafe fallback"); return true },
-            pressButton: { presses += 1; return false }))
+            pressButton: { XCTFail("No unsafe button fallback"); return true },
+            pressApplicationMenu: { presses += 1; return false }))
         XCTAssertEqual(presses, 1)
     }
 
@@ -162,7 +164,8 @@ final class WindowFullScreenDisplayMoveTests: XCTestCase {
             current: true, desired: true, bundleIdentifier: "com.google.Chrome",
             attributeIsSettable: { XCTFail("Already at requested state"); return true },
             setAttribute: { XCTFail("Already at requested state"); return true },
-            pressButton: { XCTFail("Press would exit fullscreen during recovery"); return true }))
+            pressButton: { XCTFail("No green button"); return true },
+            pressApplicationMenu: { XCTFail("Would exit fullscreen during recovery"); return true }))
     }
 
     func testUnknownStateCannotDispatchAToggle() {
@@ -170,7 +173,8 @@ final class WindowFullScreenDisplayMoveTests: XCTestCase {
             current: nil, desired: false, bundleIdentifier: "com.google.Chrome",
             attributeIsSettable: { XCTFail("Unknown current state"); return true },
             setAttribute: { XCTFail("Unknown current state"); return true },
-            pressButton: { XCTFail("Unknown current state"); return true }))
+            pressButton: { XCTFail("Unknown current state"); return true },
+            pressApplicationMenu: { XCTFail("Unknown current state"); return true }))
     }
 
     func testOtherAppsRetainTheirExistingAttributePath() {
