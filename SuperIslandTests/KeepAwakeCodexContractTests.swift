@@ -104,10 +104,30 @@ final class KeepAwakeCodexContractTests: XCTestCase {
         XCTAssertFalse(KeepAwakeHookContract.acceptsCodexParent(source: "codex-desktop", ancestors: [cli, server, host]))
         XCTAssertFalse(KeepAwakeHookContract.acceptsCodexParent(source: "codex-cli", ancestors: [server, host]))
         XCTAssertTrue(KeepAwakeHookContract.acceptsCodexParent(source: "codex-desktop", ancestors: [server, host]))
+        XCTAssertFalse(KeepAwakeHookContract.acceptsCodexParent(source: "codex-desktop", ancestors: [server, cli, host]))
+        XCTAssertFalse(KeepAwakeHookContract.acceptsCodexParent(source: "codex-desktop", ancestors: [server, server, host]))
         XCTAssertFalse(KeepAwakeHookContract.acceptsCodexParent(source: "codex-desktop", ancestors: [server]))
         XCTAssertFalse(KeepAwakeHookContract.acceptsCodexParent(source: "codex-cli", ancestors: [host]))
         let fake = Ancestor(isCodex: true, isVerified: false, role: .cli, isDesktopHost: false)
         XCTAssertFalse(KeepAwakeHookContract.acceptsCodexParent(source: "codex-cli", ancestors: [fake, cli]))
+    }
+    func testSharedRouterSelectsOnlyTheObservedConnectedSourceAndRejectsMalformedMappings() throws {
+        let valid = Data("{\"version\":2,\"sources\":{\"codex-cli\":\"/private/cli.json\",\"codex-desktop\":\"/private/desktop.json\"},\"previousNotify\":[\"ignored\"]}".utf8)
+        let router = try JSONDecoder().decode(KeepAwakeHookContract.CodexRouter.self, from: valid)
+        XCTAssertEqual(router.credentialPath(source: "codex-cli"), "/private/cli.json")
+        XCTAssertEqual(router.credentialPath(source: "codex-desktop"), "/private/desktop.json")
+        XCTAssertNil(router.credentialPath(source: "pi"))
+        let onlyCLI = KeepAwakeHookContract.CodexRouter(version: 2, sources: ["codex-cli": "/private/cli.json"])
+        XCTAssertNil(onlyCLI.credentialPath(source: "codex-desktop"))
+        for invalid in [
+            KeepAwakeHookContract.CodexRouter(version: 1, sources: ["codex-cli": "/private/cli.json"]),
+            .init(version: 2, sources: [:]),
+            .init(version: 2, sources: ["codex-cli": "relative-credential"]),
+            .init(version: 2, sources: ["codex-cli": "/private/cli.json", "other": "/private/other.json"]),
+            .init(version: 2, sources: ["codex-cli": "/" + String(repeating: "x", count: 4096)])
+        ] {
+            XCTAssertNil(invalid.credentialPath(source: "codex-cli"))
+        }
     }
     func testCodexIdentityAndTerminalMetadataArePartOfAuthentication() throws {
         let completion = try XCTUnwrap(KeepAwakeHookContract.codexNotification(notification()))
@@ -191,7 +211,9 @@ final class KeepAwakeCodexContractTests: XCTestCase {
         let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/KeepAwakeEventTool")
         for args in [["--superisland-ka1-codex-notify", "codex-desktop", "/absent", "{}"],
                      ["--superisland-ka1-codex-notify", "codex-cli", "/absent"],
-                     ["--superisland-ka1-codex-notify", "claude-code", "/absent", "{}"]] {
+                     ["--superisland-ka1-codex-notify", "claude-code", "/absent", "{}"],
+                     ["--superisland-ka1-codex-notify-auto", "/absent", "{}"],
+                     ["--superisland-ka1-codex-notify-auto", "/absent"]] {
             let process = Process(), output = Pipe()
             process.executableURL = executable; process.arguments = args
             process.standardInput = FileHandle.nullDevice; process.standardOutput = output

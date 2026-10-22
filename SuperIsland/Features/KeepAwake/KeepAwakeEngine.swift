@@ -186,17 +186,16 @@ struct KeepAwakeSource: Identifiable {
     let name: String
     let integration: String
     let hookFamily: String?
-    var readsLocalStatus: Bool { id == "kimi-code-desktop" || id == "codex-desktop" }
+    var readsLocalStatus: Bool { id == "kimi-code-desktop" }
     var isDeferred: Bool { id == "kimi-code-desktop" || id == "kimi-code-cli" }
     var canConnect: Bool {
-        if id == "codex-desktop" { return KeepAwakeCodexRPC.endpointAvailable() }
         return !isDeferred && (hookFamily != nil || readsLocalStatus)
     }
     static let all: [Self] = [
         .init(id: "claude-code", name: "Claude Code", integration: "Hook 接入候选；需验证事件与长任务存活", hookFamily: "claude"),
         .init(id: "claude-cowork", name: "Claude Cowork", integration: "待验证：尚无可靠任务状态接口", hookFamily: nil),
         .init(id: "codex-cli", name: "Codex CLI", integration: "官方 hooks 与完成通知接入候选；需在 Codex 审阅信任，新任务收到有效事件后才保持", hookFamily: "codex"),
-        .init(id: "codex-desktop", name: "Codex 桌面端", integration: "只读连接已存在的官方本机共享服务；可补捕该服务中的运行任务，云端及未公开接口的桌面会话不在此通道内", hookFamily: nil),
+        .init(id: "codex-desktop", name: "Codex 桌面端", integration: "本地/Worktree 任务使用官方 hooks 与完成通知；有公开本机服务时可只读接入。需在 Codex 审阅信任，云端编排不在此通道内", hookFamily: "codex"),
         .init(id: "opencode", name: "OpenCode", integration: "插件事件与心跳候选；需验证当前 OpenCode 版本", hookFamily: "opencode"),
         .init(id: "gemini-cli", name: "Gemini CLI", integration: "Hook 接入候选；需验证事件与长任务存活", hookFamily: "gemini"),
         .init(id: "pi", name: "Pi", integration: "扩展生命周期候选；需验证等待交互的覆盖", hookFamily: "pi"),

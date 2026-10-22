@@ -10,25 +10,42 @@ struct Event: Codable {
     let taskID: String?; let startsTask: Bool?
 }
 struct Envelope: Codable { let generation: String; let event: Event; let issuedAt: Double; let mac: String }
+func privateFile(_ path: String, maximumBytes: Int) throws -> Data? {
+    let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    guard fd >= 0 else { return nil }
+    var info = stat()
+    guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+          info.st_uid == getuid(), info.st_size <= maximumBytes, info.st_mode & 0o077 == 0 else { close(fd); return nil }
+    let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    defer { try? handle.close() }
+    let data = try handle.read(upToCount: maximumBytes + 1) ?? Data()
+    return data.count <= maximumBytes ? data : nil
+}
 func run() throws {
     let args = CommandLine.arguments
     let isHook = args.count == 4 && args[1] == "--superisland-ka1"
     let isCodexNotify = args.count == 5 && args[1] == "--superisland-ka1-codex-notify" && args[2] == "codex-cli"
-    guard isHook || isCodexNotify,
-          (["claude-code", "gemini-cli", "opencode", "pi"] + KeepAwakeHookContract.codexSources + KeepAwakeHookContract.sources).contains(args[2]) else { return }
-    let fd = open(args[3], O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
-    guard fd >= 0 else { return }
-    var info = stat()
-    guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
-          info.st_uid == getuid(), info.st_size <= 4096, info.st_mode & 0o077 == 0 else { close(fd); return }
-    let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-    let credential = try JSONDecoder().decode(Credential.self, from: handle.read(upToCount: 4097) ?? Data())
-    try handle.close()
-    guard credential.source == args[2], let key = Data(base64Encoded: credential.key) else { return }
+    let isAutoHook = args.count == 3 && args[1] == "--superisland-ka1-codex-hook-auto"
+    let isAutoNotify = args.count == 4 && args[1] == "--superisland-ka1-codex-notify-auto"
+    guard isHook || isCodexNotify || isAutoHook || isAutoNotify else { return }
+    let source: String, credentialPath: String
+    if isAutoHook || isAutoNotify {
+        guard let observedSource = KeepAwakeHookContract.codexParentSource(),
+              let data = try privateFile(args[2], maximumBytes: 1_048_576),
+              let router = try? JSONDecoder().decode(KeepAwakeHookContract.CodexRouter.self, from: data),
+              let path = router.credentialPath(source: observedSource) else { return }
+        source = observedSource; credentialPath = path
+    } else {
+        guard (["claude-code", "gemini-cli", "opencode", "pi"] + KeepAwakeHookContract.codexSources + KeepAwakeHookContract.sources).contains(args[2]) else { return }
+        source = args[2]; credentialPath = args[3]
+    }
+    guard let data = try privateFile(credentialPath, maximumBytes: 4096),
+          let credential = try? JSONDecoder().decode(Credential.self, from: data),
+          credential.source == source, let key = Data(base64Encoded: credential.key) else { return }
     // notify's JSON is the final argv element, never stdin. Hook stdin may
     // contain sensitive text; both formats are bounded and never persisted.
-    var input = isCodexNotify ? Data(args[4].utf8) : Data()
-    if isHook {
+    var input = isCodexNotify ? Data(args[4].utf8) : isAutoNotify ? Data(args[3].utf8) : Data()
+    if isHook || isAutoHook {
         while input.count <= 2_097_152 {
             let chunk = try FileHandle.standardInput.read(upToCount: min(65536, 2_097_153 - input.count)) ?? Data()
             if chunk.isEmpty { break }
@@ -40,11 +57,11 @@ func run() throws {
     if KeepAwakeHookContract.sources.contains(credential.source) {
         guard KeepAwakeHookContract.hasDesktopParent(source: credential.source) else { return }
     }
-    if KeepAwakeHookContract.codexSources.contains(credential.source) {
+    if KeepAwakeHookContract.codexSources.contains(credential.source) && !isAutoHook && !isAutoNotify {
         guard KeepAwakeHookContract.hasCodexParent(source: credential.source) else { return }
     }
     let state: String, metadata: KeepAwakeHookContract.Metadata, session: String
-    if isCodexNotify {
+    if isCodexNotify || isAutoNotify {
         guard let notification = KeepAwakeHookContract.codexNotification(payload) else { return }
         state = notification.state; metadata = notification.metadata; session = notification.session
     } else {
@@ -74,8 +91,9 @@ func run() throws {
 }
 // Gemini and Codex receive a JSON no-op even when the event is ignored or
 // credentials have been revoked. Never approve tools or change their policy.
-if CommandLine.arguments.count > 2 && CommandLine.arguments[1] == "--superisland-ka1"
-    && ["gemini-cli", "codex-cli", "codex-desktop"].contains(CommandLine.arguments[2]) {
+if CommandLine.arguments.count > 1 && (CommandLine.arguments[1] == "--superisland-ka1-codex-hook-auto"
+    || (CommandLine.arguments.count > 2 && CommandLine.arguments[1] == "--superisland-ka1"
+    && ["gemini-cli", "codex-cli", "codex-desktop"].contains(CommandLine.arguments[2]))) {
     FileHandle.standardOutput.write(Data("{}".utf8))
 }
 // A monitoring hook must never block or fail the user's actual AI task.

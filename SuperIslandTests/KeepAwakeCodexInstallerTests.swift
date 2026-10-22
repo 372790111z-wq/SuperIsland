@@ -150,13 +150,130 @@ final class KeepAwakeCodexInstallerTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: fixture.config.path), external.path)
     }
 
-    func testDesktopCannotUseCLIInstallerAndCLIPathDoesNotFallBackToClaude() throws {
+    func testDesktopAndCLIShareOneRouterWithoutFallingBackToClaude() throws {
         let fixture = try Fixture(); defer { fixture.cleanup() }
         let desktop = KeepAwakeSource(id: "codex-desktop", name: "desktop", integration: "fixture", hookFamily: "codex")
-        XCTAssertThrowsError(try KeepAwakeCodexInstaller.install(source: desktop, credential: fixture.credential,
-            home: fixture.home, tool: fixture.tool, editor: fakeEditor))
+        try install(fixture)
+        let config = try Data(contentsOf: fixture.config), hooks = try Data(contentsOf: fixture.hooks)
+        let desktopCredential = fixture.base.appendingPathComponent("desktop-credential.json")
+        try KeepAwakeCodexInstaller.install(source: desktop, credential: desktopCredential,
+            home: fixture.home, tool: fixture.tool, editor: fakeEditor)
+        XCTAssertEqual(try Data(contentsOf: fixture.config), config)
+        XCTAssertEqual(try Data(contentsOf: fixture.hooks), hooks)
+        let receipt = try object(fixture.receipt)
+        XCTAssertEqual(receipt["version"] as? Int, 2)
+        XCTAssertEqual(receipt["sources"] as? [String: String], [source.id: fixture.credential.path, desktop.id: desktopCredential.path])
+        for event in KeepAwakeCodexInstaller.events { XCTAssertEqual(commands(try object(fixture.hooks), event: event).count, 1) }
+        try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home, credential: fixture.credential, editor: fakeEditor)
+        XCTAssertEqual(try Data(contentsOf: fixture.config), config)
+        XCTAssertEqual(try Data(contentsOf: fixture.hooks), hooks)
+        XCTAssertEqual(try object(fixture.receipt)["sources"] as? [String: String], [desktop.id: desktopCredential.path])
+        try KeepAwakeCodexInstaller.uninstall(source: desktop, home: fixture.home, credential: desktopCredential, editor: fakeEditor)
+        XCTAssertNil(try object(fixture.config)["notify"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.receipt.path))
         XCTAssertEqual(KeepAwakeHookInstaller.path(source: source, home: fixture.home), fixture.config)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.home.appendingPathComponent(".claude").path))
+    }
+
+    func testLegacyCLIReceiptMigratesToSharedRouterAndKeepsDisabledHooksAndBaseline() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let legacyNotify = [fixture.tool.path, "--superisland-ka1-codex-notify", source.id, fixture.credential.path]
+        let legacyCommand = [KeepAwakeHookInstaller.shellQuote(fixture.tool.path), "--superisland-ka1", source.id,
+                             KeepAwakeHookInstaller.shellQuote(fixture.credential.path)].joined(separator: " ")
+        try json(["notify": legacyNotify, "other": true]).write(to: fixture.config)
+        var events: [String: Any] = [:]
+        for event in KeepAwakeCodexInstaller.events {
+            events[event] = [["matcher": "", "enabled": false, "hooks": [["type": "command", "command": legacyCommand, "enabled": false, "timeout": 5], ["type": "command", "command": "/third-party"]]]]
+        }
+        try json(["enabled": false, "hooks": events]).write(to: fixture.hooks)
+        try FileManager.default.createDirectory(at: fixture.state, withIntermediateDirectories: true)
+        let baseline = ["/previous/notifier", "preserved"]
+        try json(["version": 1, "notify": legacyNotify, "hookCommand": legacyCommand, "previousNotify": baseline]).write(to: fixture.receipt)
+        try install(fixture)
+        let receipt = try object(fixture.receipt)
+        XCTAssertEqual(receipt["version"] as? Int, 2)
+        XCTAssertEqual(receipt["previousNotify"] as? [String], baseline)
+        XCTAssertEqual(receipt["sources"] as? [String: String], [source.id: fixture.credential.path])
+        let hooks = try object(fixture.hooks)
+        XCTAssertEqual(hooks["enabled"] as? Bool, false)
+        for event in KeepAwakeCodexInstaller.events {
+            let group = try XCTUnwrap(((hooks["hooks"] as? [String: Any])?[event] as? [[String: Any]])?.first)
+            let handlers = try XCTUnwrap(group["hooks"] as? [[String: Any]])
+            XCTAssertEqual(group["enabled"] as? Bool, false)
+            XCTAssertEqual(handlers[0]["enabled"] as? Bool, false)
+            XCTAssertFalse(commands(hooks, event: event).contains(legacyCommand))
+            XCTAssertEqual(handlers[1]["command"] as? String, "/third-party")
+            if event == "Interrupt" { XCTAssertEqual(handlers[0]["timeout"] as? Int, 3) }
+        }
+        try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home, credential: fixture.credential, editor: fakeEditor)
+        XCTAssertEqual(try object(fixture.config)["notify"] as? [String], baseline)
+        XCTAssertEqual(commands(try object(fixture.hooks), event: "Stop"), ["/third-party"])
+    }
+
+    func testExplicitProfileRootNeverTouchesDefaultHomeAndWrongCredentialCannotUninstall() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let profile = fixture.base.appendingPathComponent("separate profile")
+        try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential, home: fixture.home,
+            tool: fixture.tool, codexHome: profile, cli: URL(fileURLWithPath: "/unused-injected-editor"), editor: fakeEditor)
+        let config = profile.appendingPathComponent("config.toml")
+        let receipt = profile.appendingPathComponent(".superisland-keep-awake/receipt.json")
+        XCTAssertEqual(KeepAwakeCodexInstaller.configurationURL(home: fixture.home, codexHome: profile), config)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.config.path))
+        let bytes = try Data(contentsOf: receipt)
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home,
+            credential: fixture.base.appendingPathComponent("another-connection"), codexHome: profile, editor: fakeEditor))
+        XCTAssertEqual(try Data(contentsOf: receipt), bytes)
+        try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home,
+            credential: fixture.credential, codexHome: profile, editor: fakeEditor)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: receipt.path))
+    }
+
+    func testDifferentToolAndCredentialCannotTakeOverExistingSource() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        try install(fixture)
+        let receipt = try Data(contentsOf: fixture.receipt), config = try Data(contentsOf: fixture.config)
+        let otherTool = fixture.base.appendingPathComponent("other-app-tool")
+        XCTAssertTrue(FileManager.default.createFile(atPath: otherTool.path, contents: Data(), attributes: [.posixPermissions: 0o700]))
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.install(source: source,
+            credential: fixture.base.appendingPathComponent("other-app-credential"), home: fixture.home,
+            tool: otherTool, editor: fakeEditor))
+        XCTAssertEqual(try Data(contentsOf: fixture.receipt), receipt)
+        XCTAssertEqual(try Data(contentsOf: fixture.config), config)
+    }
+
+    func testExplicitUnsignedCLIIsRejectedBeforeConfigurationEditing() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let original = try json(["unrelated": true]); try original.write(to: fixture.config)
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: fixture.tool, codexHome: fixture.codex, cli: fixture.tool))
+        XCTAssertEqual(try Data(contentsOf: fixture.config), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.hooks.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.receipt.path))
+    }
+
+    func testDesktopFirstUninstallAndSameCredentialToolUpgradeKeepCLIConnected() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let desktop = KeepAwakeSource(id: "codex-desktop", name: "desktop", integration: "fixture", hookFamily: "codex")
+        let desktopCredential = fixture.base.appendingPathComponent("desktop-credential")
+        try KeepAwakeCodexInstaller.install(source: desktop, credential: desktopCredential,
+            home: fixture.home, tool: fixture.tool, editor: fakeEditor)
+        try install(fixture)
+        let before = try Data(contentsOf: fixture.receipt)
+        try install(fixture)
+        XCTAssertEqual(try Data(contentsOf: fixture.receipt), before, "reinstall must keep the same routing record")
+        try KeepAwakeCodexInstaller.uninstall(source: desktop, home: fixture.home,
+            credential: desktopCredential, editor: fakeEditor)
+        XCTAssertEqual(try object(fixture.receipt)["sources"] as? [String: String], [source.id: fixture.credential.path])
+        let relocated = fixture.base.appendingPathComponent("relocated-app-tool")
+        XCTAssertTrue(FileManager.default.createFile(atPath: relocated.path, contents: Data(), attributes: [.posixPermissions: 0o700]))
+        try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: relocated, editor: fakeEditor)
+        XCTAssertEqual((try object(fixture.config)["notify"] as? [String])?.first, relocated.path)
+        for event in KeepAwakeCodexInstaller.events {
+            let hook = try XCTUnwrap(commands(try object(fixture.hooks), event: event).first)
+            XCTAssertTrue(hook.contains(KeepAwakeHookInstaller.shellQuote(relocated.path)))
+            XCTAssertFalse(hook.contains(KeepAwakeHookInstaller.shellQuote(fixture.tool.path)))
+        }
     }
 
     func testOfficialEditorPreservesTomlCommentsInlineHooksAndProjectTrust() throws {
@@ -234,7 +351,7 @@ final class KeepAwakeCodexInstallerTests: XCTestCase {
         var state: URL { codex.appendingPathComponent(".superisland-keep-awake") }
         var receipt: URL { state.appendingPathComponent("receipt.json") }
         var credential: URL { base.appendingPathComponent("credential.json") }
-        var notify: [String] { [tool.path, "--superisland-ka1-codex-notify", "codex-cli", credential.path] }
+        var notify: [String] { [tool.path, "--superisland-ka1-codex-notify-auto", receipt.path] }
         init() throws {
             base = FileManager.default.temporaryDirectory.appendingPathComponent("KA1CodexInstaller-" + UUID().uuidString)
             home = base.appendingPathComponent("home")

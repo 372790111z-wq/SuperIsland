@@ -10,6 +10,21 @@ enum KeepAwakeHookContract {
     static let sources = ["qoder-desktop", "workbuddy-desktop", "zcode-desktop"]
     static let codexSources = ["codex-cli", "codex-desktop"]
     private static let codexCompactionPrefix = "aux.codex.compaction."
+    /// The private installer receipt doubles as the router. It contains only
+    /// source-to-credential paths, never task content or authentication keys.
+    struct CodexRouter: Decodable {
+        let version: Int
+        let sources: [String: String]
+        func credentialPath(source: String) -> String? {
+            guard version == 2, !sources.isEmpty, sources.count <= codexSources.count,
+                  sources.allSatisfy({ codexSources.contains($0.key) && Self.validPath($0.value) }),
+                  codexSources.contains(source) else { return nil }
+            return sources[source]
+        }
+        private static func validPath(_ value: String) -> Bool {
+            value.hasPrefix("/") && value.utf8.count <= 4096 && !value.utf8.contains(0)
+        }
+    }
     struct Metadata: Equatable {
         var taskID: String?
         var startsTask: Bool
@@ -250,7 +265,14 @@ enum KeepAwakeHookContract {
         switch codex.role {
         case .cli: return source == "codex-cli"
         case .appServer:
-            return source == "codex-desktop" && ancestors.dropFirst(index + 1).contains(where: \.isDesktopHost)
+            guard source == "codex-desktop" else { return false }
+            for ancestor in ancestors.dropFirst(index + 1) {
+                // A secondary app-server launched by a CLI/tool is not the
+                // desktop's own backend merely because the UI is farther up.
+                if ancestor.isCodex { return false }
+                if ancestor.isDesktopHost { return true }
+            }
+            return false
         case .other: return false
         }
     }
@@ -281,15 +303,18 @@ enum KeepAwakeHookContract {
         return .cli
     }
     static func hasCodexParent(source: String) -> Bool {
+        codexParentSource() == source
+    }
+    static func codexParentSource() -> String? {
         var pid = getppid()
         var ancestors: [CodexAncestor] = []
         for _ in 0..<24 {
             guard pid > 1 else { break }
             var info = proc_bsdinfo()
             guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size,
-                  info.pbi_uid == getuid() else { return false }
+                  info.pbi_uid == getuid() else { return nil }
             var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return false }
+            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
             let executable = URL(fileURLWithPath: String(cString: path)).lastPathComponent
             let isCodex = executable == "codex"
             let verified = isCodex && verifiedOpenAIProcess(pid, identifier: "codex")
@@ -301,7 +326,7 @@ enum KeepAwakeHookContract {
             if isCodex && (!verified || ancestors.last?.role != .appServer) { break }
             pid = pid_t(info.pbi_ppid)
         }
-        return acceptsCodexParent(source: source, ancestors: ancestors)
+        return codexSources.first { acceptsCodexParent(source: $0, ancestors: ancestors) }
     }
     private static func verifiedOpenAIProcess(_ pid: pid_t, identifier: String) -> Bool {
         var code: SecCode?
