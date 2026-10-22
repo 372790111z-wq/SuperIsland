@@ -1861,7 +1861,33 @@ final class WindowEnhancementController {
             return .failure("无法确认窗口全屏状态")
         }
 
-        guard requestFullScreenState(desiredState, on: window, currentState: currentState) else {
+        let bundleID = NSRunningApplication(processIdentifier: identity.processIdentifier)?.bundleIdentifier
+        if bundleID == "com.google.Chrome" || bundleID?.hasPrefix("com.google.Chrome.") == true {
+            let startingIntent = windowMutationIntent
+            let request = await ChromeFullScreenMenuGate.request(
+                isCurrent: {
+                    self.isWindowMutationCurrent(generation) && self.windowMutationIntent == startingIntent
+                },
+                attempt: {
+                    self.attemptChromeFullScreenMenu(desiredState, identity: identity, preferredElement: window)
+                }
+            )
+            WindowInteractionDiagnosticRecorder.shared.record(
+                component: "chromeFullScreenRequest", event: request.rawValue,
+                metadata: ["targetPID": .integer(Int64(identity.processIdentifier)),
+                           "windowID": .integer(Int64(identity.windowNumber ?? 0)),
+                           "generation": .integer(Int64(clamping: generation)),
+                           "frontmostPID": .integer(Int64(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)),
+                           "desiredFullScreen": .flag(desiredState)]
+            )
+            switch request {
+            case .alreadySatisfied, .sent, .uncertain: break
+            case .interrupted: return .cancelled
+            case .targetChanged: return .failure("目标窗口焦点已变化，全屏切换已取消")
+            case .targetGone: return .failure("目标应用已退出")
+            case .waiting, .timedOut: return .failure("Chrome 全屏菜单尚未就绪")
+            }
+        } else if !requestFullScreenState(desiredState, on: window, currentState: currentState) {
             return .failure(desiredState ? "暂无法安全进入全屏" : "暂无法安全退出全屏")
         }
 
@@ -2311,6 +2337,55 @@ final class WindowEnhancementController {
         )
     }
 
+    private func attemptChromeFullScreenMenu(
+        _ desiredState: Bool, identity: WindowIdentity, preferredElement: AXUIElement
+    ) -> ChromeFullScreenMenuGate.Outcome {
+        let pid = identity.processIdentifier
+        guard let running = NSRunningApplication(processIdentifier: pid), !running.isTerminated else { return .targetGone }
+        guard let window = resolveExactWindow(identity, preferredElement: preferredElement),
+              let current = axBoolAttribute("AXFullScreen", of: window),
+              let number = Self.axWindowNumber(of: window) else { return .waiting }
+        if current == desiredState { return .alreadySatisfied }
+        let application = AXUIElementCreateApplication(pid)
+        func focusState() -> ChromeFullScreenMenuGate.Outcome? {
+            guard let frontmost = NSWorkspace.shared.frontmostApplication else { return .waiting }
+            guard frontmost.processIdentifier == pid else { return .targetChanged }
+            guard let focused = axElementAttribute(kAXFocusedWindowAttribute, of: application),
+                  let focusedID = Self.axWindowNumber(of: focused) else { return .waiting }
+            guard exactPID(of: focused) == pid, focusedID == number else { return .targetChanged }
+            return nil
+        }
+        if let state = focusState() { return state }
+        guard let item = chromeFullScreenMenuItem(application: application) else { return .waiting }
+        // Menu availability and the fullscreen flag may change during lookup.
+        // Revalidate immediately before the sole toggle, without activating anything.
+        if let state = focusState() { return state }
+        guard let fresh = axBoolAttribute("AXFullScreen", of: window) else { return .waiting }
+        if fresh == desiredState { return .alreadySatisfied }
+        return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success ? .sent : .uncertain
+    }
+
+    private func chromeFullScreenMenuItem(application: AXUIElement) -> AXUIElement? {
+        guard let menuBar = axElementAttribute(kAXMenuBarAttribute, of: application) else { return nil }
+        func children(_ element: AXUIElement) -> [AXUIElement] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
+            return value as? [AXUIElement] ?? []
+        }
+        // Only fixed native command identifiers; never inspect nested History,
+        // bookmarks, or extension submenus.
+        for topLevel in children(menuBar).prefix(16) {
+            for menu in children(topLevel).prefix(1) {
+                for item in children(menu).prefix(80) where
+                    axStringAttribute("AXIdentifier", of: item) == "toggleFullScreen:" &&
+                    axBoolAttribute(kAXEnabledAttribute, of: item) == true {
+                    return item
+                }
+            }
+        }
+        return nil
+    }
+
     private func pressChromeFullScreenMenu(on window: AXUIElement, pid: pid_t) -> Bool {
         let application = AXUIElementCreateApplication(pid)
         guard let number = Self.axWindowNumber(of: window) else { return false }
@@ -2321,26 +2396,9 @@ final class WindowEnhancementController {
                   let focused = axElementAttribute(kAXFocusedWindowAttribute, of: application) else { return false }
             return exactPID(of: focused) == pid && Self.axWindowNumber(of: focused) == number
         }
-        guard stillTargetsWindow(), let menuBar = axElementAttribute(kAXMenuBarAttribute, of: application) else { return false }
-        func children(_ element: AXUIElement) -> [AXUIElement] {
-            var value: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
-            return value as? [AXUIElement] ?? []
-        }
-        // Read only top-level menu items, without labels or nested History,
-        // bookmarks or extension submenus. Chrome exposes its native
-        // selector as AXIdentifier; both alternate entries perform the same action.
-        for topLevel in children(menuBar).prefix(16) {
-            for menu in children(topLevel).prefix(1) {
-                for item in children(menu).prefix(80) {
-                    guard axStringAttribute("AXIdentifier", of: item) == "toggleFullScreen:",
-                          axBoolAttribute(kAXEnabledAttribute, of: item) == true else { continue }
-                    guard stillTargetsWindow() else { return false }
-                    return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
-                }
-            }
-        }
-        return false
+        guard stillTargetsWindow(), let item = chromeFullScreenMenuItem(application: application),
+              stillTargetsWindow() else { return false }
+        return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
     }
 
     private func reinforceFullScreenIntent(on window: AXUIElement) -> Bool {
