@@ -309,6 +309,11 @@ final class WindowEnhancementController {
     }
 
     func execute(targetID: String) {
+        if targetID == WindowQuickAction.nextDisplay.shortcutID || targetID == WindowQuickAction.previousDisplay.shortcutID {
+            WindowInteractionDiagnosticRecorder.shared.record(component: "chromeBaselineShortcut", event: "received",
+                metadata: ["target": .code(targetID),
+                           "frontmostPID": .integer(Int64(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0))])
+        }
         guard preferences.isEnabled else {
             feedback("窗口增强已关闭")
             return
@@ -2013,6 +2018,11 @@ final class WindowEnhancementController {
         originalWindowedFrame: CGRect?,
         generation: UInt64
     ) async -> WindowMutationCompletion {
+        WindowInteractionDiagnosticRecorder.shared.record(component: "chromeBaselineFailure", event: "recovery_started",
+            metadata: ["generation": .integer(Int64(clamping: generation)),
+                       "enterRequestRejected": .flag(reason.contains("安全进入全屏")),
+                       "transitionTimedOut": .flag(reason.contains("超时")),
+                       "stabilityFailure": .flag(reason.contains("未稳定"))])
         guard isWindowMutationCurrent(generation) else { return .unresolved }
         let restoreOutcome = await restoreOriginalFullScreen(
             identity: identity,
@@ -2309,6 +2319,12 @@ final class WindowEnhancementController {
     }
 
     private func pressChromeFullScreenMenu(on window: AXUIElement, pid: pid_t) -> Bool {
+        func trace(_ event: String) {
+            WindowInteractionDiagnosticRecorder.shared.record(component: "chromeBaselineMenu", event: event,
+                metadata: ["targetPID": .integer(Int64(pid)),
+                           "windowID": .integer(Int64(Self.axWindowNumber(of: window) ?? 0)),
+                           "frontmostPID": .integer(Int64(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0))])
+        }
         let application = AXUIElementCreateApplication(pid)
         guard let number = Self.axWindowNumber(of: window) else { return false }
         // App menus act on the focused window, unlike window-specific controls.
@@ -2318,7 +2334,7 @@ final class WindowEnhancementController {
                   let focused = axElementAttribute(kAXFocusedWindowAttribute, of: application) else { return false }
             return exactPID(of: focused) == pid && Self.axWindowNumber(of: focused) == number
         }
-        guard stillTargetsWindow(), let menuBar = axElementAttribute(kAXMenuBarAttribute, of: application) else { return false }
+        guard stillTargetsWindow(), let menuBar = axElementAttribute(kAXMenuBarAttribute, of: application) else { trace("focus_or_menu_unavailable"); return false }
         func children(_ element: AXUIElement) -> [AXUIElement] {
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
@@ -2332,11 +2348,14 @@ final class WindowEnhancementController {
                 for item in children(menu).prefix(80) {
                     guard axStringAttribute("AXIdentifier", of: item) == "toggleFullScreen:",
                           axBoolAttribute(kAXEnabledAttribute, of: item) == true else { continue }
-                    guard stillTargetsWindow() else { return false }
-                    return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+                    guard stillTargetsWindow() else { trace("focus_changed"); return false }
+                    let accepted = AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+                    trace(accepted ? "accepted" : "dispatch_error")
+                    return accepted
                 }
             }
         }
+        trace("enabled_selector_missing")
         return false
     }
 
