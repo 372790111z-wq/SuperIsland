@@ -133,3 +133,17 @@ Qoder CN、WorkBuddy、ZCode 均已收到真实桌面任务的官方 hook 事件
 新增KeepAwakeLidAuthorizationTests覆盖7种授权路径，与既有7项helper恢复回归一起14项通过，0失败；独立日志为build/KA1AuthorizationTests.noindex/test.log。测试使用注入closure，不注册真实服务、不打开系统设置、不改电源。Chrome全屏修复源码没有改动。本修正尚待重新打包安装后验证真正的系统注册结果；物理合盖仍未验收。
 
 本机SDK说明daemon需公证；Apple官方本机开发示例同时使用Apple签发的开发证书。当前候选为本机自签，codesign通过只证明自身完整性及自有XPC身份，不证明平台接受它。应先取得真实register的domain/code，再区分包装、系统批准、开发签名或发布公证问题。
+
+
+## 2026-10-22 本机系统注册与接电无外屏合盖验收
+
+候选20261022174144（源码567e60e）经用户明确授权、完整备份后已在本机macOS27.0.1安装。15项窗口增强偏好保持；Chrome修复没有改动。首次真正调用register后得到SMAppServiceErrorDomain代码1，同时状态成为requiresApproval；用户完成系统批准后，App显示合盖已就绪，系统daemon实际运行。运行进程精确路径为/Applications/SuperIsland.app/Contents/MacOS/KeepAwakeHelper；运行中与磁盘签名、identifier及证书leaf pin均核验一致。因此，本机自签包在本轮已获系统批准并运行，不能再把缺公证当作本机注册阻塞，也不据此宣称其他系统版本或正式分发条件已验收。
+
+在手动保持模式中，App显示合盖保持已开启，pmset读回SleepDisabled=1，并存在主进程的普通防空闲休眠断言。用户断开外接屏、保留AC电源，完成物理合盖/开盖。受控工作探针只记录时间、序号、机盖状态、在线外屏数量和系统休眠开关，不读取IDE正文。
+
+- 原始109条样本中，seq45–107连续63条同时满足机盖关闭、外屏数0、SleepDisabled=1：2026-10-22 18:08:11至18:13:29，持续318.1秒；前一条外屏缓存仍为1、后一条已开盖，均未计入。
+- wall/monotonic时钟和序号连续，最大采样间隔6.15秒；没有休眠造成的长间隔。对应pmset原始时间窗口没有Entering Sleep/Wake from事件。不是将分段或累计时长当作连续合盖。
+- 人工点击停止并恢复后，App显示已核对并释放合盖租约；SleepDisabled恢复为测试前0，PID44356的普通保持断言消失。总开关关闭，运行模式恢复自动，已授权helper保留就绪。15项窗口增强偏好再次比较未变。
+- 证据为build/KA1LidAcceptance/20261022-180419-probe下的samples.jsonl、acceptance.json、final-readback.json、pmset-log-during-probe.txt、assertions-after-stop.txt及query-receipt.json；安装/备份回执位于build/KA1Installation/20261022-174602。原始系统查询文件仅本机保留并限制权限。
+
+通过范围为本次接电、无外屏、受控任务合盖持续运行及人工停止后恢复SuperIsland自己的覆盖。系统仍有其他App的防休眠断言，不能声称Mac已自动休眠。真实IDE任务完成后的30秒自动释放、电池/过热保护、异常退出恢复和Mac mini仍待验证；没有据此将全部来源或整个功能标为完成。
