@@ -741,6 +741,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    static var managedSettingsWindow: NSWindow? { fallbackSettingsWindowController?.window }
+
     static func showSettingsWindow(initialPane: SettingsPane = .general) {
         // Avoid opening the SwiftUI Settings scene via AppKit selectors in menu-bar mode.
         // macOS may reject those calls with a "use SettingsLink" warning.
