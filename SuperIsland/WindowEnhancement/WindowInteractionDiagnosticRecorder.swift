@@ -110,7 +110,9 @@ final class WindowInteractionDiagnosticRecorder: @unchecked Sendable {
         event: String,
         metadata: [String: WindowInteractionDiagnosticValue] = [:]
     ) {
-#if DEBUG
+#if !DEBUG
+        guard ["fullScreenDisplayMove", "chromeBaselineMenu", "chromeBaselineFailure", "chromeBaselineProbe", "chromeBaselineShortcut"].contains(component) else { return }
+#endif
         guard WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: bundleIdentifier),
               let fileURL, metadata.count <= 16,
               metadata.allSatisfy({
@@ -156,7 +158,6 @@ final class WindowInteractionDiagnosticRecorder: @unchecked Sendable {
                 // Diagnostics must not affect preview or input availability.
             }
         }
-#endif
     }
 
     /// A barrier for deterministic readback; never used from an input callback.

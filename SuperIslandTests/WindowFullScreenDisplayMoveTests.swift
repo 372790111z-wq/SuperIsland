@@ -133,6 +133,100 @@ final class WindowFullScreenDisplayMoveTests: XCTestCase {
         XCTAssertEqual(stillOversized.outcome, .timedOut)
     }
 
+    func testChromeEnterAndExitUseOnlyApplicationMenu() {
+        for bundle in ["com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.canary"] {
+            for desired in [false, true] {
+                var presses = 0
+                XCTAssertTrue(WindowFullScreenRequest.apply(
+                    current: !desired, desired: desired, bundleIdentifier: bundle,
+                    attributeIsSettable: { XCTFail("Chrome must not use the direct setter"); return true },
+                    setAttribute: { XCTFail("Chrome setter caused native abort"); return true },
+                    pressButton: { XCTFail("Chrome must not use the green window button"); return true },
+                    pressApplicationMenu: { presses += 1; return true }))
+                XCTAssertEqual(presses, 1)
+            }
+        }
+    }
+
+    func testChromeFailedMenuDoesNotRetryThroughUnsafeControls() {
+        var presses = 0
+        XCTAssertFalse(WindowFullScreenRequest.apply(
+            current: true, desired: false, bundleIdentifier: "com.google.Chrome",
+            attributeIsSettable: { XCTFail("No unsafe fallback"); return true },
+            setAttribute: { XCTFail("No unsafe fallback"); return true },
+            pressButton: { XCTFail("No unsafe button fallback"); return true },
+            pressApplicationMenu: { presses += 1; return false }))
+        XCTAssertEqual(presses, 1)
+    }
+
+    func testRecoveryDoesNotToggleAnAlreadyFullScreenWindow() {
+        XCTAssertTrue(WindowFullScreenRequest.apply(
+            current: true, desired: true, bundleIdentifier: "com.google.Chrome",
+            attributeIsSettable: { XCTFail("Already at requested state"); return true },
+            setAttribute: { XCTFail("Already at requested state"); return true },
+            pressButton: { XCTFail("No green button"); return true },
+            pressApplicationMenu: { XCTFail("Would exit fullscreen during recovery"); return true }))
+    }
+
+    func testUnknownStateCannotDispatchAToggle() {
+        XCTAssertFalse(WindowFullScreenRequest.apply(
+            current: nil, desired: false, bundleIdentifier: "com.google.Chrome",
+            attributeIsSettable: { XCTFail("Unknown current state"); return true },
+            setAttribute: { XCTFail("Unknown current state"); return true },
+            pressButton: { XCTFail("Unknown current state"); return true },
+            pressApplicationMenu: { XCTFail("Unknown current state"); return true }))
+    }
+
+    func testOtherAppsRetainTheirExistingAttributePath() {
+        var writes = 0
+        XCTAssertTrue(WindowFullScreenRequest.apply(
+            current: true, desired: false, bundleIdentifier: "com.apple.TextEdit",
+            attributeIsSettable: { true },
+            setAttribute: { writes += 1; return true },
+            pressButton: { XCTFail("Preserve other apps' existing behavior"); return true }))
+        XCTAssertEqual(writes, 1)
+    }
+
+    func testStableAXPositionWaitsForNativeSpaceAndWindowServerFrame() async {
+        let result = await run { time in
+            var value = self.observation()
+            value.nativeStateReady = time >= 0.64
+            value.nativeSpaceID = time >= 0.64 ? 642 : 1
+            return value
+        }
+        XCTAssertEqual(result.outcome, .ready)
+        XCTAssertGreaterThanOrEqual(result.elapsed, 0.64 + Readiness.preparationQuietDuration)
+    }
+
+    func testUnknownNativeStateNeverAdmitsAFullscreenCommand() async {
+        let result = await run { _ in
+            var value = self.observation()
+            value.nativeStateReady = false
+            return value
+        }
+        XCTAssertEqual(result.outcome, .timedOut)
+    }
+
+    func testChangingNativeSpaceRestartsQuietIntervalEvenWithIdenticalGeometry() async {
+        let result = await run { time in
+            var value = self.observation()
+            value.nativeSpaceID = time < 0.24 ? 1 : 642
+            return value
+        }
+        XCTAssertEqual(result.outcome, .ready)
+        XCTAssertGreaterThanOrEqual(result.elapsed, 0.24 + Readiness.preparationQuietDuration)
+    }
+
+    func testFullscreenAXFlagOnOrdinaryDesktopCannotPassFinalVerification() async {
+        let result = await run(fullScreen: true, finalStage: true) { _ in
+            var value = self.observation(fullScreen: true, frame: self.targetBounds)
+            value.nativeStateReady = false
+            value.nativeSpaceID = 642
+            return value
+        }
+        XCTAssertEqual(result.outcome, .timedOut)
+    }
+
     private func observation(
         fullScreen: Bool = false,
         frame: CGRect? = nil,
