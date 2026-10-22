@@ -63,6 +63,13 @@ struct WindowInteractionDiagnosticLimiter {
     }
 }
 
+enum WindowInteractionDiagnosticAdmission {
+    static func allows(bundleIdentifier: String?, component: String, debugBuild: Bool) -> Bool {
+        guard WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: bundleIdentifier) else { return false }
+        return debugBuild || component == "fullScreenDisplayMove" || component == "chromeFullScreenRequest"
+    }
+}
+
 final class WindowInteractionDiagnosticRecorder: @unchecked Sendable {
     static let shared = WindowInteractionDiagnosticRecorder()
 
@@ -111,11 +118,16 @@ final class WindowInteractionDiagnosticRecorder: @unchecked Sendable {
         metadata: [String: WindowInteractionDiagnosticValue] = [:]
     ) {
 #if DEBUG
-        guard WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: bundleIdentifier),
-              let fileURL, metadata.count <= 16,
-              metadata.allSatisfy({
-                  WindowInteractionDiagnosticLimiter.isStateCode($0.key) && $0.value.isAllowed
-              }) else { return }
+        let debugBuild = true
+#else
+        let debugBuild = false
+#endif
+        guard WindowInteractionDiagnosticAdmission.allows(
+            bundleIdentifier: bundleIdentifier, component: component, debugBuild: debugBuild
+        ), let fileURL, metadata.count <= 16,
+           metadata.allSatisfy({
+               WindowInteractionDiagnosticLimiter.isStateCode($0.key) && $0.value.isAllowed
+           }) else { return }
         let admitted = lock.withLock {
             limiter.admit(component: component, event: event, now: DispatchTime.now().uptimeNanoseconds)
         }
@@ -156,7 +168,6 @@ final class WindowInteractionDiagnosticRecorder: @unchecked Sendable {
                 // Diagnostics must not affect preview or input availability.
             }
         }
-#endif
     }
 
     /// A barrier for deterministic readback; never used from an input callback.
