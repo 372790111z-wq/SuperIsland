@@ -187,6 +187,46 @@ final class WindowFullScreenDisplayMoveTests: XCTestCase {
         XCTAssertEqual(writes, 1)
     }
 
+    func testStableAXPositionWaitsForNativeSpaceAndWindowServerFrame() async {
+        let result = await run { time in
+            var value = self.observation()
+            value.nativeStateReady = time >= 0.64
+            value.nativeSpaceID = time >= 0.64 ? 642 : 1
+            return value
+        }
+        XCTAssertEqual(result.outcome, .ready)
+        XCTAssertGreaterThanOrEqual(result.elapsed, 0.64 + Readiness.preparationQuietDuration)
+    }
+
+    func testUnknownNativeStateNeverAdmitsAFullscreenCommand() async {
+        let result = await run { _ in
+            var value = self.observation()
+            value.nativeStateReady = false
+            return value
+        }
+        XCTAssertEqual(result.outcome, .timedOut)
+    }
+
+    func testChangingNativeSpaceRestartsQuietIntervalEvenWithIdenticalGeometry() async {
+        let result = await run { time in
+            var value = self.observation()
+            value.nativeSpaceID = time < 0.24 ? 1 : 642
+            return value
+        }
+        XCTAssertEqual(result.outcome, .ready)
+        XCTAssertGreaterThanOrEqual(result.elapsed, 0.24 + Readiness.preparationQuietDuration)
+    }
+
+    func testFullscreenAXFlagOnOrdinaryDesktopCannotPassFinalVerification() async {
+        let result = await run(fullScreen: true, finalStage: true) { _ in
+            var value = self.observation(fullScreen: true, frame: self.targetBounds)
+            value.nativeStateReady = false
+            value.nativeSpaceID = 642
+            return value
+        }
+        XCTAssertEqual(result.outcome, .timedOut)
+    }
+
     private func observation(
         fullScreen: Bool = false,
         frame: CGRect? = nil,

@@ -44,6 +44,8 @@ enum WindowFullScreenDisplayReadiness {
         let displayID: CGDirectDisplayID?
         let frame: CGRect
         let isActionable: Bool
+        var nativeStateReady = true
+        var nativeSpaceID: UInt64? = nil
     }
 
     enum PlacementRequirement {
@@ -78,6 +80,7 @@ enum WindowFullScreenDisplayReadiness {
         let deadline = now() + maximumDuration
         var anchorFrame: CGRect?
         var quietSince: TimeInterval?
+        var anchorSpaceID: UInt64?
         func matches(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
             abs(lhs.minX - rhs.minX) <= tolerance &&
                 abs(lhs.minY - rhs.minY) <= tolerance &&
@@ -103,7 +106,7 @@ enum WindowFullScreenDisplayReadiness {
             guard !shouldRecover() else { return .recoveryRequested }
             let bounds = targetBounds()
             guard placement == .stableWindowed || bounds != nil else { return .targetUnavailable }
-            if let current = observe(), current.isActionable,
+            if let current = observe(), current.isActionable, current.nativeStateReady,
                current.isFullScreen == expectedFullScreen,
                current.frame.width > 0, current.frame.height > 0,
                current.frame.minX.isFinite, current.frame.minY.isFinite,
@@ -111,8 +114,9 @@ enum WindowFullScreenDisplayReadiness {
                placementMatches(current, bounds: bounds) {
                 // Compare with the start of the quiet interval, not just the
                 // previous sample: slow cumulative drift must also restart it.
-                if anchorFrame.map({ matches(current.frame, $0) }) != true {
+                if anchorFrame.map({ matches(current.frame, $0) }) != true || anchorSpaceID != current.nativeSpaceID {
                     anchorFrame = current.frame
+                    anchorSpaceID = current.nativeSpaceID
                     quietSince = now()
                 }
                 if let quietSince, now() - quietSince >= quietDuration {
@@ -120,6 +124,7 @@ enum WindowFullScreenDisplayReadiness {
                 }
             } else {
                 anchorFrame = nil
+                anchorSpaceID = nil
                 quietSince = nil
             }
             guard await pause() else { return .interrupted }
@@ -1781,6 +1786,13 @@ final class WindowEnhancementController {
         stage: String
     ) async -> WindowStabilityOutcome {
         var preferred = preferredElement
+        let bundleID = NSRunningApplication(processIdentifier: identity.processIdentifier)?.bundleIdentifier
+        let requiresNativeState = bundleID == "com.google.Chrome" || bundleID?.hasPrefix("com.google.Chrome.") == true
+        let displayUUID = CGDisplayCreateUUIDFromDisplayID(expectedDisplayID).map {
+            CFUUIDCreateString(kCFAllocatorDefault, $0.takeRetainedValue()) as String
+        }
+        var lastNativeReady: Bool?
+        var lastNativeSpaceID: UInt64?
         recordFullScreenDisplayStage(
             "\(stage)_wait_start", identity: identity, window: preferred,
             sourceDisplayID: sourceDisplayID, targetDisplayID: expectedDisplayID,
@@ -1802,17 +1814,30 @@ final class WindowEnhancementController {
                       let fullScreen = self.axBoolAttribute("AXFullScreen", of: window),
                       let currentFrame = self.frame(of: window) else { return nil }
                 preferred = window
+                var nativeReady = true
+                var nativeSpaceID: UInt64?
+                if requiresNativeState {
+                    let state = self.fullScreenNativeState(identity: identity, axFrame: currentFrame)
+                    nativeSpaceID = state.snapshot?.spaceID
+                    nativeReady = state.frameMatches &&
+                        (placement == .stableWindowed || displayUUID != nil) &&
+                        state.snapshot?.matches(fullScreen: expectedFullScreen,
+                            displayIdentifier: placement == .stableWindowed ? nil : displayUUID) == true
+                    lastNativeReady = nativeReady
+                    lastNativeSpaceID = nativeSpaceID
+                }
                 return .init(
                     isFullScreen: fullScreen,
                     displayID: self.displayID(forAXFrame: currentFrame), frame: currentFrame,
-                    isActionable: fullScreen || self.windowSupports(window, requirement: .move)
+                    isActionable: fullScreen || self.windowSupports(window, requirement: .move),
+                    nativeStateReady: nativeReady, nativeSpaceID: nativeSpaceID
                 )
             }
         )
         recordFullScreenDisplayStage(
             "\(stage)_wait_\(result.rawValue)", identity: identity, window: preferred,
             sourceDisplayID: sourceDisplayID, targetDisplayID: expectedDisplayID,
-            generation: generation
+            generation: generation, nativeReady: lastNativeReady, nativeSpaceID: lastNativeSpaceID
         )
         switch result {
         case .ready: return .stable(preferred)
@@ -1822,13 +1847,29 @@ final class WindowEnhancementController {
         }
     }
 
+    private func fullScreenNativeState(
+        identity: WindowIdentity, axFrame: CGRect
+    ) -> (snapshot: WindowFullScreenSpaceSnapshot?, frameMatches: Bool) {
+        guard let number = identity.windowNumber, let windowID = CGWindowID(exactly: number),
+              let rows = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+              rows.count == 1, let row = rows.first,
+              (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == identity.processIdentifier,
+              let bounds = row[kCGWindowBounds as String] as? NSDictionary,
+              let nativeFrame = CGRect(dictionaryRepresentation: bounds as CFDictionary)
+        else { return (nil, false) }
+        return (WindowServerInventoryService.shared.fullScreenSpaceSnapshot(for: windowID),
+                frameMatches(nativeFrame, axFrame))
+    }
+
     private func recordFullScreenDisplayStage(
         _ event: String,
         identity: WindowIdentity,
         window: AXUIElement,
         sourceDisplayID: CGDirectDisplayID,
         targetDisplayID: CGDirectDisplayID,
-        generation: UInt64
+        generation: UInt64,
+        nativeReady: Bool? = nil,
+        nativeSpaceID: UInt64? = nil
     ) {
         var metadata: [String: WindowInteractionDiagnosticValue] = [
             "targetPID": .integer(Int64(identity.processIdentifier)),
@@ -1837,6 +1878,8 @@ final class WindowEnhancementController {
             "sourceDisplayID": .integer(Int64(sourceDisplayID)),
             "targetDisplayID": .integer(Int64(targetDisplayID)),
         ]
+        if let nativeReady { metadata["nativeReady"] = .flag(nativeReady) }
+        if let nativeSpaceID { metadata["nativeSpaceID"] = .integer(Int64(clamping: nativeSpaceID)) }
         if let fullScreen = axBoolAttribute("AXFullScreen", of: window) {
             metadata["fullScreen"] = .flag(fullScreen)
         }
