@@ -1,6 +1,6 @@
 # KA1 保持唤醒：实施与验证记录
 
-> 2026-10-22 当前进度：长任务策略已修正，本机已完成辅助程序授权及接电、无外屏的手动合盖连续运行验收。Codex 接入新增实现与隔离验证见末节；当前桌面端未提供可连接的官方本机接口，不能称正在运行的桌面任务已自动接管。下方保留按阶段的历史证据，早期状态由后续对应日期记录取代。
+> 2026-10-22 当前进度：长任务策略已修正，本机已完成辅助程序授权及接电、无外屏的手动合盖连续运行验收。Codex 桌面 Local/Worktree 的官方 hooks 接入与跨机环境发现已补入本轮候选，仍需真实任务验收；现装 20261022195412 尚未包含本轮代码，不能称正在运行的桌面任务已自动接管。下方保留按阶段的历史证据，早期状态由后续对应日期记录取代。
 
 > 最新决定：用户要求先不接入 Kimi Code。桌面/CLI 两项暂缓，实际测试连接已断开；源码禁止接入、启动恢复及轮询。保留以下历史证据，停止 Kimi 适配和验收；其余来源范围不变。当前标注归档 20261022。
 
@@ -176,3 +176,34 @@ Qoder CN、WorkBuddy、ZCode 均已收到真实桌面任务的官方 hook 事件
 - 正向实证仅覆盖真实 CLI 完成通知链路。用户实际环境的开始、等待、压缩及完成后的系统自动释放仍待验收；普通 CLI 与共享后端、桌面本地与云端须分别验证。原 27 条目、Kimi 暂缓和其他来源边界不变，PRD v0.4 与标注全文未改，整个 KA1 仍是实施中。
 
 契约依据：[Codex hooks](https://learn.chatgpt.com/docs/hooks)、[完成通知](https://learn.chatgpt.com/docs/notifications)、[App Server](https://learn.chatgpt.com/docs/app-server)及本机 CLI 导出的公开 schema。实际支持以运行时能力和有效事件为准，不锁私有 UI 或内部数据库。
+
+
+## 2026-10-22 桌面本地接入与跨 Mac 测试包
+
+用户要求继续完成 Codex 接入并可供其他 Mac 安装使用；暂没有 Developer ID，已明确选择先完成通用代码和测试包。本轮仍遵循已确认 F05/F06 的主动接入、信任和系统授权规则，不把“安装后可用”解释为静默改配置或绕过批准。
+
+### 实现
+
+- 按官方签名、bundle ID、已运行 App 和 LaunchServices 查找 Codex，支持 App 改名、其他安装目录、用户 Applications、GUI PATH 未包含 Homebrew 的情况。只从已验证桌面子进程提取 HOME/CODEX_HOME；不保存 PID、提示词、令牌或其他环境值。多个实际 home 冲突时明确拒绝任选。
+- CLI 和桌面 Local/Worktree 使用同一份官方 hooks/notify 配置和私有 v2 路由收据；事件工具根据真实签名父进程角色只选择一个来源凭据。支持 v1 CLI 窄迁移，断开一项保留另一项，最后一项才清理自有 hook/恢复 notify；Interrupt 超时修正为 3 秒。保留原禁用状态、第三方配置、备份和失败恢复，不静默信任。
+- 接入确认冻结环境与通道；不能在只读确认后因 socket 消失转为写配置。新桌面接入默认 hooks；旧 RPC 通道按保存 profile 读取同一服务的全部 loaded 任务，不凭历史 source 字段伪造桌面归属。同一真实 home 的 RPC 与来源 hooks 互斥，防止 CLI 任务重复计数/提醒，包含符号链接别名判断。
+- 保存实际配置 home、CLI 和 socket 归属。重启只重建自有凭据，不自动重写 Codex；接入事务中途崩溃留下的孤立意图变为可重试清理。卸载先释放该来源保持再运行外部编辑器；编辑器被移动时只更换已验签工具，不改变待清理 home。
+- 新增独立原生测试打包器 `scripts/package-keep-awake-test.py`，不依赖本机 Applications 的参考安装；核验源码回执、架构、加载路径、固定组件身份、同证书和权限，ZIP 解包回验。测试包不需要接收者的 Python/Xcode/Homebrew 来运行原生保持功能，不复制本机私钥，不自动安装或修改系统信任。
+
+### 本轮实证
+
+- `build/KA1CodexPortableValidation/native-tests.log`：230 项，2 项 Kimi 暂缓跳过，实际 228 项通过，0 失败。覆盖环境发现、配置共享/迁移/撤销、配置位置绑定、崩溃意图恢复、确认模式冻结、别名互斥，以及既有长任务/helper/Chrome 回归。
+- `build/KA1TestPackagerValidation.noindex/pure-validation.log`：15 项打包政策测试通过，0 失败；检查测试/正式回调隔离、身份、架构与原生依赖，不执行系统授权或安装。
+- `build/KA1CodexRouterRuntime.noindex/receipt.json`：实际官方 CLI 0.163.0-alpha.10.2 通过回环固定服务运行，外层禁止非回环网络；两个来源同时登记，CLI 仅收到 1 条匿名完成事件，桌面收件箱 0 条，HMAC 正确，CLI exit 0。没有安装 hooks、没有信任绕过、没有使用真实 home/账号/外网模型。这不是桌面真实任务验收。
+- 新隔离原生预览实际显示 27 来源、Codex CLI/桌面两项接入入口、默认总开关关闭；桌面自动环境发现成功，确认说明为本地 hooks、信任及 Cloud 边界；点击取消，未写真实配置，预览正常退出。记录 `build/KA1CodexPortableValidation/ui-readback.json`。原安装版和 Chrome 未被替换/干扰。
+- PRD v0.4、当前 20261022 annotation 全文及历史 HTML 均不变；本轮为实现修正，整个 KA1 维持实施中。
+
+### 不得越过的验收边界
+
+目前只能准备原生保持唤醒的 arm64 测试包；未公证，接收机仍需 macOS 正常批准。x86_64 入口会严格检查对应实际产物，未产出/未实测 Intel 或 Universal。未捆绑 Node，不据此宣称所有 JS 扩展跨机可用。用户已明确先做这类测试包，不能把它当正式公开发行版本。
+
+桌面 Local/Worktree 必须实际审阅信任并在本机新任务验证开始、等待、完成和30秒释放；接入前旧任务不能补放开始，Cloud/Work Cloud 不运行本地 command hooks 的场景仍未覆盖。CLI 连接没有可可靠客户端归属的 headless/shared daemon 时也会拒绝事件；不得将直连 CLI 的完成夹具提升为所有 CLI 支持。缺失或未知结束信号继续保持，不伪造完成。
+
+本轮原生工具明确拒绝控制 `com.openai.codex`；未换后端绕过。REA 静态检查因 app.asar 声明/实际 unpacked member hash 不一致停止，未绕过完整性检查，不能据此推断本版桌面内部行为。真实 Codex 的 hook 信任操作需要用户在产品中完成；新候选安装需按具体产物授权，另机与合盖自动完成仍分别验收。
+
+依据：[官方 hooks](https://learn.chatgpt.com/docs/hooks)、[本地执行模式](https://learn.chatgpt.com/docs/modes)、[公开 App Server](https://learn.chatgpt.com/docs/app-server)。公开传输不能替代当前桌面没有开放的内部连接；本地 hooks 路线与既有 RPC 能力分别描述。

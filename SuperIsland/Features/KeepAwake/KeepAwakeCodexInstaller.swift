@@ -26,10 +26,14 @@ enum KeepAwakeCodexInstaller {
     }
     typealias ConfigEditor = (Data, NotifyMutation) throws -> EditedConfig
     private struct Receipt: Codable {
-        var version = 1
+        var version: Int
         var notify: [String]
         var previousNotify: [String]?
         var hookCommand: String
+        var sources: [String: String]?
+        var sourceCredentials: [String: String] {
+            version == 1 ? ["codex-cli": notify[3]] : sources ?? [:]
+        }
     }
     private struct Change: Codable {
         var name: String
@@ -44,55 +48,83 @@ enum KeepAwakeCodexInstaller {
     private static let stateName = ".superisland-keep-awake"
     private static let receiptName = "receipt.json"
     private static let maximumFileSize = 1_048_576
-    private static func codexRoot(home: URL) -> URL {
-        home == FileManager.default.homeDirectoryForCurrentUser ? KeepAwakeCodexRPC.codexHome : home.appendingPathComponent(".codex", isDirectory: true)
+    private static func codexRoot(home: URL, codexHome: URL? = nil) -> URL {
+        codexHome ?? (home == FileManager.default.homeDirectoryForCurrentUser ? KeepAwakeCodexRPC.codexHome : home.appendingPathComponent(".codex", isDirectory: true))
     }
-    static func configurationURL(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
-        codexRoot(home: home).appendingPathComponent("config.toml")
+    static func configurationURL(home: URL = FileManager.default.homeDirectoryForCurrentUser, codexHome: URL? = nil) -> URL {
+        codexRoot(home: home, codexHome: codexHome).appendingPathComponent("config.toml")
     }
 
     static func install(source: KeepAwakeSource, credential: URL, home: URL, tool: URL,
+                        codexHome: URL? = nil, cli: URL? = nil,
                         editor: ConfigEditor? = nil) throws {
-        guard source.id == "codex-cli", source.hookFamily == "codex",
+        guard KeepAwakeHookContract.codexSources.contains(source.id), source.hookFamily == "codex",
+              credential.isFileURL, credential.path.utf8.count <= 4096,
               FileManager.default.isExecutableFile(atPath: tool.path) else { throw Failure.unavailable }
-        let root = codexRoot(home: home)
+        let root = codexRoot(home: home, codexHome: codexHome)
         try prepareRoot(root)
         let lock = try acquireLock(root: root)
         defer { flock(lock, LOCK_UN); close(lock) }
         try recover(root: root)
         let beforeConfig = try read(root.appendingPathComponent("config.toml"))
         let beforeHooks = try read(root.appendingPathComponent("hooks.json"))
-        let beforeReceipt = try read(destination(receiptName, root: root))
-        let receipt = try decodeReceipt(beforeReceipt)
-        let notify = [tool.path, "--superisland-ka1-codex-notify", source.id, credential.path]
-        let command = [KeepAwakeHookInstaller.shellQuote(tool.path), "--superisland-ka1", source.id,
-                       KeepAwakeHookInstaller.shellQuote(credential.path)].joined(separator: " ")
-        let edited = try (editor ?? officialEdit)(beforeConfig ?? Data(), .install(owned: notify, replacingOwned: receipt?.notify))
-        let hooks = try editHooks(beforeHooks, removing: receipt?.hookCommand == command ? nil : receipt?.hookCommand,
+        let receiptURL = destination(receiptName, root: root)
+        let beforeReceipt = try read(receiptURL)
+        let receipt = try decodeReceipt(beforeReceipt, location: receiptURL)
+        if let existing = receipt?.sourceCredentials[source.id], existing != credential.path,
+           receipt?.notify.first != tool.path { throw Failure.conflict }
+        let notify = [tool.path, "--superisland-ka1-codex-notify-auto", receiptURL.path]
+        let command = [KeepAwakeHookInstaller.shellQuote(tool.path), "--superisland-ka1-codex-hook-auto",
+                       KeepAwakeHookInstaller.shellQuote(receiptURL.path)].joined(separator: " ")
+        let configEditor = editor ?? { data, mutation in
+            try editWithCLI(data, mutation, cli: cli)
+        }
+        let edited = try configEditor(beforeConfig ?? Data(), .install(owned: notify, replacingOwned: receipt?.notify))
+        let hooks = try editHooks(beforeHooks, removing: receipt?.hookCommand,
                                   adding: command)
         // nil is meaningful: an earlier install may have created notify itself.
         let baseline = receipt.map(\.previousNotify) ?? (edited.previousNotify == notify ? nil : edited.previousNotify)
-        let saved = Receipt(notify: notify, previousNotify: baseline, hookCommand: command)
+        var sources = receipt?.sourceCredentials ?? [:]
+        sources[source.id] = credential.path
+        let saved = Receipt(version: 2, notify: notify, previousNotify: baseline, hookCommand: command, sources: sources)
         try commit(root: root, changes: [
             .init(name: "config.toml", before: beforeConfig, after: edited.data),
             .init(name: "hooks.json", before: beforeHooks, after: hooks),
-            .init(name: receiptName, before: beforeReceipt, after: try JSONEncoder().encode(saved))
+            .init(name: receiptName, before: beforeReceipt, after: try encodeReceipt(saved))
         ])
     }
 
-    static func uninstall(source: KeepAwakeSource, home: URL, editor: ConfigEditor? = nil) throws {
-        guard source.id == "codex-cli", source.hookFamily == "codex" else { throw Failure.unavailable }
-        let root = codexRoot(home: home)
+    static func uninstall(source: KeepAwakeSource, home: URL, credential: URL? = nil, codexHome: URL? = nil,
+                          cli: URL? = nil, editor: ConfigEditor? = nil) throws {
+        guard KeepAwakeHookContract.codexSources.contains(source.id), source.hookFamily == "codex" else { throw Failure.unavailable }
+        let root = codexRoot(home: home, codexHome: codexHome)
         guard FileManager.default.fileExists(atPath: root.path) else { return }
         try prepareRoot(root)
         let lock = try acquireLock(root: root)
         defer { flock(lock, LOCK_UN); close(lock) }
         try recover(root: root)
-        let beforeReceipt = try read(destination(receiptName, root: root))
-        guard let receipt = try decodeReceipt(beforeReceipt) else { return }
+        let receiptURL = destination(receiptName, root: root)
+        let beforeReceipt = try read(receiptURL)
+        guard var receipt = try decodeReceipt(beforeReceipt, location: receiptURL),
+              receipt.sourceCredentials[source.id] != nil else { return }
+        if let credential, receipt.sourceCredentials[source.id] != credential.path { throw Failure.conflict }
+        var sources = receipt.sourceCredentials
+        sources.removeValue(forKey: source.id)
+        if !sources.isEmpty {
+            // Shared commands and their trust definition stay unchanged while
+            // either client remains connected. Only revoke this routing entry.
+            receipt.sources = sources
+            try commit(root: root, changes: [
+                .init(name: receiptName, before: beforeReceipt, after: try encodeReceipt(receipt))
+            ])
+            return
+        }
         let beforeConfig = try read(root.appendingPathComponent("config.toml"))
         let beforeHooks = try read(root.appendingPathComponent("hooks.json"))
-        let edited = try (editor ?? officialEdit)(beforeConfig ?? Data(), .remove(owned: receipt.notify, restore: receipt.previousNotify))
+        let configEditor = editor ?? { data, mutation in
+            try editWithCLI(data, mutation, cli: cli)
+        }
+        let edited = try configEditor(beforeConfig ?? Data(), .remove(owned: receipt.notify, restore: receipt.previousNotify))
         let hooks = try editHooks(beforeHooks, removing: receipt.hookCommand, adding: nil)
         try commit(root: root, changes: [
             .init(name: "config.toml", before: beforeConfig, after: edited.data),
@@ -115,6 +147,13 @@ enum KeepAwakeCodexInstaller {
     static func officialEdit(_ original: Data, _ mutation: NotifyMutation) throws -> EditedConfig {
         guard let cli = KeepAwakeCodexRPC.executableURL() else { throw Failure.unavailable }
         return try officialEdit(original, mutation, executable: cli)
+    }
+    private static func editWithCLI(_ original: Data, _ mutation: NotifyMutation, cli: URL?) throws -> EditedConfig {
+        if let cli {
+            guard KeepAwakeCodexRPC.isOfficialExecutable(cli) else { throw Failure.unavailable }
+            return try officialEdit(original, mutation, executable: cli)
+        }
+        return try officialEdit(original, mutation)
     }
     static func officialEdit(_ original: Data, _ mutation: NotifyMutation, executable: URL) throws -> EditedConfig {
         let fm = FileManager.default
@@ -156,14 +195,29 @@ enum KeepAwakeCodexInstaller {
         return EditedConfig(data: edited, previousNotify: current)
     }
 
-    private static func decodeReceipt(_ data: Data?) throws -> Receipt? {
+    private static func decodeReceipt(_ data: Data?, location: URL) throws -> Receipt? {
         guard let data else { return nil }
-        guard let receipt = try? JSONDecoder().decode(Receipt.self, from: data), receipt.version == 1,
-              receipt.notify.count == 4, receipt.notify[1] == "--superisland-ka1-codex-notify",
-              receipt.notify[2] == "codex-cli", receipt.notify[0].hasPrefix("/"), receipt.notify[3].hasPrefix("/"),
-              receipt.hookCommand == [KeepAwakeHookInstaller.shellQuote(receipt.notify[0]), "--superisland-ka1", "codex-cli",
-                                      KeepAwakeHookInstaller.shellQuote(receipt.notify[3])].joined(separator: " ") else { throw Failure.conflict }
+        guard let receipt = try? JSONDecoder().decode(Receipt.self, from: data) else { throw Failure.conflict }
+        if receipt.version == 1 {
+            guard receipt.notify.count == 4, receipt.notify[1] == "--superisland-ka1-codex-notify",
+                  receipt.notify[2] == "codex-cli", receipt.notify[0].hasPrefix("/"), receipt.notify[3].hasPrefix("/"),
+                  receipt.hookCommand == [KeepAwakeHookInstaller.shellQuote(receipt.notify[0]), "--superisland-ka1", "codex-cli",
+                                          KeepAwakeHookInstaller.shellQuote(receipt.notify[3])].joined(separator: " ") else { throw Failure.conflict }
+        } else {
+            guard receipt.version == 2, receipt.notify.count == 3,
+                  receipt.notify[0].hasPrefix("/"), receipt.notify[1] == "--superisland-ka1-codex-notify-auto",
+                  receipt.notify[2] == location.path,
+                  let router = try? JSONDecoder().decode(KeepAwakeHookContract.CodexRouter.self, from: data),
+                  receipt.sourceCredentials.keys.allSatisfy({ router.credentialPath(source: $0) != nil }),
+                  !receipt.sourceCredentials.isEmpty,
+                  receipt.hookCommand == [KeepAwakeHookInstaller.shellQuote(receipt.notify[0]), "--superisland-ka1-codex-hook-auto",
+                                          KeepAwakeHookInstaller.shellQuote(location.path)].joined(separator: " ") else { throw Failure.conflict }
+        }
         return receipt
+    }
+    private static func encodeReceipt(_ receipt: Receipt) throws -> Data {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(receipt)
     }
     private static func editHooks(_ data: Data?, removing: String?, adding: String?) throws -> Data? {
         guard data != nil || adding != nil else { return nil }
@@ -180,8 +234,16 @@ enum KeepAwakeCodexInstaller {
             if let removing {
                 hooks[event] = try groups.compactMap { group -> [String: Any]? in
                     guard let handlers = group["hooks"] as? [[String: Any]] else { throw Failure.invalidConfiguration }
-                    let kept = handlers.filter { !($0["type"] as? String == "command" && $0["command"] as? String == removing) }
-                    if kept.count == handlers.count { return group }
+                    guard handlers.contains(where: { $0["type"] as? String == "command" && $0["command"] as? String == removing }) else { return group }
+                    let kept = handlers.compactMap { handler -> [String: Any]? in
+                        guard handler["type"] as? String == "command", handler["command"] as? String == removing else { return handler }
+                        guard let adding else { return nil }
+                        // Migration changes the owned command in place, keeping
+                        // group/handler disables and third-party fields intact.
+                        var copy = handler; copy["command"] = adding
+                        if event == "Interrupt" { copy["timeout"] = 3 }
+                        return copy
+                    }
                     guard !kept.isEmpty else { return nil }
                     var copy = group; copy["hooks"] = kept; return copy
                 }
@@ -194,7 +256,7 @@ enum KeepAwakeCodexInstaller {
                     (group["hooks"] as? [[String: Any]])?.contains { $0["type"] as? String == "command" && $0["command"] as? String == adding } == true
                 }
                 // Preserve a user's disabled/edited copy instead of enabling it.
-                if !exists { groups.append(["matcher": "", "hooks": [["type": "command", "command": adding, "timeout": 5]]]) }
+                if !exists { groups.append(["matcher": "", "hooks": [["type": "command", "command": adding, "timeout": event == "Interrupt" ? 3 : 5]]]) }
                 hooks[event] = groups
             }
         }
@@ -204,6 +266,7 @@ enum KeepAwakeCodexInstaller {
 
     private static func prepareRoot(_ root: URL) throws {
         let fm = FileManager.default
+        guard root.isFileURL, root.path.hasPrefix("/"), !root.path.utf8.contains(0) else { throw Failure.invalidConfiguration }
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let attrs = try fm.attributesOfItem(atPath: root.path)
         guard attrs[.type] as? FileAttributeType == .typeDirectory,

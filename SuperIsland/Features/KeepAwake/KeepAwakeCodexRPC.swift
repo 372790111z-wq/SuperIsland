@@ -1,12 +1,11 @@
 import Foundation
 import Darwin
-import Security
 
 /// A read-only client of an already running, same-user Codex shared service.
 /// Never starts a daemon, resumes a thread, submits a prompt, or reads items.
 enum KeepAwakeCodexRPC {
     enum Failure: LocalizedError {
-        case unavailable, invalidEndpoint, timeout, invalidResponse, capacity, incompatible
+        case unavailable, invalidEndpoint, timeout, invalidResponse, capacity, incompatible, ambiguousEnvironment, profileMismatch
         var errorDescription: String? {
             switch self {
             case .unavailable: "当前 Codex 没有可连接的官方本机任务接口；不能读取现有任务。"
@@ -15,60 +14,79 @@ enum KeepAwakeCodexRPC {
             case .invalidResponse: "Codex 状态响应不完整；不能确认任务结束。"
             case .capacity: "Codex 任务状态超过本次读取上限；不能确认全部结束。"
             case .incompatible: "当前 Codex 不支持所需的只读任务状态接口。"
+            case .ambiguousEnvironment: "发现多个不同的 Codex 数据目录；未选择任务接口。"
+            case .profileMismatch: "Codex 接口返回的数据目录与所选环境不一致，未接入。"
             }
         }
     }
 
     static var codexHome: URL {
-        if let path = ProcessInfo.processInfo.environment["CODEX_HOME"], path.hasPrefix("/") {
-            return URL(fileURLWithPath: path, isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        // Compatibility for CLI hook callers. Desktop connections bind a full
+        // profile and never infer their endpoint from this convenience value.
+        (try? KeepAwakeCodexEnvironment.defaultCodexHome(userHome: FileManager.default.homeDirectoryForCurrentUser,
+            environment: ProcessInfo.processInfo.environment)) ??
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
     }
     static func controlSocket(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
         let base = home == FileManager.default.homeDirectoryForCurrentUser ? codexHome : home.appendingPathComponent(".codex")
-        return base.appendingPathComponent("app-server-control/app-server-control.sock")
+        return KeepAwakeCodexEnvironment.controlSocket(codexHome: base)
     }
     static func executableURL() -> URL? {
-        let path = ProcessInfo.processInfo.environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        let candidates = path.split(separator: ":").map { URL(fileURLWithPath: String($0)).appendingPathComponent("codex") } + [
-            URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"),
-            URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex")
-        ]
-        return candidates.first { isOfficialExecutable($0.resolvingSymlinksInPath()) }?.resolvingSymlinksInPath()
+        try? KeepAwakeCodexEnvironment.discover().executableURL
     }
     static func isOfficialExecutable(_ url: URL) -> Bool {
-        guard FileManager.default.isExecutableFile(atPath: url.path) else { return false }
-        var code: SecStaticCode?
-        var requirement: SecRequirement?
-        let rule = "anchor apple generic and identifier \"codex\" and certificate leaf[subject.OU] = \"2DC432GLL2\""
-        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
-              SecRequirementCreateWithString(rule as CFString, [], &requirement) == errSecSuccess,
-              let code, let requirement else { return false }
-        return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
+        KeepAwakeCodexEnvironment.isOfficialExecutable(url)
     }
     static func endpointAvailable(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
-        (try? validateEndpoint(controlSocket(home: home))) != nil
+        if home != FileManager.default.homeDirectoryForCurrentUser {
+            return (try? validateEndpoint(controlSocket(home: home))) != nil
+        }
+        return (try? KeepAwakeCodexEnvironment.discover(requireEndpoint: true)) != nil
     }
     static func validateEndpoint(_ socket: URL) throws {
-        var file = stat(), directory = stat()
-        guard lstat(socket.path, &file) == 0 else { throw Failure.unavailable }
-        guard (file.st_mode & S_IFMT) == S_IFSOCK, file.st_uid == getuid(),
-              lstat(socket.deletingLastPathComponent().path, &directory) == 0,
-              (directory.st_mode & S_IFMT) == S_IFDIR, directory.st_uid == getuid(),
-              directory.st_mode & 0o077 == 0 else { throw Failure.invalidEndpoint }
+        do { try KeepAwakeCodexEnvironment.validateEndpoint(socket) }
+        catch KeepAwakeCodexEnvironment.Failure.unavailable { throw Failure.unavailable }
+        catch { throw Failure.invalidEndpoint }
     }
 
     static func sample() throws -> KeepAwakeCodexMonitor.Snapshot {
-        try validateEndpoint(controlSocket())
-        guard let executable = executableURL() else { throw Failure.unavailable }
-        let session = try Session(executable: executable)
+        let profile: KeepAwakeCodexEnvironment.Profile
+        do { profile = try KeepAwakeCodexEnvironment.discover(requireEndpoint: true, refresh: true) }
+        catch KeepAwakeCodexEnvironment.Failure.ambiguous { throw Failure.ambiguousEnvironment }
+        catch KeepAwakeCodexEnvironment.Failure.invalidEndpoint { throw Failure.invalidEndpoint }
+        catch { throw Failure.unavailable }
+        return try sample(profile: profile)
+    }
+
+    static func sample(profile: KeepAwakeCodexEnvironment.Profile) throws -> KeepAwakeCodexMonitor.Snapshot {
+        try validateEndpoint(profile.socketURL)
+        guard isOfficialExecutable(profile.executableURL) else { throw Failure.unavailable }
+        let session = try Session(profile: profile)
         defer { session.close() }
-        _ = try session.request("initialize", params: [
+        return try read(profile: profile, request: session.request, notification: session.notification)
+    }
+
+    /// A fixture seam for the handshake and read-only protocol, without spawning
+    /// a proxy or querying real threads. Home identity is checked before reads.
+    static func read(profile: KeepAwakeCodexEnvironment.Profile,
+                     request: @escaping (String, [String: Any]) throws -> [String: Any],
+                     notification: (String, [String: Any]) throws -> Void) throws -> KeepAwakeCodexMonitor.Snapshot {
+        let initialized = try request("initialize", [
             "clientInfo": ["name": "superisland_keep_awake", "title": "SuperIsland", "version": "1"]
         ])
-        try session.notification("initialized", params: [:])
-        return try Reader(request: session.request).read()
+        guard let home = initialized["codexHome"] as? String, home.hasPrefix("/"), home.utf8.count <= 4_096,
+              !home.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { throw Failure.incompatible }
+        guard URL(fileURLWithPath: home).standardizedFileURL.resolvingSymlinksInPath().path ==
+                profile.codexHome.standardizedFileURL.resolvingSymlinksInPath().path else { throw Failure.profileMismatch }
+        try notification("initialized", [:])
+        return try Reader(request: request).read()
+    }
+
+    static func proxyArguments(profile: KeepAwakeCodexEnvironment.Profile) -> [String] {
+        ["app-server", "proxy", "--sock", profile.socketURL.path]
+    }
+    static func proxyEnvironment(profile: KeepAwakeCodexEnvironment.Profile, inherited: [String: String]) -> [String: String] {
+        var values = inherited; values["CODEX_HOME"] = profile.codexHome.path; return values
     }
 
     /// Injectable at the JSON-RPC boundary for pagination, privacy, and race tests.
@@ -96,20 +114,14 @@ enum KeepAwakeCodexRPC {
                 guard let thread = response["thread"] as? [String: Any], thread["id"] as? String == id,
                       let status = thread["status"] as? [String: Any], status["type"] is String else { throw Failure.invalidResponse }
                 // `preview`, name, cwd, and every other content field are discarded.
-                metadata[id] = ["id": id, "status": status,
-                                "source": thread["source"] ?? NSNull(),
-                                "parentThreadId": thread["parentThreadId"] ?? NSNull()]
-            }
-            func belongsToDesktop(_ id: String, visiting: Set<String> = []) -> Bool {
-                guard !visiting.contains(id), let value = metadata[id] else { return false }
-                if let source = value["source"] as? String { return source == "appServer" }
-                guard let source = value["source"] as? [String: Any], source["subAgent"] != nil,
-                      let parent = value["parentThreadId"] as? String else { return false }
-                return belongsToDesktop(parent, visiting: visiting.union([id]))
+                metadata[id] = ["id": id, "status": status]
             }
 
             var threads: [KeepAwakeCodexMonitor.Thread] = []
-            for id in ids where belongsToDesktop(id) {
+            // Source/originator describe creation, not the current executor.
+            // Cover this server's loaded tasks, including resumed CLI threads
+            // and children whose parent was unloaded; do not claim UI identity.
+            for id in ids {
                 guard let status = metadata[id]?["status"] as? [String: Any], let type = status["type"] as? String else { throw Failure.invalidResponse }
                 var turns: [KeepAwakeCodexMonitor.Turn] = [], complete = true
                 var turnCursor: String?, seenCursors = Set<String>(), seenTurns = Set<String>()
@@ -159,9 +171,10 @@ enum KeepAwakeCodexRPC {
         let deadline = Date().addingTimeInterval(15)
         var sequence = 0
         var buffer = Data()
-        init(executable: URL) throws {
-            process.executableURL = executable
-            process.arguments = ["app-server", "proxy"]
+        init(profile: KeepAwakeCodexEnvironment.Profile) throws {
+            process.executableURL = profile.executableURL
+            process.arguments = proxyArguments(profile: profile)
+            process.environment = proxyEnvironment(profile: profile, inherited: ProcessInfo.processInfo.environment)
             process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
             guard fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else { throw Failure.unavailable }
             try process.run()

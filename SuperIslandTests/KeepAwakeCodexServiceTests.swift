@@ -19,8 +19,12 @@ final class KeepAwakeCodexServiceTests: XCTestCase {
         let name = "KA1CodexService-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let profile = KeepAwakeCodexEnvironment.Profile(executableURL: root.appendingPathComponent("Renamed App.app/codex"),
+            codexHome: root.appendingPathComponent("private-codex"), socketURL: root.appendingPathComponent("private-codex/control.sock"))
+        defaults.set(try JSONEncoder().encode(["codex-cli": KeepAwakeCodexConnection(profile: profile, mode: .hooks), "codex-desktop": KeepAwakeCodexConnection(profile: profile, mode: .rpc)]),
+                     forKey: KeepAwakeCodexConnection.defaultsKey)
         let service = KeepAwakeService(defaults: defaults, root: root, codexSampler: sampler,
-                                       codexAvailability: { true }, hookUninstaller: uninstaller)
+                                       codexAvailability: { true }, hookUninstaller: uninstaller, codexResolver: { profile })
         return (name, defaults, root, service)
     }
 

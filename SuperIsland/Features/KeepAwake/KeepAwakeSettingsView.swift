@@ -6,12 +6,16 @@ struct KeepAwakeSettingsView: View {
     @State private var duration = 60
     @State private var query = ""
     @State private var proposedSource: KeepAwakeSource?
+    @State private var proposedCodexConnection: KeepAwakeCodexConnection?
     @State private var showConnection = false
     @State private var showLidAuthorization = false
     @State private var message = ""
     @State private var showMessage = false
     private var sources: [KeepAwakeSource] {
         KeepAwakeSource.all.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
+    }
+    private var proposedReadOnly: Bool {
+        proposedCodexConnection?.mode == .rpc || proposedSource?.readsLocalStatus == true
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -31,17 +35,21 @@ struct KeepAwakeSettingsView: View {
         .accessibilityElement(children: .contain)
         .dataAnnotationID("si.ka.settings")
         .confirmationDialog("接入任务来源", isPresented: $showConnection, titleVisibility: .visible) {
-            Button(proposedSource?.readsLocalStatus == true ? "启用只读接入" : "备份并接入") {
+            Button(proposedReadOnly ? "启用只读接入" : "备份并接入") {
                 guard let source = proposedSource else { return }
-                do { try service.connect(source) } catch { alert(error.localizedDescription) }
+                do { try service.connect(source, codexConnection: proposedCodexConnection) } catch { alert(error.localizedDescription) }
             }
             Button("取消", role: .cancel) {}
         } message: {
             if let source = proposedSource {
                 if source.id == "codex-desktop" {
-                    Text("仅连接 Codex 已经运行的官方本机共享服务，每 5 秒检查线程与轮次状态。可补捕该服务中正在运行的任务；不会启动新服务、恢复或发送任务，不保存标题、消息或工具正文。没有公开本机接口的桌面会话和云端任务不能由此接入。断线后已开始任务继续保持，需明确结束或手动停止。")
+                    if proposedReadOnly {
+                        Text("检测到 Codex 官方本机共享服务，将只读检查该服务内已加载的任务状态。可补捕运行中的任务；不会新建服务或发送任务，不保存正文。这个通道覆盖该服务的本机任务，不能确认具体桌面客户端或云端编排。断线后已开始任务继续保持，需明确结束或手动停止。")
+                    } else {
+                        Text("将自动查找 Codex，并备份、合并对应环境的 config.toml 与 hooks.json。桌面端的 Local / Worktree 本机新任务通过官方 hooks 和完成通知接入；请在 Codex 审阅信任。CLI 和桌面端共用一份配置，独立识别来源，断开一项保留另一项。Cloud / Work Cloud 不在本地通道覆盖内，接入前已运行的任务不能补放开始事件。总开关保持关闭，收到有效任务事件后才确认接通；不保存任务正文。")
+                    }
                 } else if source.id == "codex-cli" {
-                    Text("将备份并合并 Codex 的 config.toml 与 hooks.json，接入运行/等待事件和官方完成通知；已有其他 notify 时会停止并提示冲突。请在 Codex 中审阅并信任新增 hooks，接入不会重放已过去的开始事件，也不会开启保持唤醒总开关。仅使用匿名轮次和状态，不保存正文；缺少结束信号时继续保持。")
+                    Text("将自动查找 Codex，备份并合并对应环境的 config.toml 与 hooks.json。CLI 与桌面端共用一份配置并独立识别来源；已有第三方 notify 时停止并提示冲突。请在 Codex 审阅信任新增 hooks；接入不会重放过去的开始事件或开启总开关。仅使用匿名轮次和状态，不保存正文，缺少结束信号时继续保持。")
                 } else if source.readsLocalStatus {
                     Text("每 5 秒只读检查已运行的 Kimi Code 1.0.1 本机任务状态。仅查询运行与等待数量，不读取提示词或回复，不修改 Kimi 配置。断开后停止读取；接入不会开启保持唤醒总开关。当前仍需真实任务验收。")
                 } else {
@@ -163,7 +171,12 @@ struct KeepAwakeSettingsView: View {
                                 do { try service.disconnect(source) } catch { alert(error.localizedDescription) }
                             }
                         } else if source.canConnect {
-                            Button("接入…") { proposedSource = source; showConnection = true }
+                            Button("接入…") {
+                                do {
+                                    proposedCodexConnection = try service.prepareCodexConnection(source)
+                                    proposedSource = source; showConnection = true
+                                } catch { alert(error.localizedDescription) }
+                            }
                         } else {
                             Text(source.isDeferred ? "暂缓接入" : source.id == "codex-desktop" ? "接口未提供" : "待验证")
                                 .font(.caption).foregroundStyle(.secondary)
