@@ -193,7 +193,7 @@ Qoder CN、WorkBuddy、ZCode 均已收到真实桌面任务的官方 hook 事件
 ### 本轮实证
 
 - `build/KA1CodexPortableValidation/native-tests.log`：230 项，2 项 Kimi 暂缓跳过，实际 228 项通过，0 失败。覆盖环境发现、配置共享/迁移/撤销、配置位置绑定、崩溃意图恢复、确认模式冻结、别名互斥，以及既有长任务/helper/Chrome 回归。
-- `build/KA1TestPackagerValidation.noindex/pure-validation.log`：15 项打包政策测试通过，0 失败；检查测试/正式回调隔离、身份、架构与原生依赖，不执行系统授权或安装。
+- `build/KA1TestPackagerValidation.noindex/pure-validation.log`：16 项打包政策测试通过，0 失败；检查测试/正式回调隔离、身份、架构与原生依赖，不执行系统授权或安装。
 - `build/KA1CodexRouterRuntime.noindex/receipt.json`：实际官方 CLI 0.163.0-alpha.10.2 通过回环固定服务运行，外层禁止非回环网络；两个来源同时登记，CLI 仅收到 1 条匿名完成事件，桌面收件箱 0 条，HMAC 正确，CLI exit 0。没有安装 hooks、没有信任绕过、没有使用真实 home/账号/外网模型。这不是桌面真实任务验收。
 - 新隔离原生预览实际显示 27 来源、Codex CLI/桌面两项接入入口、默认总开关关闭；桌面自动环境发现成功，确认说明为本地 hooks、信任及 Cloud 边界；点击取消，未写真实配置，预览正常退出。记录 `build/KA1CodexPortableValidation/ui-readback.json`。原安装版和 Chrome 未被替换/干扰。
 - PRD v0.4、当前 20261022 annotation 全文及历史 HTML 均不变；本轮为实现修正，整个 KA1 维持实施中。
@@ -207,3 +207,5 @@ Qoder CN、WorkBuddy、ZCode 均已收到真实桌面任务的官方 hook 事件
 本轮原生工具明确拒绝控制 `com.openai.codex`；未换后端绕过。REA 静态检查因 app.asar 声明/实际 unpacked member hash 不一致停止，未绕过完整性检查，不能据此推断本版桌面内部行为。真实 Codex 的 hook 信任操作需要用户在产品中完成；新候选安装需按具体产物授权，另机与合盖自动完成仍分别验收。
 
 依据：[官方 hooks](https://learn.chatgpt.com/docs/hooks)、[本地执行模式](https://learn.chatgpt.com/docs/modes)、[公开 App Server](https://learn.chatgpt.com/docs/app-server)。公开传输不能替代当前桌面没有开放的内部连接；本地 hooks 路线与既有 RPC 能力分别描述。
+
+打包实测补充：首次新打包器在提取嵌入的公开证书时，codesign 将分开的可选 prefix 当作第二个目标而拒绝。已用当前 codesign 实测附着 `--extract-certificates=<prefix>` 成功，修正调用并增加单目标参数回归；16 项纯打包测试通过。失败输出保留，后续从新的干净源码回执重新构建打包，不将失败目录当成功包。
