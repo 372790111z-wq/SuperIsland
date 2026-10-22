@@ -38,7 +38,11 @@ struct KeepAwakeSettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             if let source = proposedSource {
-                if source.readsLocalStatus {
+                if source.id == "codex-desktop" {
+                    Text("仅连接 Codex 已经运行的官方本机共享服务，每 5 秒检查线程与轮次状态。可补捕该服务中正在运行的任务；不会启动新服务、恢复或发送任务，不保存标题、消息或工具正文。没有公开本机接口的桌面会话和云端任务不能由此接入。断线后已开始任务继续保持，需明确结束或手动停止。")
+                } else if source.id == "codex-cli" {
+                    Text("将备份并合并 Codex 的 config.toml 与 hooks.json，接入运行/等待事件和官方完成通知；已有其他 notify 时会停止并提示冲突。请在 Codex 中审阅并信任新增 hooks，接入不会重放已过去的开始事件，也不会开启保持唤醒总开关。仅使用匿名轮次和状态，不保存正文；缺少结束信号时继续保持。")
+                } else if source.readsLocalStatus {
                     Text("每 5 秒只读检查已运行的 Kimi Code 1.0.1 本机任务状态。仅查询运行与等待数量，不读取提示词或回复，不修改 Kimi 配置。断开后停止读取；接入不会开启保持唤醒总开关。当前仍需真实任务验收。")
                 } else {
                     Text("将备份并合并 \(KeepAwakeHookInstaller.path(source: source).path) 中本功能的 hook。保留其他配置；请在新会话验证。仅发送来源、匿名会话及状态。收到运行事件后持续保持，等待确认或信号中断不会自动释放；无法核实结束时需手动停止。当前为适配候选，尚未完成真实长任务验收。")
@@ -150,13 +154,20 @@ struct KeepAwakeSettingsView: View {
                             Text(source.integration).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if service.connections.contains(source.id) {
+                        if service.cleanupPendingSources.contains(source.id) {
+                            Button("重试清理") {
+                                do { try service.disconnect(source) } catch { alert(error.localizedDescription) }
+                            }
+                        } else if service.connections.contains(source.id) {
                             Button("断开") {
                                 do { try service.disconnect(source) } catch { alert(error.localizedDescription) }
                             }
                         } else if source.canConnect {
                             Button("接入…") { proposedSource = source; showConnection = true }
-                        } else { Text(source.isDeferred ? "暂缓接入" : "待验证").font(.caption).foregroundStyle(.secondary) }
+                        } else {
+                            Text(source.isDeferred ? "暂缓接入" : source.id == "codex-desktop" ? "接口未提供" : "待验证")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }.padding(16)
                 }.accessibilityElement(children: .contain).dataAnnotationID("si.ka.source." + source.id)
             }

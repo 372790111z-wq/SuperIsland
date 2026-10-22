@@ -12,7 +12,10 @@ struct Event: Codable {
 struct Envelope: Codable { let generation: String; let event: Event; let issuedAt: Double; let mac: String }
 func run() throws {
     let args = CommandLine.arguments
-    guard args.count == 4, args[1] == "--superisland-ka1", (["claude-code", "gemini-cli", "opencode", "pi", "codex-cli", "codex-desktop"] + KeepAwakeHookContract.sources).contains(args[2]) else { return }
+    let isHook = args.count == 4 && args[1] == "--superisland-ka1"
+    let isCodexNotify = args.count == 5 && args[1] == "--superisland-ka1-codex-notify" && args[2] == "codex-cli"
+    guard isHook || isCodexNotify,
+          (["claude-code", "gemini-cli", "opencode", "pi"] + KeepAwakeHookContract.codexSources + KeepAwakeHookContract.sources).contains(args[2]) else { return }
     let fd = open(args[3], O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
     guard fd >= 0 else { return }
     var info = stat()
@@ -22,23 +25,34 @@ func run() throws {
     let credential = try JSONDecoder().decode(Credential.self, from: handle.read(upToCount: 4097) ?? Data())
     try handle.close()
     guard credential.source == args[2], let key = Data(base64Encoded: credential.key) else { return }
-    // Bounds memory even when a hook sends a very large prompt or transcript.
-    var input = Data()
-    while input.count <= 2_097_152 {
-        let chunk = try FileHandle.standardInput.read(upToCount: min(65536, 2_097_153 - input.count)) ?? Data()
-        if chunk.isEmpty { break }
-        input.append(chunk)
+    // notify's JSON is the final argv element, never stdin. Hook stdin may
+    // contain sensitive text; both formats are bounded and never persisted.
+    var input = isCodexNotify ? Data(args[4].utf8) : Data()
+    if isHook {
+        while input.count <= 2_097_152 {
+            let chunk = try FileHandle.standardInput.read(upToCount: min(65536, 2_097_153 - input.count)) ?? Data()
+            if chunk.isEmpty { break }
+            input.append(chunk)
+        }
     }
     guard input.count <= 2_097_152,
-          let payload = try JSONSerialization.jsonObject(with: input) as? [String: Any],
-          let sessionID = payload["session_id"] as? String, !sessionID.isEmpty,
-          payload["hook_event_name"] is String else { return }
+          let payload = try JSONSerialization.jsonObject(with: input) as? [String: Any] else { return }
     if KeepAwakeHookContract.sources.contains(credential.source) {
         guard KeepAwakeHookContract.hasDesktopParent(source: credential.source) else { return }
     }
-    guard let state = KeepAwakeHookContract.eventState(source: credential.source, input: payload) else { return }
-    let metadata = KeepAwakeHookContract.metadata(source: credential.source, input: payload)
-    let session = SHA256.hash(data: Data(sessionID.utf8)).map { String(format: "%02x", $0) }.joined()
+    if KeepAwakeHookContract.codexSources.contains(credential.source) {
+        guard KeepAwakeHookContract.hasCodexParent(source: credential.source) else { return }
+    }
+    let state: String, metadata: KeepAwakeHookContract.Metadata, session: String
+    if isCodexNotify {
+        guard let notification = KeepAwakeHookContract.codexNotification(payload) else { return }
+        state = notification.state; metadata = notification.metadata; session = notification.session
+    } else {
+        guard let sessionID = payload["session_id"] as? String, !sessionID.isEmpty, sessionID.utf8.count <= 1024,
+              let hookState = KeepAwakeHookContract.eventState(source: credential.source, input: payload) else { return }
+        state = hookState; metadata = KeepAwakeHookContract.metadata(source: credential.source, input: payload)
+        session = KeepAwakeHookContract.anonymousIdentity(sessionID)
+    }
     let event = Event(source: credential.source, session: session, sequence: mach_continuous_time(), state: state,
                       taskID: metadata.taskID, startsTask: metadata.startsTask)
     let issuedAt = Date().timeIntervalSince1970
@@ -60,7 +74,8 @@ func run() throws {
 }
 // Gemini and Codex receive a JSON no-op even when the event is ignored or
 // credentials have been revoked. Never approve tools or change their policy.
-if CommandLine.arguments.count > 2 && ["gemini-cli", "codex-cli", "codex-desktop"].contains(CommandLine.arguments[2]) {
+if CommandLine.arguments.count > 2 && CommandLine.arguments[1] == "--superisland-ka1"
+    && ["gemini-cli", "codex-cli", "codex-desktop"].contains(CommandLine.arguments[2]) {
     FileHandle.standardOutput.write(Data("{}".utf8))
 }
 // A monitoring hook must never block or fail the user's actual AI task.
