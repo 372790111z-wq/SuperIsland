@@ -323,6 +323,7 @@ final class WindowEnhancementController {
 
     func perform(layout: WindowLayout, targetDisplayID: CGDirectDisplayID? = nil) {
         guard ensureAccessibility(), guardWindowMutationIsIdle() else { return }
+        if handleOwnSettingsWindow(.layout(layout, targetDisplayID)) { return }
         guard let context = standardFocusedWindowContext() else { return }
         guard !preferences.isExcluded(context.application) else {
             feedback("\(context.application.localizedName ?? "当前 App") 已被排除")
@@ -382,7 +383,7 @@ final class WindowEnhancementController {
               windowID.map({ Self.axWindowNumber(of: window) == Int($0) }) != false,
               let application = NSRunningApplication(processIdentifier: applicationPID),
               !application.isTerminated,
-              application.activationPolicy == .regular,
+              WindowInteractionEligibility.allowsApplication(application.activationPolicy),
               !preferences.isExcluded(application),
               let currentFrame = frame(of: window) else {
             feedback("窗口状态已变化，布局已取消")
@@ -714,6 +715,7 @@ final class WindowEnhancementController {
 
     private func centerFocusedWindow() {
         guard ensureAccessibility(), guardWindowMutationIsIdle() else { return }
+        if handleOwnSettingsWindow(.center) { return }
         guard let context = standardFocusedWindowContext() else { return }
         guard !preferences.isExcluded(context.application) else {
             feedback("当前应用已被排除")
@@ -791,6 +793,7 @@ final class WindowEnhancementController {
 
     private func moveFocusedWindow(displayOffset: Int) {
         guard ensureAccessibility(), guardWindowMutationIsIdle() else { return }
+        if handleOwnSettingsWindow(.move(displayOffset)) { return }
         guard let context = standardFocusedWindowContext() else { return }
         guard !preferences.isExcluded(context.application) else {
             feedback("当前应用已被排除")
@@ -2901,6 +2904,135 @@ final class WindowEnhancementController {
         return true
     }
 
+    private enum OwnSettingsAction {
+        case layout(WindowLayout, CGDirectDisplayID?)
+        case center
+        case move(Int)
+    }
+
+    /// Own windows use AppKit, never synchronous AX messaging back into this
+    /// process. Only the exact settings window owned by AppDelegate is eligible.
+    private func handleOwnSettingsWindow(_ action: OwnSettingsAction) -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier else { return false }
+        guard let window = AppDelegate.managedSettingsWindow,
+              WindowInteractionEligibility.isOwnSettingsWindow(window, managed: AppDelegate.managedSettingsWindow, key: NSApp.keyWindow),
+              !preferences.isExcluded(NSRunningApplication.current) else {
+            feedback("请先选择设置窗口")
+            return true
+        }
+        beginWindowMutation { [weak self, weak window] generation in
+            guard let self, let window else { return .safeWindowed }
+            return await self.performOwnSettingsAction(action, window: window, generation: generation)
+        }
+        return true
+    }
+
+    private func performOwnSettingsAction(_ action: OwnSettingsAction, window: NSWindow, generation: UInt64) async -> WindowMutationCompletion {
+        let wasFullScreen = window.styleMask.contains(.fullScreen)
+        var originalWindowedFrame: CGRect? = wasFullScreen ? nil : window.frame
+        let originalScreenID = window.screen.flatMap(displayID(for:))
+        func alive() -> Bool {
+            self.isWindowMutationCurrent(generation) && window === AppDelegate.managedSettingsWindow && window.isVisible && !window.isMiniaturized
+        }
+        func settle(fullScreen: Bool) async -> Bool {
+            let deadline = Date().addingTimeInterval(8)
+            var last: CGRect?; var quiet: Date?
+            while Date() < deadline, alive() {
+                let frame = window.frame
+                if window.styleMask.contains(.fullScreen) == fullScreen {
+                    if quiet == nil || (last.map({ !self.frameMatches($0, frame) }) ?? true) { quiet = Date() }
+                    if let quiet, Date().timeIntervalSince(quiet) >= 0.6 { return true }
+                } else { quiet = nil }
+                last = frame
+                try? await Task.sleep(nanoseconds: Self.fullScreenPollNanoseconds)
+            }
+            return false
+        }
+        func restore() async -> WindowMutationCompletion {
+            guard alive() else { return .safeWindowed }
+            // Return to the source screen in windowed mode before restoring full screen.
+            if window.styleMask.contains(.fullScreen) {
+                if wasFullScreen, window.screen.flatMap(displayID(for:)) == originalScreenID {
+                    if await settle(fullScreen: true) {
+                        self.feedback("操作未完成，设置窗口仍在原屏幕")
+                        return .restored
+                    }
+                    return .unresolved
+                }
+                window.toggleFullScreen(nil)
+                guard await settle(fullScreen: false) else { return .unresolved }
+            }
+            guard let id = originalScreenID, self.screen(withDisplayID: id) != nil,
+                  let originalWindowedFrame else {
+                self.feedback("无法恢复原屏幕，请检查设置窗口位置")
+                return .safeWindowed
+            }
+            window.setFrame(originalWindowedFrame, display: true)
+            guard await settle(fullScreen: false), self.frameMatches(window.frame, originalWindowedFrame) else {
+                self.feedback("未能恢复原位置，请检查设置窗口")
+                return .safeWindowed
+            }
+            if wasFullScreen { window.toggleFullScreen(nil) }
+            let restored = await settle(fullScreen: wasFullScreen)
+            self.feedback(restored ? "操作未完成，已恢复设置窗口" : "设置窗口状态未确认，请检查")
+            return restored ? .restored : .unresolved
+        }
+        if wasFullScreen {
+            window.toggleFullScreen(nil)
+            guard await settle(fullScreen: false) else { return await restore() }
+            originalWindowedFrame = window.frame
+        }
+        guard alive(), !shouldRecoverWindowMutation(generation), let source = window.screen,
+              let sourceID = displayID(for: source) else { return await restore() }
+        let top = NSScreen.screens.first?.frame.maxY ?? source.frame.maxY
+        let current = WindowSettingsGeometry.flipped(window.frame, desktopTop: top)
+        let destination: NSScreen
+        var target: CGRect
+        var restoresFullScreen = false
+        switch action {
+        case let .layout(layout, display):
+            guard let screen = display.flatMap({ self.screen(withDisplayID: $0) }) ?? (display == nil ? source : nil) else { return await restore() }
+            destination = screen
+            target = layoutFrame(layout, in: usableAXFrame(for: screen))
+        case .center:
+            destination = source
+            let available = usableAXFrame(for: source)
+            target = CGRect(x: available.midX - current.width / 2, y: available.midY - current.height / 2, width: current.width, height: current.height)
+        case let .move(offset):
+            guard let screen = adjacentScreen(from: sourceID, offset: offset) else {
+                feedback("没有可用的其他显示器")
+                return await restore()
+            }
+            destination = screen; restoresFullScreen = wasFullScreen
+            let from = usableAXFrame(for: source), to = usableAXFrame(for: screen)
+            let x = from.width > current.width ? (current.minX - from.minX) / (from.width - current.width) : 0.5
+            let y = from.height > current.height ? (current.minY - from.minY) / (from.height - current.height) : 0.5
+            let size = CGSize(width: min(current.width, to.width), height: min(current.height, to.height))
+            target = CGRect(x: to.minX + max(0, min(1, x)) * max(0, to.width - size.width), y: to.minY + max(0, min(1, y)) * max(0, to.height - size.height), width: size.width, height: size.height)
+        }
+        let intended = target
+        let minimum = window.frameRect(forContentRect: CGRect(origin: .zero, size: window.contentMinSize)).size
+        let available = usableAXFrame(for: destination)
+        target = WindowSettingsGeometry.constrained(target, minimum: minimum, available: available)
+        if case .center = action {
+            target.origin = CGPoint(x: max(available.minX, available.midX - target.width / 2),
+                                    y: max(available.minY, available.midY - target.height / 2))
+        }
+        guard let destinationID = displayID(for: destination), screen(withDisplayID: destinationID) != nil else { return await restore() }
+        window.setFrame(WindowSettingsGeometry.flipped(target, desktopTop: top), display: true)
+        guard await settle(fullScreen: false), alive(), !shouldRecoverWindowMutation(generation),
+              window.screen.flatMap(displayID(for:)) == destinationID else { return await restore() }
+        let final = WindowSettingsGeometry.flipped(window.frame, desktopTop: top)
+        guard frameMatches(final, target) else { return await restore() }
+        if restoresFullScreen {
+            window.toggleFullScreen(nil)
+            guard await settle(fullScreen: true), alive(), !shouldRecoverWindowMutation(generation),
+                  window.screen.flatMap(displayID(for:)) == destinationID else { return await restore() }
+        }
+        feedback(frameMatches(target, intended) ? "已调整" : "窗口有最小尺寸限制，已调整")
+        return .committed
+    }
+
     private struct FocusedWindowContext {
         let application: NSRunningApplication
         let window: AXUIElement
@@ -2936,16 +3068,16 @@ final class WindowEnhancementController {
 
     private func standardFocusedWindowContext() -> FocusedWindowContext? {
         guard let context = focusedWindowContext() else { return nil }
-        guard context.application.activationPolicy == .regular else {
-            feedback("系统窗口不支持此操作")
+        guard WindowInteractionEligibility.allowsApplication(context.application.activationPolicy) else {
+            feedback("当前应用没有可操作窗口")
             return nil
         }
 
         let role = axStringAttribute(kAXRoleAttribute, of: context.window)
         let subrole = axStringAttribute(kAXSubroleAttribute, of: context.window)
-        guard role == kAXWindowRole as String,
-              subrole == kAXStandardWindowSubrole as String,
-              axBoolAttribute("AXModal", of: context.window) != true else {
+        guard WindowInteractionEligibility.isStandardWindow(
+            role: role, subrole: subrole, modal: axBoolAttribute("AXModal", of: context.window)
+        ) else {
             feedback("此窗口暂不支持此操作")
             return nil
         }
