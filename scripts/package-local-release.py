@@ -96,13 +96,24 @@ def main():
     # Branding does not transfer ownership of production OAuth/deep links.
     info.pop('CFBundleURLTypes', None)
     (candidate / 'Contents/Info.plist').write_bytes(plistlib.dumps(info, sort_keys=False))
-    lid_helper = candidate / 'Contents/MacOS/KeepAwakeHelper'
-    if lid_helper.exists():
-        run('codesign', '--force', '--sign', args.signing_identity, '--timestamp=none',
-            '--identifier', 'com.workview.SuperIsland.KeepAwakeHelper', '--options', 'runtime', lid_helper)
+    # --deep may replace a raw nested executable's identifier with its file
+    # name. First sign all nested code, then pin the IPC helper identities and
+    # reseal only the outer bundle without rewriting those nested signatures.
     run('codesign', '--force', '--deep', '--sign', args.signing_identity, '--timestamp=none',
         '--entitlements', root / 'SuperIsland/SuperIsland.entitlements', candidate)
+    nested_identifiers = {}
+    for name in ('KeepAwakeHelper', 'KeepAwakeEventTool'):
+        nested = candidate / 'Contents/MacOS' / name
+        if nested.exists():
+            identifier = 'com.workview.SuperIsland.' + name
+            run('codesign', '--force', '--sign', args.signing_identity, '--timestamp=none',
+                '--identifier', identifier, '--options', 'runtime', nested)
+            nested_identifiers[name] = identifier
+    run('codesign', '--force', '--sign', args.signing_identity, '--timestamp=none',
+        '--entitlements', root / 'SuperIsland/SuperIsland.entitlements', candidate)
     run('codesign', '--verify', '--deep', '--strict', candidate)
+    for name, identifier in nested_identifiers.items():
+        run('codesign', '--verify', '--strict', '-R', f'identifier "{identifier}"', candidate / 'Contents/MacOS' / name)
     assert requirement(candidate) == stable_requirement, 'Application identity changed'
     archive = output / f'SuperIsland-{build}-arm64.zip'
     run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', candidate, archive)
@@ -111,6 +122,8 @@ def main():
         extracted = Path(directory) / 'SuperIsland.app'
         run('ditto', '-x', '-k', archive, directory)
         run('codesign', '--verify', '--deep', '--strict', extracted)
+        for name, identifier in nested_identifiers.items():
+            run('codesign', '--verify', '--strict', '-R', f'identifier "{identifier}"', extracted / 'Contents/MacOS' / name)
         assert sha(extracted / 'Contents/MacOS/SuperIsland') == sha(staged_binary)
         assert plistlib.loads((extracted / 'Contents/Info.plist').read_bytes()) == info
     manifest = dict(source_revision=head, source_tree=tree, build_number=build,
@@ -120,7 +133,7 @@ def main():
                     candidate_binary_sha256=sha(staged_binary),
                     source_binary_sha256=sha(binary), source_app_sha256=receipt['sourceAppSHA256'],
                     zip_sha256=sha(archive),
-                    signed=True, installed=False, notarized=False)
+                    signed=True, installed=False, notarized=False, nested_identifiers=nested_identifiers)
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     (output / 'SHA256SUMS.txt').write_text(f'{sha(archive)}  {archive.name}\n')
     (output / '说明.txt').write_text(
