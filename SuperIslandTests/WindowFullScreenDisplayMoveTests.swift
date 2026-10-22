@@ -133,6 +133,56 @@ final class WindowFullScreenDisplayMoveTests: XCTestCase {
         XCTAssertEqual(stillOversized.outcome, .timedOut)
     }
 
+    func testChromeEnterAndExitNeverWriteFullScreenAttribute() {
+        for bundle in ["com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.canary"] {
+            for desired in [false, true] {
+                var presses = 0
+                XCTAssertTrue(WindowFullScreenRequest.apply(
+                    current: !desired, desired: desired, bundleIdentifier: bundle,
+                    attributeIsSettable: { XCTFail("Chrome must not use the direct setter"); return true },
+                    setAttribute: { XCTFail("Chrome setter caused native abort"); return true },
+                    pressButton: { presses += 1; return true }))
+                XCTAssertEqual(presses, 1)
+            }
+        }
+    }
+
+    func testChromeFailedButtonDoesNotRetryThroughUnsafeSetter() {
+        var presses = 0
+        XCTAssertFalse(WindowFullScreenRequest.apply(
+            current: true, desired: false, bundleIdentifier: "com.google.Chrome",
+            attributeIsSettable: { XCTFail("No unsafe fallback"); return true },
+            setAttribute: { XCTFail("No unsafe fallback"); return true },
+            pressButton: { presses += 1; return false }))
+        XCTAssertEqual(presses, 1)
+    }
+
+    func testRecoveryDoesNotToggleAnAlreadyFullScreenWindow() {
+        XCTAssertTrue(WindowFullScreenRequest.apply(
+            current: true, desired: true, bundleIdentifier: "com.google.Chrome",
+            attributeIsSettable: { XCTFail("Already at requested state"); return true },
+            setAttribute: { XCTFail("Already at requested state"); return true },
+            pressButton: { XCTFail("Press would exit fullscreen during recovery"); return true }))
+    }
+
+    func testUnknownStateCannotDispatchAToggle() {
+        XCTAssertFalse(WindowFullScreenRequest.apply(
+            current: nil, desired: false, bundleIdentifier: "com.google.Chrome",
+            attributeIsSettable: { XCTFail("Unknown current state"); return true },
+            setAttribute: { XCTFail("Unknown current state"); return true },
+            pressButton: { XCTFail("Unknown current state"); return true }))
+    }
+
+    func testOtherAppsRetainTheirExistingAttributePath() {
+        var writes = 0
+        XCTAssertTrue(WindowFullScreenRequest.apply(
+            current: true, desired: false, bundleIdentifier: "com.apple.TextEdit",
+            attributeIsSettable: { true },
+            setAttribute: { writes += 1; return true },
+            pressButton: { XCTFail("Preserve other apps' existing behavior"); return true }))
+        XCTAssertEqual(writes, 1)
+    }
+
     private func observation(
         fullScreen: Bool = false,
         frame: CGRect? = nil,
