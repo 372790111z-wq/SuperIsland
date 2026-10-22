@@ -113,7 +113,7 @@ def main():
         '--entitlements', root / 'SuperIsland/SuperIsland.entitlements', candidate)
     run('codesign', '--verify', '--deep', '--strict', candidate)
     for name, identifier in nested_identifiers.items():
-        run('codesign', '--verify', '--strict', '-R', f'identifier "{identifier}"', candidate / 'Contents/MacOS' / name)
+        run('codesign', '--verify', '--strict', '-R', f'=identifier "{identifier}"', candidate / 'Contents/MacOS' / name)
     assert requirement(candidate) == stable_requirement, 'Application identity changed'
     archive = output / f'SuperIsland-{build}-arm64.zip'
     run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', candidate, archive)
@@ -123,7 +123,7 @@ def main():
         run('ditto', '-x', '-k', archive, directory)
         run('codesign', '--verify', '--deep', '--strict', extracted)
         for name, identifier in nested_identifiers.items():
-            run('codesign', '--verify', '--strict', '-R', f'identifier "{identifier}"', extracted / 'Contents/MacOS' / name)
+            run('codesign', '--verify', '--strict', '-R', f'=identifier "{identifier}"', extracted / 'Contents/MacOS' / name)
         assert sha(extracted / 'Contents/MacOS/SuperIsland') == sha(staged_binary)
         assert plistlib.loads((extracted / 'Contents/Info.plist').read_bytes()) == info
     manifest = dict(source_revision=head, source_tree=tree, build_number=build,
