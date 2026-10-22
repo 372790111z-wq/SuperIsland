@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateWindowController: UpdateWindowController?
     private var updateCancellable: AnyCancellable?
     private var statusItem: NSStatusItem?
+    private var fullScreenProbe: ChromeFullScreenProbe?
     private var menuBarDefaultsObserver: NSObjectProtocol?
     private var settingsResetObservers: [NSObjectProtocol] = []
     private var runtimeDefaultsSnapshot: RuntimeDefaultsSnapshot?
@@ -82,6 +83,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isWE1DebugBundle && ProcessInfo.processInfo.environment["SCREENSHOT_LINE_QA_MODE"] == "1"
     }
 
+    static var isFullScreenProbe: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "WE1FullscreenProbe") as? Bool == true
+    }
+
     static var isRunningUnitTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
             NSClassFromString("XCTestCase") != nil
@@ -89,6 +94,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !Self.isRunningUnitTests else { return }
+        if Self.isFullScreenProbe {
+            NSApp.setActivationPolicy(.accessory)
+            fullScreenProbe = ChromeFullScreenProbe()
+            return
+        }
         // The WE1 package is an isolated local test harness. It must not report
         // production analytics or claim the production superisland:// URL
         // handler while both builds are installed side by side.
@@ -122,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        guard !Self.isRunningUnitTests else { return }
+        guard !Self.isRunningUnitTests, !Self.isFullScreenProbe else { return }
         ScreenshotLineFeature.shared.stop()
         zilanSuppressionReceiver?.stop()
         WindowEnhancementController.shared.stop()
@@ -154,13 +164,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard !Self.isRunningUnitTests else { return }
+        guard !Self.isRunningUnitTests, !Self.isFullScreenProbe else { return }
         AppState.shared.setAppActive(true)
         WindowEnhancementController.shared.refreshSystemIntegrations()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
-        guard !Self.isRunningUnitTests else { return }
+        guard !Self.isRunningUnitTests, !Self.isFullScreenProbe else { return }
         AppState.shared.setAppActive(false)
     }
 
