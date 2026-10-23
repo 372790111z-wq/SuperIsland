@@ -4,7 +4,7 @@ import Combine
 
 @MainActor
 final class KeepAwakeLidClient: ObservableObject {
-    static let enabledIntentKey = "keepAwake.lid.enabledIntent.v1"
+    nonisolated static let enabledIntentKey = "keepAwake.lid.enabledIntent.v1"
     typealias RemoteProxyFactory = (_ errorHandler: @escaping (Error) -> Void,
                                    _ connectionEnded: @escaping () -> Void) throws -> KeepAwakeHelperProtocol
     private enum RequestKind { case status(UInt64), renew, release }
