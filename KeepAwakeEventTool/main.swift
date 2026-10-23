@@ -3,7 +3,8 @@ import CryptoKit
 import Darwin
 
 // Source hook stdin may contain sensitive text. Only allowlisted lifecycle
-// metadata affects mapping; never log, persist or forward the original input.
+// metadata affects mapping; never log or persist the original input. The
+// explicit notify-forward mode passes it only to the pre-existing delegate.
 struct Credential: Decodable { let source: String; let generation: String; let key: String; let inbox: String }
 struct Event: Codable {
     let source: String; let session: String; let sequence: UInt64; let state: String
@@ -21,8 +22,8 @@ func privateFile(_ path: String, maximumBytes: Int) throws -> Data? {
     let data = try handle.read(upToCount: maximumBytes + 1) ?? Data()
     return data.count <= maximumBytes ? data : nil
 }
-func run() throws {
-    let args = CommandLine.arguments
+func run(arguments args: [String] = CommandLine.arguments,
+         codexSource: () -> String? = KeepAwakeHookContract.codexParentSource) throws {
     let isHook = args.count == 4 && args[1] == "--superisland-ka1"
     let isCodexNotify = args.count == 5 && args[1] == "--superisland-ka1-codex-notify" && args[2] == "codex-cli"
     let isAutoHook = args.count == 3 && args[1] == "--superisland-ka1-codex-hook-auto"
@@ -30,7 +31,7 @@ func run() throws {
     guard isHook || isCodexNotify || isAutoHook || isAutoNotify else { return }
     let source: String, credentialPath: String
     if isAutoHook || isAutoNotify {
-        guard let observedSource = KeepAwakeHookContract.codexParentSource(),
+        guard let observedSource = codexSource(),
               let data = try privateFile(args[2], maximumBytes: 1_048_576),
               let router = try? JSONDecoder().decode(KeepAwakeHookContract.CodexRouter.self, from: data),
               let path = router.credentialPath(source: observedSource) else { return }
@@ -88,6 +89,28 @@ func run() throws {
     let output = directory.appendingPathComponent(UUID().uuidString + ".json")
     try JSONEncoder().encode(envelope).write(to: output, options: .atomic)
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
+}
+func currentExecutablePath() -> String {
+    var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    if proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 { return String(cString: path) }
+    return CommandLine.arguments[0]
+}
+/// Observation never owns the original callback. Every observation return or
+/// thrown error reaches execvp, independently of the receipt and credentials.
+func forwardCodexNotify(arguments args: [String], toolPath: String,
+                        observe: ([String]) throws -> Void) -> Never {
+    guard args.count >= 6, args[1] == KeepAwakeHookContract.codexNotifyForwardMode, args[3] == "--",
+          KeepAwakeHookContract.validCodexNotifyDelegate(Array(args[4..<(args.count - 1)]), toolPath: toolPath) else { _exit(127) }
+    do { try observe([args[0], "--superisland-ka1-codex-notify-auto", args[2], args[args.count - 1]]) } catch { }
+    // Reuse the original C argv suffix, including the untouched final JSON.
+    // execvp preserves this PID, its parent, environment, cwd and standard FDs.
+    let original = CommandLine.unsafeArgv.advanced(by: 4)
+    guard let executable = original.pointee else { _exit(127) }
+    execvp(executable, original)
+    _exit(127)
+}
+if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == KeepAwakeHookContract.codexNotifyForwardMode {
+    forwardCodexNotify(arguments: CommandLine.arguments, toolPath: currentExecutablePath(), observe: { try run(arguments: $0) })
 }
 // Gemini and Codex receive a JSON no-op even when the event is ignored or
 // credentials have been revoked. Never approve tools or change their policy.

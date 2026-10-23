@@ -44,6 +44,175 @@ final class KeepAwakeCodexInstallerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.receipt.path))
     }
 
+    func testOptInForwardingKeepsOriginalArgvAndBothSourcesShareOneWrapper() throws {
+        let desktop = KeepAwakeSource(id: "codex-desktop", name: "desktop", integration: "fixture", hookFamily: "codex")
+        for removeDesktopFirst in [true, false] {
+            let fixture = try Fixture(); defer { fixture.cleanup() }
+            let original = ["/other/client with spaces", "--mode", "中文值", "", "a ' quote", "line\nbreak"]
+            try json(["notify": original, "other": true]).write(to: fixture.config)
+            let trust = fixture.codex.appendingPathComponent("trust-sentinel.fixture")
+            try Data("unchanged-trust".utf8).write(to: trust)
+            try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+                home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: fakeEditor)
+            let wrapper = [fixture.tool.path, "--superisland-ka1-codex-notify-forward", fixture.receipt.path, "--"] + original
+            XCTAssertEqual(try object(fixture.config)["notify"] as? [String], wrapper)
+            XCTAssertEqual(try object(fixture.receipt)["notify"] as? [String], wrapper)
+            XCTAssertEqual(try object(fixture.receipt)["previousNotify"] as? [String], original)
+            let config = try Data(contentsOf: fixture.config), hooks = try Data(contentsOf: fixture.hooks)
+            let desktopCredential = fixture.base.appendingPathComponent("desktop-credential.json")
+            // Forwarding was explicitly authorized for the first connection;
+            // adding the other source must not wrap it again or change trust.
+            try KeepAwakeCodexInstaller.install(source: desktop, credential: desktopCredential,
+                home: fixture.home, tool: fixture.tool, editor: fakeEditor)
+            XCTAssertEqual(try Data(contentsOf: fixture.config), config)
+            XCTAssertEqual(try Data(contentsOf: fixture.hooks), hooks)
+            XCTAssertEqual(try object(fixture.receipt)["previousNotify"] as? [String], original)
+            for event in KeepAwakeCodexInstaller.events {
+                XCTAssertEqual(commands(try object(fixture.hooks), event: event).count, 1)
+            }
+            let first = removeDesktopFirst ? desktop : source, last = removeDesktopFirst ? source : desktop
+            let firstCredential = removeDesktopFirst ? desktopCredential : fixture.credential
+            let lastCredential = removeDesktopFirst ? fixture.credential : desktopCredential
+            try KeepAwakeCodexInstaller.uninstall(source: first, home: fixture.home, credential: firstCredential, editor: fakeEditor)
+            XCTAssertEqual(try Data(contentsOf: fixture.config), config)
+            XCTAssertEqual(try Data(contentsOf: fixture.hooks), hooks)
+            XCTAssertEqual(try object(fixture.receipt)["sources"] as? [String: String], [last.id: lastCredential.path])
+            try KeepAwakeCodexInstaller.uninstall(source: last, home: fixture.home, credential: lastCredential, editor: fakeEditor)
+            XCTAssertEqual(try object(fixture.config)["notify"] as? [String], original)
+            XCTAssertEqual(try object(fixture.config)["other"] as? Bool, true)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.receipt.path))
+            XCTAssertEqual(try Data(contentsOf: trust), Data("unchanged-trust".utf8))
+        }
+    }
+
+    func testForwardingReinstallAndToolMoveDoNotNestWrappers() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let original = ["/other/program", "argument"]
+        try json(["notify": original]).write(to: fixture.config)
+        try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: fakeEditor)
+        let before = try Data(contentsOf: fixture.receipt)
+        try install(fixture)
+        XCTAssertEqual(try Data(contentsOf: fixture.receipt), before)
+        let moved = fixture.base.appendingPathComponent("relocated tool")
+        XCTAssertTrue(FileManager.default.createFile(atPath: moved.path, contents: Data(), attributes: [.posixPermissions: 0o700]))
+        try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: moved, editor: fakeEditor)
+        let expected = [moved.path, "--superisland-ka1-codex-notify-forward", fixture.receipt.path, "--"] + original
+        XCTAssertEqual(try object(fixture.config)["notify"] as? [String], expected)
+        XCTAssertEqual(try object(fixture.receipt)["previousNotify"] as? [String], original)
+        try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home, credential: fixture.credential, editor: fakeEditor)
+        XCTAssertEqual(try object(fixture.config)["notify"] as? [String], original)
+    }
+
+    func testLaterForeignNotifyEditIsNeitherRewrappedNorOverwrittenByCleanup() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        try json(["notify": ["/original/notifier"]]).write(to: fixture.config)
+        try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: fakeEditor)
+        let receipt = try Data(contentsOf: fixture.receipt), hooks = try Data(contentsOf: fixture.hooks)
+        let changed = try json(["notify": ["/user/new-notifier", "keep exactly"], "newPreference": true])
+        try changed.write(to: fixture.config)
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: fakeEditor))
+        XCTAssertEqual(try Data(contentsOf: fixture.config), changed)
+        XCTAssertEqual(try Data(contentsOf: fixture.receipt), receipt)
+        XCTAssertEqual(try Data(contentsOf: fixture.hooks), hooks)
+        try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home, credential: fixture.credential, editor: fakeEditor)
+        XCTAssertEqual(try Data(contentsOf: fixture.config), changed)
+    }
+
+    func testConcurrentNotifyEditDuringForwardingIsPreservedWithoutPartialInstall() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        try json(["notify": ["/original/notifier"]]).write(to: fixture.config)
+        let changed = try json(["notify": ["/concurrent/notifier"], "concurrent": true])
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: { data, mutation in
+                let edited = try self.fakeEditor(data, mutation)
+                try changed.write(to: fixture.config)
+                return edited
+            }))
+        XCTAssertEqual(try Data(contentsOf: fixture.config), changed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.hooks.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.receipt.path))
+    }
+
+    func testChangedForwardDelegateBlocksLastCleanupAndRetainsItsDependencies() throws {
+        let desktop = KeepAwakeSource(id: "codex-desktop", name: "desktop", integration: "fixture", hookFamily: "codex")
+        for changedDelegate in [["/user/new-notifier", "changed argument"], [String]()] {
+            let fixture = try Fixture(); defer { fixture.cleanup() }
+            try json(["notify": ["/original/notifier"]]).write(to: fixture.config)
+            try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+                home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: fakeEditor)
+            let desktopCredential = fixture.base.appendingPathComponent("desktop-credential.json")
+            try KeepAwakeCodexInstaller.install(source: desktop, credential: desktopCredential,
+                home: fixture.home, tool: fixture.tool, editor: fakeEditor)
+            let changed = try json(["notify": [fixture.tool.path, "--superisland-ka1-codex-notify-forward",
+                                               fixture.receipt.path, "--"] + changedDelegate])
+            try changed.write(to: fixture.config)
+            let hooks = try Data(contentsOf: fixture.hooks)
+            // Revoking only one shared source leaves the wrapper and its
+            // remaining routing entry in place without rewriting user argv.
+            try KeepAwakeCodexInstaller.uninstall(source: desktop, home: fixture.home,
+                credential: desktopCredential, editor: fakeEditor)
+            let receipt = try Data(contentsOf: fixture.receipt)
+            XCTAssertEqual(try object(fixture.receipt)["sources"] as? [String: String], [source.id: fixture.credential.path])
+            XCTAssertThrowsError(try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home,
+                credential: fixture.credential, editor: fakeEditor)) {
+                    guard case KeepAwakeCodexInstaller.Failure.conflict = $0 else { return XCTFail("Expected changed-wrapper conflict") }
+                }
+            XCTAssertEqual(try Data(contentsOf: fixture.config), changed)
+            XCTAssertEqual(try Data(contentsOf: fixture.hooks), hooks)
+            XCTAssertEqual(try Data(contentsOf: fixture.receipt), receipt)
+        }
+    }
+
+    func testForwardingRejectsToolItselfAliasesAndOwnedModeRecursion() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let symbolic = fixture.base.appendingPathComponent("tool symlink")
+        let hard = fixture.base.appendingPathComponent("tool hardlink")
+        try FileManager.default.createSymbolicLink(at: symbolic, withDestinationURL: fixture.tool)
+        try FileManager.default.linkItem(at: fixture.tool, to: hard)
+        let delegates = [[fixture.tool.path], [symbolic.path], [hard.path],
+                         ["/bin/sh", "-c", "exec tool --superisland-ka1-codex-notify-auto path"],
+                         ["/other/tool", "--superisland-ka1"],
+                         ["/other/tool", "--superisland-ka1-codex-notify-forward"], [""]]
+        for delegate in delegates {
+            XCTAssertThrowsError(try KeepAwakeCodexInstaller.notifyValue(current: delegate,
+                mutation: .install(owned: fixture.notify, replacingOwned: nil, allowNotifyForwarding: true)))
+        }
+    }
+
+    func testEditorMustConfirmTheActualOwnedNotifyBeforeReceiptIsCommitted() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let original = try json(["notify": ["/original/notifier"]]); try original.write(to: fixture.config)
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: { data, mutation in
+                var edited = try self.fakeEditor(data, mutation)
+                edited.effectiveNotify = ["/unexpected/notifier"]
+                return edited
+            })) {
+                guard case KeepAwakeCodexInstaller.Failure.editorFailed = $0 else { return XCTFail("Expected editor confirmation failure") }
+            }
+        XCTAssertEqual(try Data(contentsOf: fixture.config), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.receipt.path))
+    }
+
+    func testMalformedForwardReceiptCannotChangeAnyConfiguration() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        try json(["notify": ["/original/notifier"]]).write(to: fixture.config)
+        try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: fakeEditor)
+        var receipt = try object(fixture.receipt)
+        receipt["previousNotify"] = ["/a/different/original"]
+        let corrupted = try json(receipt); try corrupted.write(to: fixture.receipt)
+        let config = try Data(contentsOf: fixture.config), hooks = try Data(contentsOf: fixture.hooks)
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home, editor: fakeEditor))
+        XCTAssertEqual(try Data(contentsOf: fixture.config), config)
+        XCTAssertEqual(try Data(contentsOf: fixture.hooks), hooks)
+        XCTAssertEqual(try Data(contentsOf: fixture.receipt), corrupted)
+    }
+
     func testRepeatedInstallDoesNotDuplicateOrEnableAnExistingDisabledOwnedHook() throws {
         let fixture = try Fixture(); defer { fixture.cleanup() }
         try install(fixture)
@@ -320,6 +489,52 @@ final class KeepAwakeCodexInstallerTests: XCTestCase {
         let owned = ["/fixture/tool", "--superisland-ka1-codex-notify", "codex-cli", "/fixture/credential"]
         XCTAssertThrowsError(try KeepAwakeCodexInstaller.officialEdit(original,
             .install(owned: owned, replacingOwned: nil), executable: cli))
+    }
+
+    func testOfficialEditorForwardsForeignNotifyOnlyWithOptInAndRestoresExactArgv() throws {
+        guard let cli = KeepAwakeCodexRPC.executableURL() else { throw XCTSkip("Official Codex CLI unavailable for isolated editor validation") }
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let delegate = ["/fixture/previous notifier", "--mode", "中文值", ""]
+        let original = Data("""
+        # preserved notification comment
+        notify = ["/fixture/previous notifier", "--mode", "中文值", ""]
+        model_reasoning_effort = "medium" # preserved inline comment
+        [projects."/tmp/superisland-forward-fixture"]
+        trust_level = "untrusted"
+        """.utf8)
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.officialEdit(original,
+            .install(owned: fixture.notify, replacingOwned: nil), executable: cli))
+        let expected = [fixture.tool.path, "--superisland-ka1-codex-notify-forward", fixture.receipt.path, "--"] + delegate
+        let installed = try KeepAwakeCodexInstaller.officialEdit(original,
+            .install(owned: fixture.notify, replacingOwned: nil, allowNotifyForwarding: true), executable: cli)
+        XCTAssertEqual(installed.previousNotify, delegate)
+        XCTAssertEqual(installed.effectiveNotify, expected)
+        let text = String(decoding: installed.data, as: UTF8.self)
+        XCTAssertTrue(text.contains("# preserved notification comment"))
+        XCTAssertTrue(text.contains("# preserved inline comment"))
+        XCTAssertTrue(text.contains("trust_level = \"untrusted\""))
+        let repeated = try KeepAwakeCodexInstaller.officialEdit(installed.data,
+            .install(owned: fixture.notify, replacingOwned: expected), executable: cli)
+        XCTAssertEqual(repeated.data, installed.data)
+        XCTAssertEqual(repeated.effectiveNotify, expected)
+        let removed = try KeepAwakeCodexInstaller.officialEdit(installed.data,
+            .remove(owned: expected, restore: delegate), executable: cli)
+        XCTAssertEqual(removed.effectiveNotify, delegate)
+        XCTAssertFalse(String(decoding: removed.data, as: UTF8.self).contains("--superisland-ka1-codex-notify-forward"))
+        XCTAssertTrue(String(decoding: removed.data, as: UTF8.self).contains("# preserved notification comment"))
+    }
+
+    func testForwardingOptInStillRejectsEffectiveProfileNotifyConflict() throws {
+        guard let cli = KeepAwakeCodexRPC.executableURL() else { throw XCTSkip("Official Codex CLI unavailable for isolated editor validation") }
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let original = Data("""
+        profile = "fixture"
+        notify = ["/user/base-notifier"]
+        [profiles.fixture]
+        notify = ["/profile/notifier"]
+        """.utf8)
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.officialEdit(original,
+            .install(owned: fixture.notify, replacingOwned: nil, allowNotifyForwarding: true), executable: cli))
     }
 
     private func install(_ fixture: Fixture) throws {

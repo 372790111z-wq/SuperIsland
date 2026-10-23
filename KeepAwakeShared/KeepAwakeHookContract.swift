@@ -9,6 +9,36 @@ import Security
 enum KeepAwakeHookContract {
     static let sources = ["qoder-desktop", "workbuddy-desktop", "zcode-desktop"]
     static let codexSources = ["codex-cli", "codex-desktop"]
+    static let codexNotifyForwardMode = "--superisland-ka1-codex-notify-forward"
+    /// A delegate is the user's existing argv, never shell text we construct.
+    /// Reject owned invocations even inside an existing shell argument, and
+    /// resolve aliases so a renamed/symlinked tool cannot delegate to itself.
+    static func validCodexNotifyDelegate(_ command: [String], toolPath: String) -> Bool {
+        guard !command.isEmpty, command.count <= 1024, let executable = command.first,
+              !executable.isEmpty, executable.utf8.count <= 4096,
+              command.reduce(0, { $0 + $1.utf8.count }) <= 1_048_576,
+              command.allSatisfy({ !$0.utf8.contains(0) && !$0.contains("--superisland-ka1") }) else { return false }
+        let tool = URL(fileURLWithPath: toolPath).standardizedFileURL.resolvingSymlinksInPath().path
+        let candidate: String?
+        if executable.contains("/") {
+            candidate = URL(fileURLWithPath: executable).standardizedFileURL.resolvingSymlinksInPath().path
+        } else {
+            let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin").split(separator: ":", omittingEmptySubsequences: false)
+            candidate = paths.lazy.map { directory -> String in
+                URL(fileURLWithPath: directory.isEmpty ? FileManager.default.currentDirectoryPath : String(directory), isDirectory: true)
+                    .appendingPathComponent(executable).standardizedFileURL.resolvingSymlinksInPath().path
+            }.first {
+                var info = stat()
+                return access($0, X_OK) == 0 && stat($0, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG
+            }
+        }
+        guard let candidate else { return true } // execvp preserves the original missing-program failure.
+        guard candidate != tool else { return false }
+        var delegateInfo = stat(), toolInfo = stat()
+        if stat(candidate, &delegateInfo) == 0, stat(tool, &toolInfo) == 0,
+           delegateInfo.st_dev == toolInfo.st_dev, delegateInfo.st_ino == toolInfo.st_ino { return false }
+        return true
+    }
     private static let codexCompactionPrefix = "aux.codex.compaction."
     /// The private installer receipt doubles as the router. It contains only
     /// source-to-credential paths, never task content or authentication keys.

@@ -17,12 +17,13 @@ enum KeepAwakeCodexInstaller {
         }
     }
     enum NotifyMutation {
-        case install(owned: [String], replacingOwned: [String]?)
+        case install(owned: [String], replacingOwned: [String]?, allowNotifyForwarding: Bool = false)
         case remove(owned: [String], restore: [String]?)
     }
     struct EditedConfig {
         var data: Data
         var previousNotify: [String]?
+        var effectiveNotify: [String]? = nil
     }
     typealias ConfigEditor = (Data, NotifyMutation) throws -> EditedConfig
     private struct Receipt: Codable {
@@ -57,6 +58,7 @@ enum KeepAwakeCodexInstaller {
 
     static func install(source: KeepAwakeSource, credential: URL, home: URL, tool: URL,
                         codexHome: URL? = nil, cli: URL? = nil,
+                        allowNotifyForwarding: Bool = false,
                         editor: ConfigEditor? = nil) throws {
         guard KeepAwakeHookContract.codexSources.contains(source.id), source.hookFamily == "codex",
               credential.isFileURL, credential.path.utf8.count <= 4096,
@@ -73,13 +75,19 @@ enum KeepAwakeCodexInstaller {
         let receipt = try decodeReceipt(beforeReceipt, location: receiptURL)
         if let existing = receipt?.sourceCredentials[source.id], existing != credential.path,
            receipt?.notify.first != tool.path { throw Failure.conflict }
-        let notify = [tool.path, "--superisland-ka1-codex-notify-auto", receiptURL.path]
+        let baseNotify = [tool.path, "--superisland-ka1-codex-notify-auto", receiptURL.path]
         let command = [KeepAwakeHookInstaller.shellQuote(tool.path), "--superisland-ka1-codex-hook-auto",
                        KeepAwakeHookInstaller.shellQuote(receiptURL.path)].joined(separator: " ")
         let configEditor = editor ?? { data, mutation in
             try editWithCLI(data, mutation, cli: cli)
         }
-        let edited = try configEditor(beforeConfig ?? Data(), .install(owned: notify, replacingOwned: receipt?.notify))
+        let mutation = NotifyMutation.install(owned: baseNotify, replacingOwned: receipt?.notify,
+                                               allowNotifyForwarding: allowNotifyForwarding)
+        let edited = try configEditor(beforeConfig ?? Data(), mutation)
+        // The editor confirms the actual wrapper it wrote; legacy fixture
+        // editors may omit this field, so derive the same ownership decision.
+        guard let notify = try notifyValue(current: edited.previousNotify, mutation: mutation),
+              edited.effectiveNotify == nil || edited.effectiveNotify == notify else { throw Failure.editorFailed }
         let hooks = try editHooks(beforeHooks, removing: receipt?.hookCommand,
                                   adding: command)
         // nil is meaningful: an earlier install may have created notify itself.
@@ -136,12 +144,40 @@ enum KeepAwakeCodexInstaller {
     /// Pure ownership decision shared by the official editor and test doubles.
     static func notifyValue(current: [String]?, mutation: NotifyMutation) throws -> [String]? {
         switch mutation {
-        case let .install(owned, replacingOwned):
-            guard current == nil || current?.isEmpty == true || current == owned || current == replacingOwned else { throw Failure.conflict }
-            return owned
+        case let .install(owned, replacingOwned, allowNotifyForwarding):
+            if let replacingOwned {
+                // A later user edit must not be wrapped under a stale receipt:
+                // its previousNotify would otherwise restore the wrong command.
+                guard current == replacingOwned || current == owned else { throw Failure.conflict }
+                if current == replacingOwned, let original = forwardedNotify(replacingOwned) {
+                    return try forwardingNotify(owned: owned, original: original)
+                }
+                return owned
+            }
+            if current == nil || current?.isEmpty == true || current == owned { return owned }
+            guard allowNotifyForwarding, let current else { throw Failure.conflict }
+            return try forwardingNotify(owned: owned, original: current)
         case let .remove(owned, restore):
+            if let current, forwardedNotify(owned) != nil, current != owned,
+               current.count >= 4, current.prefix(4) == owned.prefix(4) {
+                // A user may edit only the delegated command while retaining
+                // our forwarding wrapper. Keep its receipt and hooks until
+                // that dependency has been reviewed instead of orphaning it.
+                throw Failure.conflict
+            }
             return current == owned ? restore : current // Never overwrite a user's subsequent notify edit.
         }
+    }
+
+    private static func forwardedNotify(_ value: [String]) -> [String]? {
+        guard value.count >= 5, value[1] == "--superisland-ka1-codex-notify-forward", value[3] == "--" else { return nil }
+        return Array(value.dropFirst(4))
+    }
+    private static func forwardingNotify(owned: [String], original: [String]) throws -> [String] {
+        guard owned.count == 3, owned[1] == "--superisland-ka1-codex-notify-auto",
+              owned[0].hasPrefix("/"), owned[2].hasPrefix("/"),
+              KeepAwakeHookContract.validCodexNotifyDelegate(original, toolPath: owned[0]) else { throw Failure.conflict }
+        return [owned[0], "--superisland-ka1-codex-notify-forward", owned[2], "--"] + original
     }
 
     static func officialEdit(_ original: Data, _ mutation: NotifyMutation) throws -> EditedConfig {
@@ -180,7 +216,7 @@ enum KeepAwakeCodexInstaller {
             guard effective == current else { throw Failure.conflict }
         }
         let next = try notifyValue(current: current, mutation: mutation)
-        if current == next { return EditedConfig(data: original, previousNotify: current) }
+        if current == next { return EditedConfig(data: original, previousNotify: current, effectiveNotify: next) }
         let response = try rpc.call("config/batchWrite", params: [
             "filePath": config.path, "expectedVersion": version, "reloadUserConfig": false,
             "edits": [["keyPath": "notify", "value": next.map { $0 as Any } ?? NSNull(), "mergeStrategy": "replace"]]
@@ -192,7 +228,7 @@ enum KeepAwakeCodexInstaller {
             let confirmed = try rpc.call("config/read", params: ["includeLayers": false])
             guard (confirmed["config"] as? [String: Any])?["notify"] as? [String] == next else { throw Failure.editorFailed }
         }
-        return EditedConfig(data: edited, previousNotify: current)
+        return EditedConfig(data: edited, previousNotify: current, effectiveNotify: next)
     }
 
     private static func decodeReceipt(_ data: Data?, location: URL) throws -> Receipt? {
@@ -204,8 +240,12 @@ enum KeepAwakeCodexInstaller {
                   receipt.hookCommand == [KeepAwakeHookInstaller.shellQuote(receipt.notify[0]), "--superisland-ka1", "codex-cli",
                                           KeepAwakeHookInstaller.shellQuote(receipt.notify[3])].joined(separator: " ") else { throw Failure.conflict }
         } else {
-            guard receipt.version == 2, receipt.notify.count == 3,
-                  receipt.notify[0].hasPrefix("/"), receipt.notify[1] == "--superisland-ka1-codex-notify-auto",
+            let original = forwardedNotify(receipt.notify)
+            let auto = receipt.notify.count == 3 && receipt.notify[1] == "--superisland-ka1-codex-notify-auto"
+            let forward = original != nil && original == receipt.previousNotify &&
+                KeepAwakeHookContract.validCodexNotifyDelegate(original!, toolPath: receipt.notify[0])
+            guard receipt.version == 2, receipt.notify.count >= 3, auto || forward,
+                  receipt.notify[0].hasPrefix("/"),
                   receipt.notify[2] == location.path,
                   let router = try? JSONDecoder().decode(KeepAwakeHookContract.CodexRouter.self, from: data),
                   receipt.sourceCredentials.keys.allSatisfy({ router.credentialPath(source: $0) != nil }),
