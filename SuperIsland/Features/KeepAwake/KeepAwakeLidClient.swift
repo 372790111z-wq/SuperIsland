@@ -6,6 +6,7 @@ import Combine
 final class KeepAwakeLidClient: ObservableObject {
     typealias RemoteProxyFactory = (_ errorHandler: @escaping (Error) -> Void,
                                    _ connectionEnded: @escaping () -> Void) throws -> KeepAwakeHelperProtocol
+    private enum RequestKind { case status(UInt64), renew, release }
     @Published private(set) var enabled = false
     @Published private(set) var applied = false
     @Published private(set) var message = "合盖运行未授权；普通防休眠独立可用"
@@ -17,7 +18,7 @@ final class KeepAwakeLidClient: ObservableObject {
     private var desiredHold = false
     private var releaseNeeded = false
     private var requestID: UUID?
-    private var requestRenew = false
+    private var requestKind: RequestKind?
     private var blocked = false
     private var enableIntent = false
     private var intentGeneration: UInt64 = 0
@@ -28,8 +29,8 @@ final class KeepAwakeLidClient: ObservableObject {
     private let remoteProxyFactory: RemoteProxyFactory?
     private let requestTimeout: TimeInterval
     private let registerService: () throws -> Void
+    private let unregisterService: () async throws -> Void
     private let openSystemSettings: () -> Void
-    private var service: SMAppService { .daemon(plistName: KeepAwakeHelperIdentity.plist) }
     var registered: Bool { serviceStatus() == .enabled || serviceStatus() == .requiresApproval }
     var requiresApproval: Bool { serviceStatus() == .requiresApproval }
     var shouldPrepareForTermination: Bool { enabled || applied || busy || releaseNeeded }
@@ -38,16 +39,21 @@ final class KeepAwakeLidClient: ObservableObject {
          signingRequirement: @escaping ([String]) -> String? = { KeepAwakeHelperIdentity.requirement(identifiers: $0) },
          remoteProxyFactory: RemoteProxyFactory? = nil, requestTimeout: TimeInterval = 8,
          registerService: @escaping () throws -> Void = { try SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).register() },
+         unregisterService: @escaping () async throws -> Void = { try await SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).unregister() },
          openSystemSettings: @escaping () -> Void = { SMAppService.openSystemSettingsLoginItems() }) {
         self.serviceStatus = serviceStatus
         self.signingRequirement = signingRequirement
         self.remoteProxyFactory = remoteProxyFactory
         self.requestTimeout = requestTimeout
         self.registerService = registerService
+        self.unregisterService = unregisterService
         self.openSystemSettings = openSystemSettings
     }
 
     func authorize() {
+        guard !busy, !recovering else { message = "请等待当前辅助程序检查结束。"; return }
+        enableIntent = false; intentGeneration &+= 1
+        enabled = false; desiredHold = false
         guard signingRequirement([KeepAwakeHelperIdentity.label]) != nil else {
             message = "当前包未使用证书签名，不能授权合盖辅助程序。请使用经过签名验证的安装包。"; return
         }
@@ -68,9 +74,9 @@ final class KeepAwakeLidClient: ObservableObject {
                 openSystemSettings(); return
             }
             guard status == .enabled else { enabled = false; message = "系统尚未启用辅助程序（状态 \(status.rawValue)）。"; return }
-            enableIntent = true; intentGeneration &+= 1
-            blocked = false; enabled = true
-            message = "辅助程序已注册；等待保持请求，合盖效果需实机验收。"
+            enableIntent = true
+            message = "系统已授权；正在确认辅助程序能否连接。"
+            perform(.status(intentGeneration))
         } catch {
             enabled = false
             let code = error as NSError
@@ -81,6 +87,7 @@ final class KeepAwakeLidClient: ObservableObject {
     }
     func disable() {
         enableIntent = false; intentGeneration &+= 1
+        cancelStatusRequest()
         enabled = false; apply(hold: false)
     }
     func apply(hold: Bool, preferences: KeepAwakeEngine.Preferences? = nil) {
@@ -88,12 +95,12 @@ final class KeepAwakeLidClient: ObservableObject {
         desiredHold = hold && enabled && !blocked
         guard !busy else { return }
         if !desiredHold {
-            if releaseNeeded && !blocked { perform(renew: false) }
+            if releaseNeeded && !blocked { perform(.release) }
             return
         }
-        if !applied || KeepAwakeClock.now() - lastRenewal >= 30 { perform(renew: true) }
+        if !applied || KeepAwakeClock.now() - lastRenewal >= 30 { perform(.renew) }
     }
-    private func proxy(id: UUID, renew: Bool) throws -> KeepAwakeHelperProtocol {
+    private func proxy(id: UUID) throws -> KeepAwakeHelperProtocol {
         guard serviceStatus() == .enabled,
               let requirement = signingRequirement([KeepAwakeHelperIdentity.label]) else {
             throw CocoaError(.featureUnsupported)
@@ -102,7 +109,7 @@ final class KeepAwakeLidClient: ObservableObject {
         // request happens to be active when a delayed XPC error arrives.
         let errorHandler: (Error) -> Void = { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.finish(id: id, renew: renew, success: false, message: "辅助程序连接中断；合盖状态待恢复检查。")
+                self?.finish(id: id, success: false, message: "辅助程序连接中断；合盖状态待恢复检查。")
             }
         }
         let transportID = connectionID ?? UUID()
@@ -128,36 +135,67 @@ final class KeepAwakeLidClient: ObservableObject {
         let retired = connection; connection = nil
         retired?.invalidate()
     }
+    private func cancelStatusRequest() {
+        guard case .status? = requestKind else { return }
+        requestID = nil; requestKind = nil; busy = false
+        invalidateConnection()
+    }
     private func connectionEnded(id: UUID) {
         guard connectionID == id else { return }
         releaseNeeded = releaseNeeded || applied
         applied = false; lastRenewal = 0
         invalidateConnection()
         if let requestID {
-            finish(id: requestID, renew: requestRenew, success: false, message: "辅助程序连接中断；合盖状态待恢复检查。")
+            finish(id: requestID, success: false, message: "辅助程序连接中断；合盖状态待恢复检查。")
         } else {
             blocked = true; enabled = false; desiredHold = false
             message = "辅助程序连接中断；合盖保持未确认，请检查并恢复。"
         }
     }
-    private func perform(renew: Bool) {
-        let id = UUID(); requestID = id; requestRenew = renew; busy = true
-        if renew { releaseNeeded = true }
+    private func perform(_ kind: RequestKind) {
+        let id = UUID(); requestID = id; requestKind = kind; busy = true
+        if case .renew = kind { releaseNeeded = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) { [weak self] in
-            self?.finish(id: id, renew: renew, success: false, message: "辅助程序响应超时；停止续期后最多 3 分钟恢复，当前尚未确认。")
+            let message: String
+            if case .status = kind { message = "系统已授权，但辅助程序未响应；尚未确认可用。" }
+            else { message = "辅助程序响应超时；停止续期后最多 3 分钟恢复，当前尚未确认。" }
+            self?.finish(id: id, success: false, message: message)
         }
         do {
-            let remote = try proxy(id: id, renew: renew)
+            let remote = try proxy(id: id)
             let reply: (Bool, String) -> Void = { [weak self] success, message in
-                Task { @MainActor [weak self] in self?.finish(id: id, renew: renew, success: success, message: message) }
+                Task { @MainActor [weak self] in self?.finish(id: id, success: success, message: message) }
             }
-            if renew { remote.renew(owner: owner, acOnly: preferences.acOnly, minimumBattery: preferences.minimumBattery, respectLowPower: preferences.respectLowPower, reply: reply) }
-            else { remote.release(owner: owner, reply: reply) }
-        } catch { finish(id: id, renew: renew, success: false, message: "无法连接已授权辅助程序：" + error.localizedDescription) }
+            switch kind {
+            case .status: remote.status(reply: reply)
+            case .renew: remote.renew(owner: owner, acOnly: preferences.acOnly, minimumBattery: preferences.minimumBattery, respectLowPower: preferences.respectLowPower, reply: reply)
+            case .release: remote.release(owner: owner, reply: reply)
+            }
+        } catch {
+            let code = error as NSError
+            finish(id: id, success: false, message: "无法连接已授权辅助程序：\(code.domain)（代码 \(code.code)）。")
+        }
     }
-    private func finish(id: UUID, renew: Bool, success: Bool, message: String) {
-        guard requestID == id else { return }
-        busy = false; requestID = nil; self.message = message
+    private func finish(id: UUID, success: Bool, message: String) {
+        guard requestID == id, let kind = requestKind else { return }
+        busy = false; requestID = nil; requestKind = nil
+        if case .status(let generation) = kind {
+            guard generation == intentGeneration, enableIntent else { return }
+            guard success, serviceStatus() == .enabled,
+                  signingRequirement([KeepAwakeHelperIdentity.label]) != nil else {
+                applied = false; blocked = true; enabled = false
+                self.message = success ? "检查期间系统授权已变化；合盖保持未开启，请重新检查授权。" : message
+                invalidateConnection(); return
+            }
+            // A status reply proves reachability, not ownership of any existing
+            // lease and not that a power change has been applied or restored.
+            blocked = false; enabled = true; lastRenewal = 0
+            self.message = "辅助程序连接已确认；等待保持请求，合盖效果需实机验收。"
+            return
+        }
+        self.message = message
+        let renew: Bool
+        if case .renew = kind { renew = true } else { renew = false }
         if success {
             applied = renew; lastRenewal = KeepAwakeClock.now()
             if !renew { releaseNeeded = false }
@@ -171,6 +209,7 @@ final class KeepAwakeLidClient: ObservableObject {
     }
     func retryRelease() {
         enableIntent = false; intentGeneration &+= 1
+        cancelStatusRequest()
         blocked = false; releaseNeeded = true; enabled = false; apply(hold: false)
     }
     /// Called only by an explicit user recovery action after the ordinary
@@ -191,10 +230,12 @@ final class KeepAwakeLidClient: ObservableObject {
             message = "合盖辅助程序尚未授权或身份无法确认；请先检查系统授权。"
             return false
         }
-        // This release also clears a latched daemon protection/error only after
-        // the daemon confirms recovery of its own previous power change.
-        blocked = false; releaseNeeded = true
-        perform(renew: false)
+        // Only a previous renewal can leave this owner's power lease unknown.
+        // A client that only checked status must not release another owner's
+        // lease or claim to have restored a power change it never requested.
+        let needsRelease = releaseNeeded
+        blocked = false
+        perform(needsRelease ? .release : .status(generation))
         await waitForRequest()
         guard !Task.isCancelled, !busy, !releaseNeeded, !blocked,
               generation == intentGeneration, enableIntent else { return false }
@@ -205,7 +246,7 @@ final class KeepAwakeLidClient: ObservableObject {
             return false
         }
         enabled = true; lastRenewal = 0
-        message = "辅助程序恢复已确认；等待重新应用合盖保持。"
+        message = needsRelease ? "辅助程序恢复已确认；等待重新应用合盖保持。" : "辅助程序连接已确认；本次没有待恢复的合盖租约。"
         return true
     }
     private func waitForRequest() async {
@@ -217,19 +258,35 @@ final class KeepAwakeLidClient: ObservableObject {
     }
     func revoke() async {
         enableIntent = false; intentGeneration &+= 1
+        let generation = intentGeneration
         enabled = false; desiredHold = false
+        cancelStatusRequest()
         guard !busy else { message = "请等待当前租约操作结束后再撤销。"; return }
-        // Confirm a release before unregistering the daemon that owns recovery.
-        releaseNeeded = true; perform(renew: false)
-        let deadline = KeepAwakeClock.now() + 9
-        while busy && KeepAwakeClock.now() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
-        guard !releaseNeeded && !busy else { message += " 辅助程序保留，以便继续恢复。"; return }
-        do { try await service.unregister(); message = "合盖租约已恢复，辅助程序已撤销。" }
-        catch { message = "恢复完成，但撤销失败：" + error.localizedDescription }
+        let hadOwnedLease = releaseNeeded
+        // A local status or power snapshot cannot prove that an old/foreign
+        // journal is absent. Require an owner-checked helper acknowledgement;
+        // an unavailable daemon or a rejected owner must remain registered.
+        releaseNeeded = true
+        perform(.release)
+        await waitForRequest()
+        guard !Task.isCancelled, generation == intentGeneration, !releaseNeeded, !busy else {
+            message += " 辅助程序保留，以便继续恢复。"; return
+        }
+        busy = true
+        defer { busy = false }
+        do {
+            try await unregisterService()
+            invalidateConnection(); blocked = false
+            message = hadOwnedLease ? "合盖租约已确认释放，辅助程序已撤销。" : "辅助程序已确认可撤销；本次没有自身待释放的合盖租约。"
+        } catch {
+            let code = error as NSError
+            message = "撤销辅助程序失败：\(code.domain)（代码 \(code.code)）。"
+        }
     }
     func prepareForTermination() async {
         enableIntent = false; intentGeneration &+= 1
         enabled = false; desiredHold = false
+        cancelStatusRequest()
         apply(hold: false)
         let deadline = KeepAwakeClock.now() + 9
         while busy && KeepAwakeClock.now() < deadline { try? await Task.sleep(for: .milliseconds(100)) }

@@ -104,6 +104,12 @@ final class KeepAwakeTaskIdentityTests: XCTestCase {
         let client = KeepAwakeLidClient(serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: { _, _ in transport }, requestTimeout: 1)
         client.authorize()
+        let readyDeadline = KeepAwakeClock.now() + 1
+        while !client.enabled && KeepAwakeClock.now() < readyDeadline { await Task.yield() }
+        guard client.enabled else { XCTFail("Authorization status did not become ready"); return }
+        client.apply(hold: true)
+        while !client.applied && KeepAwakeClock.now() < readyDeadline { await Task.yield() }
+        guard client.applied else { XCTFail("The owner's renewal did not apply"); return }
         let recovery = Task { await client.recoverAndEnable() }
         let deadline = KeepAwakeClock.now() + 1
         while transport.releaseReply == nil && KeepAwakeClock.now() < deadline { await Task.yield() }
@@ -141,6 +147,6 @@ private final class RecoveryAuthorizationTransport: NSObject, KeepAwakeHelperPro
     var releaseReply: ((Bool, String) -> Void)?
     func status(reply: @escaping (Bool, String) -> Void) { reply(true, "test-only") }
     func renew(owner: String, acOnly: Bool, minimumBattery: Int, respectLowPower: Bool,
-               reply: @escaping (Bool, String) -> Void) { XCTFail("Recovery must not renew before the service decision") }
+               reply: @escaping (Bool, String) -> Void) { reply(true, "applied") }
     func release(owner: String, reply: @escaping (Bool, String) -> Void) { releaseReply = reply }
 }
