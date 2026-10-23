@@ -257,7 +257,7 @@ final class KeepAwakeService: ObservableObject {
                     try KeepAwakeCodexInstaller.install(source: source, credential: credential,
                         home: FileManager.default.homeDirectoryForCurrentUser,
                         tool: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/KeepAwakeEventTool"),
-                        codexHome: profile.codexHome, cli: profile.executableURL)
+                        codexHome: profile.codexHome, cli: profile.executableURL, allowNotifyForwarding: true)
                 }
             } else { try KeepAwakeHookInstaller.install(source: source, credential: credential) }
         } catch {

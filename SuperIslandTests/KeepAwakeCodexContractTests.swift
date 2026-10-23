@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import Darwin
 @testable import SuperIsland
 
 final class KeepAwakeCodexContractTests: XCTestCase {
@@ -129,6 +130,33 @@ final class KeepAwakeCodexContractTests: XCTestCase {
             XCTAssertNil(invalid.credentialPath(source: "codex-cli"))
         }
     }
+    func testNotifyDelegatePreservesOpaqueArgumentsAndRejectsRecursionOrInvalidBounds() {
+        let tool = "/private/fixture/KeepAwakeEventTool"
+        XCTAssertTrue(KeepAwakeHookContract.validCodexNotifyDelegate(
+            ["/usr/bin/printf", "", "with spaces", "quote'\"", "中文\nsecond line"], toolPath: tool))
+        for command in [[String](), [""], ["/usr/bin/printf", "nul\0argument"],
+                        ["/usr/bin/printf", String(repeating: "x", count: 1_048_577)],
+                        Array(repeating: "x", count: 1025), [String(repeating: "x", count: 4097)],
+                        [tool], ["/private/fixture/../fixture/KeepAwakeEventTool"]] {
+            XCTAssertFalse(KeepAwakeHookContract.validCodexNotifyDelegate(command, toolPath: tool))
+        }
+        for mode in ["--superisland-ka1", "--superisland-ka1-codex-hook-auto", "--superisland-ka1-codex-notify",
+                     "--superisland-ka1-codex-notify-auto", KeepAwakeHookContract.codexNotifyForwardMode] {
+            XCTAssertFalse(KeepAwakeHookContract.validCodexNotifyDelegate(["/bin/echo", mode], toolPath: tool))
+            XCTAssertFalse(KeepAwakeHookContract.validCodexNotifyDelegate(["/bin/sh", "-c", "exec '/other/tool' " + mode], toolPath: tool))
+        }
+    }
+    func testNotifyDelegateRejectsSymlinkAndHardlinkAliasesOfItsOwnExecutable() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("KA1NotifyDelegate-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tool = directory.appendingPathComponent("tool"), symlink = directory.appendingPathComponent("symlink"), hardlink = directory.appendingPathComponent("hardlink")
+        try Data("fixture".utf8).write(to: tool)
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: tool)
+        try FileManager.default.linkItem(at: tool, to: hardlink)
+        XCTAssertFalse(KeepAwakeHookContract.validCodexNotifyDelegate([symlink.path], toolPath: tool.path))
+        XCTAssertFalse(KeepAwakeHookContract.validCodexNotifyDelegate([hardlink.path], toolPath: tool.path))
+    }
     func testCodexIdentityAndTerminalMetadataArePartOfAuthentication() throws {
         let completion = try XCTUnwrap(KeepAwakeHookContract.codexNotification(notification()))
         func bytes(_ task: String?, _ starts: Bool?) -> Data {
@@ -220,6 +248,54 @@ final class KeepAwakeCodexContractTests: XCTestCase {
             try process.run(); process.waitUntilExit()
             XCTAssertEqual(process.terminationStatus, 0)
             XCTAssertTrue(output.fileHandleForReading.readDataToEndOfFile().isEmpty)
+        }
+    }
+    func testNotifyForwardPreservesOriginalProcessAndOpaqueCallbackDespiteMissingReceipt() throws {
+        let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/KeepAwakeEventTool")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("KA1NotifyForward-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let originalArguments = ["", "with spaces", "quote'\"", "中文\nsecond line"]
+        let payload = "{ \"type\": \"agent-turn-complete\", \"thread-id\": \"fixture\", \"text\": \"原样\\n内容\" }"
+        let script = "printf '%s\\0' \"$$\" \"$PPID\" \"$(pwd -P)\" \"$KA1_FORWARD_FIXTURE\" \"$@\"; printf 'fixture-stderr' >&2; exit 37"
+        let process = Process(), output = Pipe(), errors = Pipe()
+        process.executableURL = executable
+        process.arguments = [KeepAwakeHookContract.codexNotifyForwardMode, directory.appendingPathComponent("missing-receipt").path,
+            "--", "/bin/sh", "-c", script, "fixture"] + originalArguments + [payload]
+        process.currentDirectoryURL = directory
+        process.environment = ProcessInfo.processInfo.environment.merging(["KA1_FORWARD_FIXTURE": "environment-preserved"]) { _, new in new }
+        process.standardInput = FileHandle.nullDevice; process.standardOutput = output; process.standardError = errors
+        try process.run(); let pid = process.processIdentifier; process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 37)
+        let records = output.fileHandleForReading.readDataToEndOfFile().split(separator: 0, omittingEmptySubsequences: false).dropLast()
+            .map { String(decoding: $0, as: UTF8.self) }
+        XCTAssertEqual(records.count, 4 + originalArguments.count + 1)
+        guard records.count == 4 + originalArguments.count + 1 else { return }
+        XCTAssertEqual(Array(records.prefix(2)), [String(pid), String(ProcessInfo.processInfo.processIdentifier)])
+        // macOS may expose the same temporary directory as /var or /private/var.
+        // Verify filesystem identity instead of requiring a particular alias.
+        var actualDirectory = stat(), expectedDirectory = stat()
+        XCTAssertEqual(stat(records[2], &actualDirectory), 0)
+        XCTAssertEqual(stat(directory.path, &expectedDirectory), 0)
+        XCTAssertEqual(actualDirectory.st_dev, expectedDirectory.st_dev)
+        XCTAssertEqual(actualDirectory.st_ino, expectedDirectory.st_ino)
+        XCTAssertEqual(Array(records.dropFirst(3)), ["environment-preserved"] + originalArguments + [payload])
+        XCTAssertEqual(errors.fileHandleForReading.readDataToEndOfFile(), Data("fixture-stderr".utf8))
+    }
+    func testNotifyForwardRejectsIllegalDelegateOrExecFailureWithoutOutput() throws {
+        let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/KeepAwakeEventTool")
+        let mode = KeepAwakeHookContract.codexNotifyForwardMode
+        for args in [[mode, "/absent", "--", "{}"], [mode, "/absent", "bad-marker", "/bin/echo", "{}"],
+                     [mode, "/absent", "--", executable.path, "{}"],
+                     [mode, "/absent", "--", "/bin/sh", "-c", "echo --superisland-ka1", "{}"],
+                     [mode, "/absent", "--", "/absent/KA1OriginalNotify", "{}"]] {
+            let process = Process(), output = Pipe(), errors = Pipe()
+            process.executableURL = executable; process.arguments = args
+            process.standardInput = FileHandle.nullDevice; process.standardOutput = output; process.standardError = errors
+            try process.run(); process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 127)
+            XCTAssertTrue(output.fileHandleForReading.readDataToEndOfFile().isEmpty)
+            XCTAssertTrue(errors.fileHandleForReading.readDataToEndOfFile().isEmpty)
         }
     }
 }
