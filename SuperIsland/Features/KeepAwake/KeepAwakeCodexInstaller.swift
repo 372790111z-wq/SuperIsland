@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Security
 
 /// Uses Codex's own TOML editor in an isolated home. The real Codex home is
 /// touched only by the byte-checked transaction below, never by app-server.
@@ -59,6 +60,7 @@ enum KeepAwakeCodexInstaller {
     static func install(source: KeepAwakeSource, credential: URL, home: URL, tool: URL,
                         codexHome: URL? = nil, cli: URL? = nil,
                         allowNotifyForwarding: Bool = false,
+                        relayVerifier: @escaping (String) -> Bool = isOfficialNotifyRelay,
                         editor: ConfigEditor? = nil) throws {
         guard KeepAwakeHookContract.codexSources.contains(source.id), source.hookFamily == "codex",
               credential.isFileURL, credential.path.utf8.count <= 4096,
@@ -79,15 +81,22 @@ enum KeepAwakeCodexInstaller {
         let command = [KeepAwakeHookInstaller.shellQuote(tool.path), "--superisland-ka1-codex-hook-auto",
                        KeepAwakeHookInstaller.shellQuote(receiptURL.path)].joined(separator: " ")
         let configEditor = editor ?? { data, mutation in
-            try editWithCLI(data, mutation, cli: cli)
+            try editWithCLI(data, mutation, cli: cli, relayVerifier: relayVerifier)
         }
         let mutation = NotifyMutation.install(owned: baseNotify, replacingOwned: receipt?.notify,
                                                allowNotifyForwarding: allowNotifyForwarding)
         let edited = try configEditor(beforeConfig ?? Data(), mutation)
         // The editor confirms the actual wrapper it wrote; legacy fixture
         // editors may omit this field, so derive the same ownership decision.
-        guard let notify = try notifyValue(current: edited.previousNotify, mutation: mutation),
-              edited.effectiveNotify == nil || edited.effectiveNotify == notify else { throw Failure.editorFailed }
+        let effective = try notifyValue(current: edited.previousNotify, mutation: mutation, relayVerifier: relayVerifier)
+        let notify: [String]
+        if let receipt {
+            notify = try forwardedNotify(receipt.notify).map { try forwardingNotify(owned: baseNotify, original: $0) } ?? baseNotify
+        } else {
+            guard let installed = effective else { throw Failure.editorFailed }
+            notify = installed
+        }
+        guard edited.effectiveNotify == nil || edited.effectiveNotify == effective else { throw Failure.editorFailed }
         let hooks = try editHooks(beforeHooks, removing: receipt?.hookCommand,
                                   adding: command)
         // nil is meaningful: an earlier install may have created notify itself.
@@ -103,7 +112,8 @@ enum KeepAwakeCodexInstaller {
     }
 
     static func uninstall(source: KeepAwakeSource, home: URL, credential: URL? = nil, codexHome: URL? = nil,
-                          cli: URL? = nil, editor: ConfigEditor? = nil) throws {
+                          cli: URL? = nil, relayVerifier: @escaping (String) -> Bool = isOfficialNotifyRelay,
+                          editor: ConfigEditor? = nil) throws {
         guard KeepAwakeHookContract.codexSources.contains(source.id), source.hookFamily == "codex" else { throw Failure.unavailable }
         let root = codexRoot(home: home, codexHome: codexHome)
         guard FileManager.default.fileExists(atPath: root.path) else { return }
@@ -130,7 +140,7 @@ enum KeepAwakeCodexInstaller {
         let beforeConfig = try read(root.appendingPathComponent("config.toml"))
         let beforeHooks = try read(root.appendingPathComponent("hooks.json"))
         let configEditor = editor ?? { data, mutation in
-            try editWithCLI(data, mutation, cli: cli)
+            try editWithCLI(data, mutation, cli: cli, relayVerifier: relayVerifier)
         }
         let edited = try configEditor(beforeConfig ?? Data(), .remove(owned: receipt.notify, restore: receipt.previousNotify))
         let hooks = try editHooks(beforeHooks, removing: receipt.hookCommand, adding: nil)
@@ -142,31 +152,68 @@ enum KeepAwakeCodexInstaller {
     }
 
     /// Pure ownership decision shared by the official editor and test doubles.
-    static func notifyValue(current: [String]?, mutation: NotifyMutation) throws -> [String]? {
+    static func notifyValue(current: [String]?, mutation: NotifyMutation,
+                            relayVerifier: (String) -> Bool = isOfficialNotifyRelay) throws -> [String]? {
         switch mutation {
         case let .install(owned, replacingOwned, allowNotifyForwarding):
             if let replacingOwned {
                 // A later user edit must not be wrapped under a stale receipt:
                 // its previousNotify would otherwise restore the wrong command.
-                guard current == replacingOwned || current == owned else { throw Failure.conflict }
-                if current == replacingOwned, let original = forwardedNotify(replacingOwned) {
-                    return try forwardingNotify(owned: owned, original: original)
-                }
-                return owned
+                let replacement = try forwardedNotify(replacingOwned).map { try forwardingNotify(owned: owned, original: $0) } ?? owned
+                if current == owned { return owned }
+                guard let current else { throw Failure.conflict }
+                let changed = try editNotifyChain(current, owned: replacingOwned, replacement: replacement, relayVerifier: relayVerifier)
+                guard changed.found else { throw Failure.conflict }
+                return changed.value
             }
             if current == nil || current?.isEmpty == true || current == owned { return owned }
             guard allowNotifyForwarding, let current else { throw Failure.conflict }
             return try forwardingNotify(owned: owned, original: current)
         case let .remove(owned, restore):
-            if let current, forwardedNotify(owned) != nil, current != owned,
-               current.count >= 4, current.prefix(4) == owned.prefix(4) {
-                // A user may edit only the delegated command while retaining
-                // our forwarding wrapper. Keep its receipt and hooks until
-                // that dependency has been reviewed instead of orphaning it.
-                throw Failure.conflict
-            }
-            return current == owned ? restore : current // Never overwrite a user's subsequent notify edit.
+            guard let current else { return nil }
+            return try editNotifyChain(current, owned: owned, replacement: restore, relayVerifier: relayVerifier).value
         }
+    }
+
+    /// The native notification client can retain our exact command inside its
+    /// documented --previous-notify JSON argv. A different top-level program
+    /// is not evidence that the callback was removed. Only this signed relay
+    /// protocol may be traversed, and only the exact owned leaf may be edited.
+    private static func editNotifyChain(_ current: [String], owned: [String], replacement: [String]?,
+                                       relayVerifier: (String) -> Bool, depth: Int = 0) throws -> (value: [String]?, found: Bool) {
+        guard !owned.isEmpty, current.count <= 1028, current.reduce(0, { $0 + $1.utf8.count }) <= maximumFileSize,
+              current.allSatisfy({ !$0.utf8.contains(0) }) else { throw Failure.conflict }
+        if current == owned { return (replacement, true) }
+        if forwardedNotify(owned) != nil, current.count >= 4, current.prefix(4) == owned.prefix(4) {
+            throw Failure.conflict // Preserve a user's edited delegate and its dependencies.
+        }
+        let referencesOwnedMode = current.contains { $0.contains("--superisland-ka1") || $0.contains(owned[0]) }
+        guard current.count == 4, current[1] == "turn-ended", current[2] == "--previous-notify",
+              current[0].hasPrefix("/"), relayVerifier(current[0]) else {
+            if referencesOwnedMode { throw Failure.conflict }
+            return (current, false)
+        }
+        guard depth < 4, let data = current[3].data(using: .utf8),
+              let child = try? JSONDecoder().decode([String].self, from: data), !child.isEmpty else {
+            throw Failure.conflict
+        }
+        let edited = try editNotifyChain(child, owned: owned, replacement: replacement,
+                                        relayVerifier: relayVerifier, depth: depth + 1)
+        guard edited.found else { return (current, false) }
+        if edited.value == child { return (current, true) } // Keep original JSON whitespace/escaping.
+        guard let next = edited.value, !next.isEmpty else { return (Array(current.prefix(2)), true) }
+        let encoded = String(decoding: try JSONEncoder().encode(next), as: UTF8.self)
+        return (Array(current.prefix(3)) + [encoded], true)
+    }
+
+    static func isOfficialNotifyRelay(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), path.utf8.count <= 4096, !path.utf8.contains(0) else { return false }
+        var code: SecStaticCode?, requirement: SecRequirement?
+        let expression = "anchor apple generic and identifier \"com.openai.sky.CUAService.cli\" and certificate leaf[subject.OU] = \"2DC432GLL2\""
+        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess,
+              let code, SecRequirementCreateWithString(expression as CFString, [], &requirement) == errSecSuccess,
+              let requirement else { return false }
+        return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 
     private static func forwardedNotify(_ value: [String]) -> [String]? {
@@ -184,14 +231,17 @@ enum KeepAwakeCodexInstaller {
         guard let cli = KeepAwakeCodexRPC.executableURL() else { throw Failure.unavailable }
         return try officialEdit(original, mutation, executable: cli)
     }
-    private static func editWithCLI(_ original: Data, _ mutation: NotifyMutation, cli: URL?) throws -> EditedConfig {
+    private static func editWithCLI(_ original: Data, _ mutation: NotifyMutation, cli: URL?,
+                                    relayVerifier: @escaping (String) -> Bool) throws -> EditedConfig {
         if let cli {
             guard KeepAwakeCodexRPC.isOfficialExecutable(cli) else { throw Failure.unavailable }
-            return try officialEdit(original, mutation, executable: cli)
+            return try officialEdit(original, mutation, executable: cli, relayVerifier: relayVerifier)
         }
-        return try officialEdit(original, mutation)
+        guard let executable = KeepAwakeCodexRPC.executableURL() else { throw Failure.unavailable }
+        return try officialEdit(original, mutation, executable: executable, relayVerifier: relayVerifier)
     }
-    static func officialEdit(_ original: Data, _ mutation: NotifyMutation, executable: URL) throws -> EditedConfig {
+    static func officialEdit(_ original: Data, _ mutation: NotifyMutation, executable: URL,
+                             relayVerifier: (String) -> Bool = isOfficialNotifyRelay) throws -> EditedConfig {
         let fm = FileManager.default
         let temporary = fm.temporaryDirectory.appendingPathComponent("SuperIsland-Codex-" + UUID().uuidString, isDirectory: true)
         try fm.createDirectory(at: temporary, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -215,7 +265,7 @@ enum KeepAwakeCodexInstaller {
             let effective = (snapshot["config"] as? [String: Any])?["notify"] as? [String]
             guard effective == current else { throw Failure.conflict }
         }
-        let next = try notifyValue(current: current, mutation: mutation)
+        let next = try notifyValue(current: current, mutation: mutation, relayVerifier: relayVerifier)
         if current == next { return EditedConfig(data: original, previousNotify: current, effectiveNotify: next) }
         let response = try rpc.call("config/batchWrite", params: [
             "filePath": config.path, "expectedVersion": version, "reloadUserConfig": false,
