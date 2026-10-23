@@ -52,6 +52,8 @@ final class KeepAwakeService: ObservableObject {
     let lid: KeepAwakeLidClient
     private var lidObserver: AnyCancellable?
     private let power = KeepAwakePower()
+    private var completionSleep = KeepAwakeCompletionSleep()
+    private var completionSleepError: String?
     private var mailbox: KeepAwakeMailbox
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
@@ -136,6 +138,7 @@ final class KeepAwakeService: ObservableObject {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    self.completionSleep.cancel()
                     if notification.name == NSWorkspace.willSleepNotification {
                         self.power.apply(hold: false, policy: .system, notebook: self.isNotebook)
                         self.actualHold = self.power.isHolding
@@ -146,6 +149,7 @@ final class KeepAwakeService: ObservableObject {
         refreshNotificationPermission()
     }
     func shutdown() {
+        completionSleep.cancel()
         cancelResume()
         codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
         localSourceGeneration += 1; localSourceTask?.cancel(); localSourceTask = nil
@@ -216,6 +220,7 @@ final class KeepAwakeService: ObservableObject {
         return .init(profile: profile, mode: mode)
     }
     func connect(_ source: KeepAwakeSource, codexConnection proposed: KeepAwakeCodexConnection? = nil) throws {
+        completionSleep.cancel()
         guard !cleanupPendingSources.contains(source.id) else { throw ConnectionFailure.cleanupPending }
         if source.id.hasPrefix("codex-"), connections.contains(source.id) { return }
         let codex = try proposed ?? prepareCodexConnection(source)
@@ -280,6 +285,7 @@ final class KeepAwakeService: ObservableObject {
         tick()
     }
     func disconnect(_ source: KeepAwakeSource) throws {
+        completionSleep.cancel()
         // Stop accepting events first, even if external configuration restoration fails.
         engine.disconnect(source: source.id); connections.remove(source.id); receivedSources.remove(source.id)
         saveSources()
@@ -366,7 +372,7 @@ final class KeepAwakeService: ObservableObject {
         }
         let next = engine.evaluate(now: now, environment: environment)
         power.apply(hold: next.hold, policy: preferences.screen, notebook: isNotebook)
-        actualHold = power.isHolding; runtimeError = power.error
+        actualHold = power.isHolding; runtimeError = power.error ?? completionSleepError
         lid.apply(hold: next.hold && actualHold && isNotebook, preferences: preferences)
         decision = next
         if next.hold && !actualHold {
@@ -376,8 +382,35 @@ final class KeepAwakeService: ObservableObject {
             decision.title = "正在重试释放"
             decision.detail = "系统尚未确认释放，不能显示已恢复。"
         }
+        finishCompletedLidTasks(now: now)
         let stateKey = decision.title + (runtimeError ?? "")
         if lastLog != stateKey { lastLog = stateKey; record(decision.title) }
+    }
+    private func finishCompletedLidTasks(now: TimeInterval) {
+        let phase = engine.completionSleepPhase(now: now, environment: environment)
+        if phase == .inactive || phase == .unfinished { completionSleepError = nil }
+        // A failed/disabled helper must never be interpreted as a release ack.
+        guard lid.enabled, !recoveryInProgress, power.error == nil else {
+            completionSleep.cancel(); return
+        }
+        // Let an in-flight source snapshot publish any new task before deciding
+        // that a previously completed batch is still the last work.
+        if phase == .ready && (codexTask != nil || localSourceTask != nil) { return }
+        let released = !actualHold && power.displayID == 0 && lid.releasedForCompletionSleep
+        guard completionSleep.update(phase: phase, ownsLidHold: actualHold && lid.applied,
+                                     releasesConfirmed: released, snapshot: KeepAwakeSystemSleep.snapshot()) else { return }
+        // No await between the final policy evaluation and the physical recheck.
+        // Newly received work cancels ready before a later tick can request sleep.
+        switch KeepAwakeCompletionSleep.attempt(snapshot: KeepAwakeSystemSleep.snapshot,
+                                               request: KeepAwakeSystemSleep.request) {
+        case .skipped:
+            break
+        case .accepted:
+            record("全部任务已结束；系统已接受合盖休眠请求，实际休眠仍由系统确认。")
+        case .failed(let code):
+            completionSleepError = "保持已释放，但系统未接受合盖休眠请求（\(code)）。"
+            runtimeError = completionSleepError
+        }
     }
     private func pollCodexSource(now: TimeInterval) {
         let source = "codex-desktop"

@@ -179,6 +179,66 @@ struct KeepAwakeEngine {
         if grace { return .init(hold: true, title: "全部任务已结束 · 等待释放", detail: "最后一个任务结束 30 秒后撤回本功能的保持；新任务会取消释放。") }
         return .init(hold: false, title: "等待任务", detail: "已开启自动模式；有效任务开始后才保持。")
     }
+
+    /// Completion is distinct from stopping, disconnecting, pausing or losing a
+    /// heartbeat. Only a started task with a trusted terminal can reach ready.
+    func completionSleepPhase(now: TimeInterval, environment: Environment) -> KeepAwakeCompletionSleep.Phase {
+        guard enabled, mode == .automatic, protection == nil,
+              unsafeReason(environment) == nil, environment.hardware == .notebook,
+              pauseDeadline.map({ now >= $0 }) ?? true,
+              capacityExceededSources.isEmpty else { return .inactive }
+        if sessions.values.contains(where: \.isUnfinished) { return .unfinished }
+        let deadlines = sessions.values.compactMap { session -> TimeInterval? in
+            guard session.hasStarted, session.event.state.isTerminal else { return nil }
+            return session.releaseAt
+        }
+        guard let deadline = deadlines.max() else { return .inactive }
+        return now < deadline ? .grace : .ready
+    }
+}
+
+/// One request for a batch that actually owned a lid hold. Historical terminal
+/// tombstones never arm it. Ineligible hardware consumes completion so closing
+/// the lid later cannot put an unrelated session to sleep.
+struct KeepAwakeCompletionSleep {
+    enum Phase: Equatable { case inactive, unfinished, grace, ready }
+    struct Snapshot: Equatable {
+        var lidClosed: Bool?
+        var externalDisplays: Int?
+        var sleepDisabled: Bool?
+        var isClosedWithoutExternalDisplay: Bool { lidClosed == true && externalDisplays == 0 }
+        var permitsRequest: Bool { isClosedWithoutExternalDisplay && sleepDisabled == false }
+    }
+    enum RequestResult: Equatable { case skipped, accepted, failed(Int32) }
+    private(set) var armed = false
+
+    mutating func cancel() { armed = false }
+
+    mutating func update(phase: Phase, ownsLidHold: Bool, releasesConfirmed: Bool, snapshot: Snapshot) -> Bool {
+        switch phase {
+        case .inactive:
+            cancel()
+        case .unfinished:
+            if ownsLidHold { armed = true }
+        case .grace:
+            break
+        case .ready:
+            guard armed else { return false }
+            guard snapshot.isClosedWithoutExternalDisplay else { cancel(); return false }
+            guard releasesConfirmed else { return false }
+            cancel() // Consume before invoking any API; errors are not retried.
+            return snapshot.permitsRequest
+        }
+        return false
+    }
+
+    /// Re-read physical/power state immediately before the synchronous request.
+    /// A successful API reply means accepted, not verified physical sleep.
+    static func attempt(snapshot: () -> Snapshot, request: () -> Int32) -> RequestResult {
+        guard snapshot().permitsRequest else { return .skipped }
+        let result = request()
+        return result == 0 ? .accepted : .failed(result)
+    }
 }
 
 struct KeepAwakeSource: Identifiable {

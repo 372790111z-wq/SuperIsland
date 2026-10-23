@@ -509,6 +509,35 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
     }
 
     @MainActor
+    func testCompletionSleepWaitsForOwnedReleaseAcknowledgement() async {
+        let transport = AuthorizationTransport()
+        let client = client(transport)
+        client.authorize(); await settle()
+        client.apply(hold: true)
+        XCTAssertFalse(client.releasedForCompletionSleep)
+        transport.renewReplies[0](true, "applied"); await settle()
+        XCTAssertFalse(client.releasedForCompletionSleep)
+        client.apply(hold: false)
+        XCTAssertFalse(client.releasedForCompletionSleep, "A queued release is not a release acknowledgement")
+        transport.releaseReplies[0](true, "released"); await settle()
+        XCTAssertTrue(client.releasedForCompletionSleep)
+        client.disable()
+        XCTAssertFalse(client.releasedForCompletionSleep)
+    }
+
+    @MainActor
+    func testFailedReleaseCannotAuthorizeCompletionSleep() async {
+        let transport = AuthorizationTransport()
+        let client = client(transport)
+        client.authorize(); await settle()
+        client.apply(hold: true)
+        transport.renewReplies[0](true, "applied"); await settle()
+        client.apply(hold: false)
+        transport.releaseReplies[0](false, "unconfirmed"); await settle()
+        XCTAssertFalse(client.releasedForCompletionSleep)
+    }
+
+    @MainActor
     private func client(_ transport: AuthorizationTransport, timeout: TimeInterval = 1,
                         unregister: @escaping () async throws -> Void = {},
                         readIntent: @escaping () -> Bool = { false }, saveIntent: @escaping (Bool) -> Void = { _ in },

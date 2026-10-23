@@ -37,6 +37,9 @@ final class KeepAwakeLidClient: ObservableObject {
     var registered: Bool { serviceStatus() == .enabled || serviceStatus() == .requiresApproval }
     var requiresApproval: Bool { serviceStatus() == .requiresApproval }
     var shouldPrepareForTermination: Bool { enabled || applied || busy || releaseNeeded }
+    var releasedForCompletionSleep: Bool {
+        enabled && !blocked && !busy && !applied && !releaseNeeded && serviceStatus() == .enabled
+    }
 
     init(readEnabledIntent: @escaping () -> Bool = { UserDefaults.standard.bool(forKey: KeepAwakeLidClient.enabledIntentKey) },
          saveEnabledIntent: @escaping (Bool) -> Void = { UserDefaults.standard.set($0, forKey: KeepAwakeLidClient.enabledIntentKey) },
