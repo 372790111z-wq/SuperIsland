@@ -201,7 +201,7 @@ final class KeepAwakeHelperRecoveryTests: XCTestCase {
 
     @MainActor
     private func client(_ transport: HelperTransport, status: SMAppService.Status = .enabled) -> KeepAwakeLidClient {
-        KeepAwakeLidClient(serviceStatus: { status }, signingRequirement: { _ in "test-only" },
+        KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: { error, disconnected in
                 transport.errors.append(error)
                 transport.disconnects.append(disconnected)

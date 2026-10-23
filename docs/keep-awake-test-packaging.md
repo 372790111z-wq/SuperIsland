@@ -71,3 +71,47 @@ ZIP 解包后再次校验完整 App 摘要、所有实际 native 架构、固定
 ```sh
 python3 -B -m unittest discover -s scripts/tests -p 'test_package_keep_awake_test.py'
 ```
+
+## 配套的持续测试授权包
+
+没有 Developer ID 的内部测试包可以额外生成 setup-only 安装器；它与正式公证发行分开。
+
+```sh
+python3 -B scripts/package-keep-awake-authorization.py \
+  --package-dir build/KeepAwakeTest/Package.noindex \
+  --signing-identity '与配套 App 相同的已有签名身份' \
+  --output-dir build/KeepAwakeTest/Authorization.noindex
+```
+
+构建时同样要求干净、已提交的源码，App manifest 与当前 revision/tree 一致。
+原生只读检查器只使用 macOS 的 Security/IOKit/Swift 系统库，编入配套证书指纹和 App ID；
+公开证书、App、Helper、EventTool 的签名及完整包摘要必须一致。工具不会导出私钥、安装包或改变本机信任。
+
+输出 `SuperIsland-Local-Test-enable.pkg`、`SuperIsland-Local-Test-remove.pkg`、清单与说明。
+这两个 PKG 没有 App payload，也不注册 helper、改变电源、修改 Gatekeeper 或移除隔离属性。
+它们是未签名、未公证的内部测试安装器，其他 Mac 仍可能阻止首次打开；不应把它们称为已公证发行版。
+
+使用者先把配套 App 放到 `/Applications/SuperIsland.app`。在阅读系统安装器的说明后明确批准 enable 包，
+由 Installer 处理管理员密码；它仅在 admin 域没有该证书设置时增加 `CodeSigning` 的 `trustRoot`，
+不增加 SSL 或其他策略。已有目标设置不覆写，只有现有代码签名信任可用时才按未改动成功返回。
+**该信任会持续保留，适用于使用这张证书签署的程序，并非只信任 SuperIsland 一个 App。**
+是否接受这项持续系统信任必须单独确认；先前的临时测试授权不自动延续为长期授权。
+之后在 App 设置中按正常系统流程授权 helper。更新沿用同一证书时可保留这项信任；换证书须重新审查。
+
+新设置会在 root 私有的 `/Library/Application Support/com.workview.SuperIsland.LocalSigning/<证书SHA256>/`
+保存公开证书和事务 receipt，先保存并同步意图，再改信任；失败不宣称就绪，保留恢复记录。
+使用系统文件锁，退出或中断不会留下永久占用的目录锁。没有内置电池、签名不匹配、信任读取失败均停止。
+App 只保存成功验证后的合盖启用意愿。正常退出会释放当前租约，重开仅检查已授权服务的签名 XPC；
+从未启用、系统授权缺失或 Mac mini 不会自动注册或弹出管理员窗口。显式关闭/撤销会清除保存的意愿。
+
+撤销时先在 App 中撤销合盖支持。remove 包必须确认 helper 已注销且 `SleepDisabled=0`，
+并验证 receipt 所有权和当前策略未被外部修改，才撤销本包新增的 admin 项。
+System 公开证书若原来就有则保留；login 钥匙串、私钥、已有外部信任和其他证书均不处理。
+没有本包 receipt 时撤销包不接管已有信任。安装器生成、展开回验、真实管理员授权、重启恢复和闭盖终结后的睡眠分别验收。
+
+相关隔离测试（不使用真实 root/security/launchctl/pmset）及原生策略夹具：
+
+```sh
+python3 -B -m unittest discover -s scripts/tests -p 'test_package_keep_awake_authorization.py'
+python3 -B -m unittest discover -s scripts/tests -p 'test_keep_awake_signing_inspector.py'
+```

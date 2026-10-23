@@ -49,7 +49,7 @@ final class KeepAwakeService: ObservableObject {
     private let localSampler: @MainActor () async -> KeepAwakeKimiMonitor.Snapshot
     var openSettings: (() -> Void)?
     private let defaults: UserDefaults
-    let lid = KeepAwakeLidClient()
+    let lid: KeepAwakeLidClient
     private var lidObserver: AnyCancellable?
     private let power = KeepAwakePower()
     private var mailbox: KeepAwakeMailbox
@@ -70,6 +70,9 @@ final class KeepAwakeService: ObservableObject {
          codexHookInstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil,
          codexHookUninstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil) {
         self.defaults = defaults
+        lid = KeepAwakeLidClient(
+            readEnabledIntent: { defaults.bool(forKey: KeepAwakeLidClient.enabledIntentKey) },
+            saveEnabledIntent: { defaults.set($0, forKey: KeepAwakeLidClient.enabledIntentKey) })
         self.localSampler = localSampler
         self.codexSampler = codexSampler
         self.codexAvailability = codexAvailability
@@ -124,6 +127,7 @@ final class KeepAwakeService: ObservableObject {
             catch { record("来源凭据初始化失败；未启用该来源。") }
         }
         tick()
+        if isNotebook { lid.restoreAuthorizedIntent() }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.tick() }
         }
@@ -145,7 +149,7 @@ final class KeepAwakeService: ObservableObject {
         cancelResume()
         codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
         localSourceGeneration += 1; localSourceTask?.cancel(); localSourceTask = nil
-        timer?.invalidate(); timer = nil; engine.stop(); lid.disable()
+        timer?.invalidate(); timer = nil; engine.stop(); lid.suspendForShutdown()
         power.apply(hold: false, policy: .system, notebook: isNotebook)
         actualHold = power.isHolding
         for token in observers { NSWorkspace.shared.notificationCenter.removeObserver(token) }
