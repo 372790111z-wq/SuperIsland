@@ -243,7 +243,7 @@ final class WindowDragInteractionMonitor {
             return
         }
         guard let application = NSWorkspace.shared.frontmostApplication,
-              application.activationPolicy == .regular,
+              WindowInteractionEligibility.allowsApplication(application.activationPolicy),
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               !preferences.isExcluded(application),
               let primaryWindow = focusedStandardWindowSnapshot(for: application.processIdentifier) else {
@@ -596,7 +596,7 @@ final class WindowDragInteractionMonitor {
               visibleWindowIDs.contains(primaryWindowID),
               isStandardMutableWindow(session.primary.element),
               let neighbourApplication = NSRunningApplication(processIdentifier: session.neighbour.applicationPID),
-              neighbourApplication.activationPolicy == .regular,
+              WindowInteractionEligibility.allowsApplication(neighbourApplication.activationPolicy),
               !neighbourApplication.isTerminated,
               neighbourApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               !preferences.isExcluded(neighbourApplication),
@@ -1066,7 +1066,7 @@ final class WindowDragInteractionMonitor {
         var seenWindowIDs = Set<CGWindowID>()
         var snapshots: [WindowSnapshot] = []
         for application in NSWorkspace.shared.runningApplications where
-            application.activationPolicy == .regular &&
+            WindowInteractionEligibility.allowsApplication(application.activationPolicy) &&
             !application.isTerminated &&
             application.processIdentifier != ownPID &&
             !preferences.isExcluded(application) {

@@ -537,6 +537,136 @@ final class KeepAwakeCodexInstallerTests: XCTestCase {
             .install(owned: fixture.notify, replacingOwned: nil, allowNotifyForwarding: true), executable: cli))
     }
 
+    private let relay = "/fixture/native notification client"
+    private func nativeRelay(_ previous: [String], whitespace: Bool = false) throws -> [String] {
+        let encoded = String(decoding: try JSONEncoder().encode(previous), as: UTF8.self)
+        return [relay, "turn-ended", "--previous-notify", whitespace ? "\n " + encoded + " \n" : encoded]
+    }
+    private func relayChild(_ command: [String]) throws -> [String] {
+        try JSONDecoder().decode([String].self, from: Data(command[3].utf8))
+    }
+    private func nestedValue(_ current: [String], _ mutation: KeepAwakeCodexInstaller.NotifyMutation) throws -> [String]? {
+        try KeepAwakeCodexInstaller.notifyValue(current: current, mutation: mutation, relayVerifier: { $0 == self.relay })
+    }
+    private func relayEditor(_ data: Data, _ mutation: KeepAwakeCodexInstaller.NotifyMutation) throws -> KeepAwakeCodexInstaller.EditedConfig {
+        var values = data.isEmpty ? [:] : try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let before = values["notify"] as? [String]
+        let after = try KeepAwakeCodexInstaller.notifyValue(current: before, mutation: mutation, relayVerifier: { $0 == self.relay })
+        values["notify"] = after
+        return .init(data: try json(values), previousNotify: before, effectiveNotify: after)
+    }
+
+    func testNativeRelayReinstallPreservesItsOriginalJSONAndUpdatesOnlyMovedOwnedLeaf() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let original = ["/original/program", "", "中文\nopaque"]
+        let owned = [fixture.tool.path, "--superisland-ka1-codex-notify-forward", fixture.receipt.path, "--"] + original
+        let current = try nativeRelay(nativeRelay(owned, whitespace: true), whitespace: true)
+        XCTAssertEqual(try nestedValue(current, .install(owned: fixture.notify, replacingOwned: owned)), current)
+        let moved = ["/new/App.app/tool", fixture.notify[1], fixture.notify[2]]
+        let changed = try XCTUnwrap(nestedValue(current, .install(owned: moved, replacingOwned: owned)))
+        XCTAssertEqual(Array(changed.prefix(3)), Array(current.prefix(3)))
+        let changedChild = try relayChild(changed)
+        XCTAssertEqual(Array(changedChild.prefix(3)), Array(try relayChild(current).prefix(3)))
+        XCTAssertEqual(try relayChild(changedChild), [moved[0], owned[1], owned[2], "--"] + original)
+    }
+
+    func testNativeRelayRemovalRestoresOnlyOwnedLeafAndKeepsOuterArguments() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let original = ["/original/program", "--some-option", "a ' quote", "", "中文\nsecond"]
+        let current = try nativeRelay(nativeRelay(fixture.notify))
+        let removed = try XCTUnwrap(nestedValue(current, .remove(owned: fixture.notify, restore: original)))
+        XCTAssertEqual(Array(removed.prefix(3)), Array(current.prefix(3)))
+        let child = try relayChild(removed)
+        XCTAssertEqual(Array(child.prefix(3)), Array(try relayChild(current).prefix(3)))
+        XCTAssertEqual(try relayChild(child), original)
+        XCTAssertFalse(removed.contains { $0.contains("--superisland-ka1") })
+        let noPrior = try XCTUnwrap(nestedValue(nativeRelay(fixture.notify), .remove(owned: fixture.notify, restore: nil)))
+        XCTAssertEqual(noPrior, [relay, "turn-ended"])
+    }
+
+    func testUnknownOrUnsignedRelayCannotOrphanOwnedDependencies() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let current = try nativeRelay(fixture.notify)
+        XCTAssertThrowsError(try KeepAwakeCodexInstaller.notifyValue(current: current,
+            mutation: .remove(owned: fixture.notify, restore: nil)))
+        XCTAssertFalse(KeepAwakeCodexInstaller.isOfficialNotifyRelay(fixture.tool.path))
+        var unknown = current; unknown[0] = "/untrusted/SkyComputerUseClient"
+        XCTAssertThrowsError(try nestedValue(unknown, .remove(owned: fixture.notify, restore: nil)))
+        var wrongAction = current; wrongAction[1] = "different-action"
+        XCTAssertThrowsError(try nestedValue(wrongAction, .remove(owned: fixture.notify, restore: nil)))
+        let independent = ["/user/replacement", "opaque argument"]
+        XCTAssertEqual(try nestedValue(independent, .remove(owned: fixture.notify, restore: nil)), independent)
+    }
+
+    func testNativeRelayRejectsMalformedExcessiveDepthAndEditedOwnedDelegate() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        for payload in ["{broken", "{}", "[]", "[1]", String(repeating: "x", count: 1_048_577)] {
+            XCTAssertThrowsError(try nestedValue([relay, "turn-ended", "--previous-notify", payload],
+                .remove(owned: fixture.notify, restore: nil)))
+        }
+        var deep = fixture.notify
+        for _ in 0..<5 { deep = try nativeRelay(deep) }
+        XCTAssertThrowsError(try nestedValue(deep, .remove(owned: fixture.notify, restore: nil)))
+        let original = ["/original/program"]
+        let owned = [fixture.tool.path, "--superisland-ka1-codex-notify-forward", fixture.receipt.path, "--"] + original
+        let edited = Array(owned.prefix(4)) + ["/changed/program"]
+        XCTAssertThrowsError(try nestedValue(nativeRelay(edited), .remove(owned: owned, restore: original)))
+        XCTAssertThrowsError(try nestedValue(nativeRelay(["/user/other"]), .install(owned: fixture.notify, replacingOwned: owned)))
+    }
+
+    func testBothSourcesShareOwnedLeafWhenNativeClientWrapsBetweenConnections() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let original = ["/original/program", "opaque"]
+        try json(["notify": original, "keep": true]).write(to: fixture.config)
+        try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
+            home: fixture.home, tool: fixture.tool, allowNotifyForwarding: true, editor: fakeEditor)
+        let owned = try XCTUnwrap(object(fixture.receipt)["notify"] as? [String])
+        let wrapped = try nativeRelay(owned, whitespace: true)
+        let wrappedConfig = try json(["notify": wrapped, "keep": true]); try wrappedConfig.write(to: fixture.config)
+        let hooks = try Data(contentsOf: fixture.hooks)
+        let desktop = KeepAwakeSource(id: "codex-desktop", name: "desktop", integration: "fixture", hookFamily: "codex")
+        let credential = fixture.base.appendingPathComponent("desktop-credential.json")
+        try KeepAwakeCodexInstaller.install(source: desktop, credential: credential,
+            home: fixture.home, tool: fixture.tool, relayVerifier: { $0 == self.relay }, editor: relayEditor)
+        XCTAssertEqual(try Data(contentsOf: fixture.config), wrappedConfig)
+        XCTAssertEqual(try Data(contentsOf: fixture.hooks), hooks)
+        XCTAssertEqual(try object(fixture.receipt)["notify"] as? [String], owned, "receipt owns the leaf, never the outer relay")
+        XCTAssertEqual(try object(fixture.receipt)["previousNotify"] as? [String], original)
+        try KeepAwakeCodexInstaller.uninstall(source: source, home: fixture.home,
+            relayVerifier: { $0 == self.relay }, editor: relayEditor)
+        XCTAssertEqual(try Data(contentsOf: fixture.config), wrappedConfig)
+        try KeepAwakeCodexInstaller.uninstall(source: desktop, home: fixture.home,
+            relayVerifier: { $0 == self.relay }, editor: relayEditor)
+        let cleaned = try XCTUnwrap(object(fixture.config)["notify"] as? [String])
+        XCTAssertEqual(try relayChild(cleaned), original)
+        XCTAssertEqual(try object(fixture.config)["keep"] as? Bool, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.receipt.path))
+        for event in KeepAwakeCodexInstaller.events {
+            XCTAssertTrue(commands(try object(fixture.hooks), event: event).isEmpty)
+        }
+    }
+
+    func testOfficialEditorRemovesNestedOwnedCommandWithoutChangingOtherTOML() throws {
+        guard let cli = KeepAwakeCodexRPC.executableURL() else { throw XCTSkip("Official CLI not available") }
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let wrapped = try nativeRelay(fixture.notify)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
+        let array = String(decoding: try encoder.encode(wrapped), as: UTF8.self)
+        let original = Data(("# preserved relay comment\nnotify = " + array + "\nmodel_reasoning_effort = \"medium\" # untouched\n").utf8)
+        let repeated = try KeepAwakeCodexInstaller.officialEdit(original,
+            .install(owned: fixture.notify, replacingOwned: fixture.notify), executable: cli,
+            relayVerifier: { $0 == self.relay })
+        XCTAssertEqual(repeated.data, original)
+        let result = try KeepAwakeCodexInstaller.officialEdit(original,
+            .remove(owned: fixture.notify, restore: nil), executable: cli,
+            relayVerifier: { $0 == self.relay })
+        XCTAssertEqual(result.effectiveNotify, [relay, "turn-ended"])
+        let text = String(decoding: result.data, as: UTF8.self)
+        XCTAssertTrue(text.contains("# preserved relay comment"))
+        XCTAssertTrue(text.contains("# untouched"))
+        XCTAssertFalse(text.contains("--superisland-ka1"))
+    }
+
     private func install(_ fixture: Fixture) throws {
         try KeepAwakeCodexInstaller.install(source: source, credential: fixture.credential,
             home: fixture.home, tool: fixture.tool, editor: fakeEditor)
