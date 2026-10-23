@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import xml.etree.ElementTree as ET
 
 SPEC = importlib.util.spec_from_file_location("ka1_auth_package", Path(__file__).resolve().parents[1] / "package-keep-awake-authorization.py")
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -186,6 +187,21 @@ class AuthorizationPackageTests(unittest.TestCase):
             self.assertEqual(sum(c[0]=='add-trusted-cert' for c in self.state['commands']), 1)
         finally:
             if first.poll() is None:first.terminate(); first.communicate(timeout=5)
+
+    def testMinimumOSIsInsideVolumeCheckAndWelcomeDeclaresHTML(self):
+        for architecture in ('arm64', 'x86_64'):
+            identifier = 'com.workview.SuperIsland.LocalSigning.' + 'a'*16 + '.enable'
+            root = ET.fromstring(MODULE.distribution_xml('Title & details', identifier, architecture, 'enable'))
+            self.assertIsNone(root.find('allowed-os-versions'))
+            self.assertEqual(root.find('volume-check/allowed-os-versions/os-version').attrib['min'], '14.0')
+            self.assertEqual(root.find('welcome').attrib['mime-type'], 'text/html')
+            self.assertEqual(root.find('options').attrib['hostArchitectures'], architecture)
+            self.assertEqual(root.find('choice/pkg-ref').attrib['id'], root.find('pkg-ref').attrib['id'])
+            self.assertEqual(root.find('title').text, 'Title & details')
+
+    def testInvalidDistributionInputsCannotEnterInstallerMetadata(self):
+        with self.assertRaises(ValueError):MODULE.distribution_xml('Title', 'unexpected', 'arm64', 'enable')
+        with self.assertRaises(ValueError):MODULE.distribution_xml('Title', 'com.workview.SuperIsland.LocalSigning.'+'a'*16+'.enable', 'universal', 'enable')
 
 
 if __name__ == '__main__':
