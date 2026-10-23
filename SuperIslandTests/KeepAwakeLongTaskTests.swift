@@ -1,6 +1,172 @@
 import XCTest
 @testable import SuperIsland
 
+final class KeepAwakeCompletionSleepTests: XCTestCase {
+    private let notebook = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true)
+    private let closed = KeepAwakeCompletionSleep.Snapshot(lidClosed: true, externalDisplays: 0, sleepDisabled: false)
+
+    private func event(_ state: KeepAwakeEngine.TaskState, session: String = "one", sequence: UInt64 = 1) -> KeepAwakeEngine.Event {
+        .init(source: "codex-desktop", session: session, sequence: sequence, state: state)
+    }
+    private func completedEngine() -> KeepAwakeEngine {
+        var engine = KeepAwakeEngine()
+        engine.setAutomatic(true)
+        engine.receive(event(.running), now: 0)
+        engine.receive(event(.completed, sequence: 2), now: 10)
+        return engine
+    }
+    private func armed() -> KeepAwakeCompletionSleep {
+        var gate = KeepAwakeCompletionSleep()
+        XCTAssertFalse(gate.update(phase: .unfinished, ownsLidHold: true, releasesConfirmed: false, snapshot: closed))
+        return gate
+    }
+
+    func testLastTaskTerminalControlsSleepDeadline() {
+        var engine = completedEngine()
+        engine.receive(event(.running, session: "two"), now: 20)
+        XCTAssertEqual(engine.completionSleepPhase(now: 45, environment: notebook), .unfinished)
+        engine.receive(event(.failed, session: "two", sequence: 2), now: 50)
+        XCTAssertEqual(engine.completionSleepPhase(now: 79.999, environment: notebook), .grace)
+        XCTAssertEqual(engine.completionSleepPhase(now: 80, environment: notebook), .ready)
+        engine.receive(event(.failed, session: "two", sequence: 3), now: 85)
+        XCTAssertEqual(engine.completionSleepPhase(now: 85, environment: notebook), .ready)
+    }
+
+    func testWaitingIdleAndSilentTasksCannotRequestSleep() {
+        for state: KeepAwakeEngine.TaskState in [.running, .waiting, .idle] {
+            var engine = completedEngine()
+            engine.receive(event(.running, session: "two"), now: 20)
+            engine.receive(event(state, session: "two", sequence: 2), now: 25)
+            XCTAssertEqual(engine.completionSleepPhase(now: 86_400, environment: notebook), .unfinished)
+        }
+    }
+
+    func testNoStartedTaskOrDisconnectedTaskCannotBecomeReady() {
+        var engine = KeepAwakeEngine()
+        engine.setAutomatic(true)
+        engine.receive(event(.completed), now: 0)
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: notebook), .inactive)
+        engine = completedEngine()
+        engine.disconnect(source: "codex-desktop")
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: notebook), .inactive)
+    }
+
+    func testStoppedPausedManualProtectedAndDesktopCannotSleep() {
+        var engine = completedEngine()
+        engine.stop()
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: notebook), .inactive)
+        engine = completedEngine(); engine.togglePause(now: 20)
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: notebook), .inactive)
+        engine = completedEngine(); engine.startManual(minutes: 30, now: 20)
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: notebook), .inactive)
+        engine = completedEngine()
+        var unsafe = notebook; unsafe.thermalUnsafe = true
+        _ = engine.evaluate(now: 41, environment: unsafe)
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: notebook), .inactive)
+        engine = completedEngine()
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: .init(hardware: .desktop)), .inactive)
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: .init()), .inactive)
+    }
+
+    func testWaitsForBothPowerAndLidReleaseAcknowledgement() {
+        var gate = armed()
+        XCTAssertFalse(gate.update(phase: .grace, ownsLidHold: true, releasesConfirmed: false, snapshot: closed))
+        XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: false, snapshot: closed))
+        XCTAssertTrue(gate.armed)
+        XCTAssertTrue(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+        XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+    }
+
+    func testHistoricalCompletionWithoutAnOwnedLidHoldNeverSleeps() {
+        var gate = KeepAwakeCompletionSleep()
+        _ = gate.update(phase: .unfinished, ownsLidHold: false, releasesConfirmed: false, snapshot: closed)
+        XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+    }
+
+    func testNewWorkDuringReleaseCancelsReadyUntilItAlsoFinishes() {
+        var engine = completedEngine()
+        var gate = armed()
+        XCTAssertFalse(gate.update(phase: engine.completionSleepPhase(now: 40, environment: notebook),
+                                   ownsLidHold: false, releasesConfirmed: false, snapshot: closed))
+        engine.receive(event(.running, session: "two"), now: 40.5)
+        XCTAssertFalse(gate.update(phase: engine.completionSleepPhase(now: 41, environment: notebook),
+                                   ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+        engine.receive(event(.cancelled, session: "two", sequence: 2), now: 50)
+        XCTAssertFalse(gate.update(phase: engine.completionSleepPhase(now: 79, environment: notebook),
+                                   ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+        XCTAssertTrue(gate.update(phase: engine.completionSleepPhase(now: 80, environment: notebook),
+                                  ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+    }
+
+    func testOpenExternalOrUnknownConsumesCompletionWithoutDelayedSleep() {
+        for snapshot in [
+            KeepAwakeCompletionSleep.Snapshot(lidClosed: false, externalDisplays: 0, sleepDisabled: false),
+            .init(lidClosed: true, externalDisplays: 1, sleepDisabled: false),
+            .init(lidClosed: nil, externalDisplays: 0, sleepDisabled: false),
+            .init(lidClosed: true, externalDisplays: nil, sleepDisabled: false)
+        ] {
+            var gate = armed()
+            XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: false, snapshot: snapshot))
+            XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+        }
+    }
+
+    func testForeignOrUnknownSleepDisabledCannotRequestOrRetry() {
+        for flag: Bool? in [true, nil] {
+            var gate = armed()
+            XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true,
+                                       snapshot: .init(lidClosed: true, externalDisplays: 0, sleepDisabled: flag)))
+            XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+        }
+    }
+
+    func testInactiveAndExplicitCancellationRequireNewOwnedWorkToRearm() {
+        for explicit in [true, false] {
+            var gate = armed()
+            if explicit { gate.cancel() }
+            else { _ = gate.update(phase: .inactive, ownsLidHold: false, releasesConfirmed: true, snapshot: closed) }
+            XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+            _ = gate.update(phase: .unfinished, ownsLidHold: true, releasesConfirmed: false, snapshot: closed)
+            XCTAssertTrue(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+        }
+    }
+
+    func testCapacityUnknownCannotReachCompletionSleep() {
+        var engine = KeepAwakeEngine()
+        engine.setAutomatic(true)
+        for index in 0..<KeepAwakeEngine.sessionLimit {
+            engine.receive(event(.completed, session: "terminal-\(index)"), now: 0)
+        }
+        engine.receive(event(.running, session: "overflow"), now: 1)
+        XCTAssertEqual(engine.completionSleepPhase(now: 100, environment: notebook), .inactive)
+    }
+
+    func testPhysicalRecheckPreventsSleepAfterLidOrDisplayChanges() {
+        for changed in [
+            KeepAwakeCompletionSleep.Snapshot(lidClosed: false, externalDisplays: 0, sleepDisabled: false),
+            .init(lidClosed: true, externalDisplays: 1, sleepDisabled: false),
+            .init(lidClosed: true, externalDisplays: 0, sleepDisabled: true),
+            .init()
+        ] {
+            var gate = armed(); var calls = 0
+            XCTAssertTrue(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+            XCTAssertEqual(KeepAwakeCompletionSleep.attempt(snapshot: { changed }, request: { calls += 1; return 0 }), .skipped)
+            XCTAssertEqual(calls, 0)
+        }
+    }
+
+    func testAcceptedAndRejectedRequestsAreNotRetriedForHistoricalTerminals() {
+        for status: Int32 in [0, -1] {
+            var gate = armed(); var calls = 0
+            XCTAssertTrue(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+            XCTAssertEqual(KeepAwakeCompletionSleep.attempt(snapshot: { self.closed }, request: { calls += 1; return status }),
+                           status == 0 ? .accepted : .failed(status))
+            XCTAssertFalse(gate.update(phase: .ready, ownsLidHold: false, releasesConfirmed: true, snapshot: closed))
+            XCTAssertEqual(calls, 1)
+        }
+    }
+}
+
 /// Task lifetime and daemon lifetime are deliberately different: an unfinished
 /// task has no age limit, while the privileged lease must expire if its app dies.
 final class KeepAwakeLongTaskTests: XCTestCase {

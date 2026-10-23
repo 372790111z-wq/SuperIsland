@@ -4,6 +4,41 @@ import IOKit.pwr_mgt
 import IOKit.ps
 import Darwin
 
+/// Public console-user API only. No privileged RPC or system preference changes.
+@MainActor
+enum KeepAwakeSystemSleep {
+    static func snapshot() -> KeepAwakeCompletionSleep.Snapshot {
+        var result = KeepAwakeCompletionSleep.Snapshot()
+        let root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        if root != 0 {
+            defer { IOObjectRelease(root) }
+            func boolean(_ key: String) -> Bool? {
+                guard let value = IORegistryEntryCreateCFProperty(root, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue(),
+                      CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
+                return (value as? NSNumber)?.boolValue
+            }
+            result.lidClosed = boolean("AppleClamshellState")
+            result.sleepDisabled = boolean("SleepDisabled")
+        }
+        // One bounded query avoids a hot-plug race between querying the count
+        // and fetching a smaller list. A full buffer is unknown, not no external.
+        var displays = [CGDirectDisplayID](repeating: 0, count: 128)
+        var actual: UInt32 = 0
+        if CGGetOnlineDisplayList(UInt32(displays.count), &displays, &actual) == .success,
+           Int(actual) < displays.count {
+            result.externalDisplays = displays.prefix(Int(actual)).filter { CGDisplayIsBuiltin($0) == 0 }.count
+        }
+        return result
+    }
+
+    static func request() -> Int32 {
+        let port = IOPMFindPowerManagement(kIOMainPortDefault)
+        guard port != 0 else { return kIOReturnNotReady }
+        defer { IOServiceClose(port) }
+        return IOPMSleepSystem(port)
+    }
+}
+
 @MainActor
 final class KeepAwakePower {
     private(set) var systemID: IOPMAssertionID = 0
