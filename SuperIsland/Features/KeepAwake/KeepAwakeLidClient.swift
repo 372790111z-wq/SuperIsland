@@ -4,6 +4,7 @@ import Combine
 
 @MainActor
 final class KeepAwakeLidClient: ObservableObject {
+    static let enabledIntentKey = "keepAwake.lid.enabledIntent.v1"
     typealias RemoteProxyFactory = (_ errorHandler: @escaping (Error) -> Void,
                                    _ connectionEnded: @escaping () -> Void) throws -> KeepAwakeHelperProtocol
     private enum RequestKind { case status(UInt64), renew, release }
@@ -31,11 +32,15 @@ final class KeepAwakeLidClient: ObservableObject {
     private let registerService: () throws -> Void
     private let unregisterService: () async throws -> Void
     private let openSystemSettings: () -> Void
+    private let readEnabledIntent: () -> Bool
+    private let saveEnabledIntent: (Bool) -> Void
     var registered: Bool { serviceStatus() == .enabled || serviceStatus() == .requiresApproval }
     var requiresApproval: Bool { serviceStatus() == .requiresApproval }
     var shouldPrepareForTermination: Bool { enabled || applied || busy || releaseNeeded }
 
-    init(serviceStatus: @escaping () -> SMAppService.Status = { SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).status },
+    init(readEnabledIntent: @escaping () -> Bool = { UserDefaults.standard.bool(forKey: KeepAwakeLidClient.enabledIntentKey) },
+         saveEnabledIntent: @escaping (Bool) -> Void = { UserDefaults.standard.set($0, forKey: KeepAwakeLidClient.enabledIntentKey) },
+         serviceStatus: @escaping () -> SMAppService.Status = { SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).status },
          signingRequirement: @escaping ([String]) -> String? = { KeepAwakeHelperIdentity.requirement(identifiers: $0) },
          remoteProxyFactory: RemoteProxyFactory? = nil, requestTimeout: TimeInterval = 8,
          registerService: @escaping () throws -> Void = { try SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).register() },
@@ -48,6 +53,26 @@ final class KeepAwakeLidClient: ObservableObject {
         self.registerService = registerService
         self.unregisterService = unregisterService
         self.openSystemSettings = openSystemSettings
+        self.readEnabledIntent = readEnabledIntent
+        self.saveEnabledIntent = saveEnabledIntent
+    }
+
+    /// Restore only a previously confirmed choice. Starting the App must never
+    /// register a daemon, prompt for approval, or treat registration as readiness.
+    func restoreAuthorizedIntent() {
+        guard readEnabledIntent(), !enabled, !busy, !recovering else { return }
+        guard serviceStatus() == .enabled else {
+            message = "先前启用的合盖辅助程序尚未获得系统授权，请在设置中检查后重新启用。"
+            return
+        }
+        guard signingRequirement([KeepAwakeHelperIdentity.label]) != nil else {
+            message = "当前包的签名身份无法确认，未恢复合盖运行。"
+            return
+        }
+        intentGeneration &+= 1; enableIntent = true
+        desiredHold = false
+        message = "正在检查先前启用的合盖辅助程序。"
+        perform(.status(intentGeneration))
     }
 
     func authorize() {
@@ -86,6 +111,12 @@ final class KeepAwakeLidClient: ObservableObject {
         }
     }
     func disable() {
+        saveEnabledIntent(false)
+        suspendForShutdown()
+    }
+    /// Normal termination releases this process's lease, preserving the user's
+    /// choice for the next launch. An explicit disable/revoke forgets it.
+    func suspendForShutdown() {
         enableIntent = false; intentGeneration &+= 1
         cancelStatusRequest()
         enabled = false; apply(hold: false)
@@ -190,6 +221,7 @@ final class KeepAwakeLidClient: ObservableObject {
             // A status reply proves reachability, not ownership of any existing
             // lease and not that a power change has been applied or restored.
             blocked = false; enabled = true; lastRenewal = 0
+            saveEnabledIntent(true)
             self.message = "辅助程序连接已确认；等待保持请求，合盖效果需实机验收。"
             return
         }
@@ -257,6 +289,7 @@ final class KeepAwakeLidClient: ObservableObject {
         }
     }
     func revoke() async {
+        saveEnabledIntent(false)
         enableIntent = false; intentGeneration &+= 1
         let generation = intentGeneration
         enabled = false; desiredHold = false

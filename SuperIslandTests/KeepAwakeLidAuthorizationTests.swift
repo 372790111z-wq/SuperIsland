@@ -4,12 +4,109 @@ import ServiceManagement
 
 final class KeepAwakeLidAuthorizationTests: XCTestCase {
     @MainActor
+    func testSuccessfulAuthorizationPersistsOnlyAfterSignedStatusReply() async {
+        var saved = false
+        let transport = AuthorizationTransport(); transport.autoStatus = false
+        let client = client(transport, readIntent: { saved }, saveIntent: { saved = $0 })
+        client.authorize()
+        XCTAssertFalse(saved)
+        transport.statusReplies[0](true, "ready")
+        await settle()
+        XCTAssertTrue(saved)
+        XCTAssertTrue(client.enabled)
+        XCTAssertFalse(client.applied)
+    }
+
+    @MainActor
+    func testNormalShutdownPreservesChoiceAndNewClientRevalidatesBeforeReady() async {
+        var saved = false
+        let firstTransport = AuthorizationTransport()
+        let first = client(firstTransport, readIntent: { saved }, saveIntent: { saved = $0 })
+        first.authorize(); await settle()
+        first.suspendForShutdown()
+        XCTAssertTrue(saved)
+        XCTAssertFalse(first.enabled)
+        let secondTransport = AuthorizationTransport(); secondTransport.autoStatus = false
+        let second = client(secondTransport, readIntent: { saved }, saveIntent: { saved = $0 })
+        second.restoreAuthorizedIntent()
+        XCTAssertFalse(second.enabled)
+        second.apply(hold: true)
+        XCTAssertTrue(secondTransport.renewReplies.isEmpty)
+        secondTransport.statusReplies[0](true, "ready"); await settle()
+        XCTAssertTrue(second.enabled)
+        XCTAssertFalse(second.applied)
+        XCTAssertTrue(secondTransport.releaseReplies.isEmpty)
+    }
+
+    @MainActor
+    func testNoStoredChoiceDoesNotContactOrRegisterHelper() {
+        var registrations = 0, settings = 0
+        let transport = AuthorizationTransport()
+        let client = client(transport, register: { registrations += 1 }, settings: { settings += 1 })
+        client.restoreAuthorizedIntent()
+        XCTAssertEqual(registrations, 0); XCTAssertEqual(settings, 0)
+        XCTAssertTrue(transport.statusReplies.isEmpty)
+        XCTAssertFalse(client.enabled)
+    }
+
+    @MainActor
+    func testRestoreNeverRegistersOrPromptsWhenSystemAuthorizationIsMissing() {
+        for status in [SMAppService.Status.notRegistered, .notFound, .requiresApproval] {
+            var registrations = 0, settings = 0
+            let transport = AuthorizationTransport()
+            let client = client(transport, readIntent: { true }, status: { status },
+                                register: { registrations += 1 }, settings: { settings += 1 })
+            client.restoreAuthorizedIntent()
+            XCTAssertEqual(registrations, 0); XCTAssertEqual(settings, 0)
+            XCTAssertTrue(transport.statusReplies.isEmpty)
+            XCTAssertFalse(client.enabled)
+        }
+    }
+
+    @MainActor
+    func testExplicitDisableForgetsChoiceAndLateRestoreCannotReenableIt() async {
+        var saved = true
+        let transport = AuthorizationTransport(); transport.autoStatus = false
+        let client = client(transport, readIntent: { saved }, saveIntent: { saved = $0 })
+        client.restoreAuthorizedIntent()
+        client.disable()
+        transport.statusReplies[0](true, "late ready"); await settle()
+        XCTAssertFalse(saved); XCTAssertFalse(client.enabled)
+        client.restoreAuthorizedIntent()
+        XCTAssertEqual(transport.statusReplies.count, 1)
+    }
+
+    @MainActor
+    func testFailedRestoreCannotClaimReadinessOrAnAppliedLease() async {
+        var saved = true
+        let transport = AuthorizationTransport(); transport.statusSuccess = false
+        let client = client(transport, readIntent: { saved }, saveIntent: { saved = $0 })
+        client.restoreAuthorizedIntent(); await settle()
+        XCTAssertTrue(saved, "A transient status failure must not change the user's saved choice")
+        XCTAssertFalse(client.enabled); XCTAssertFalse(client.applied)
+        XCTAssertFalse(client.shouldPrepareForTermination)
+    }
+
+    @MainActor
+    func testRevokeForgetsChoiceEvenWhenRecoveryRequiresManualAttention() async {
+        var saved = true
+        let transport = AuthorizationTransport(); transport.autoRelease = true; transport.releaseSuccess = false
+        var unregistrations = 0
+        let client = client(transport, unregister: { unregistrations += 1 },
+                            readIntent: { saved }, saveIntent: { saved = $0 })
+        await client.revoke()
+        XCTAssertFalse(saved); XCTAssertEqual(unregistrations, 0)
+        XCTAssertFalse(client.enabled)
+        XCTAssertTrue(client.message.contains("辅助程序保留"))
+    }
+
+    @MainActor
     func testNotFoundExplicitAuthorizationActuallyRegisters() async {
         var status: SMAppService.Status = .notFound
         var registrations = 0
         var settingsOpened = 0
         let transport = AuthorizationTransport()
-        let client = KeepAwakeLidClient(serviceStatus: { status }, signingRequirement: { _ in "test-only" },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
             registerService: { registrations += 1; status = .enabled },
             openSystemSettings: { settingsOpened += 1 })
@@ -27,7 +124,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         var registrations = 0
         var settingsOpened = 0
         let transport = AuthorizationTransport()
-        let client = KeepAwakeLidClient(serviceStatus: { status }, signingRequirement: { _ in "test-only" },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
             registerService: { registrations += 1; status = .requiresApproval },
             openSystemSettings: { settingsOpened += 1 })
@@ -44,7 +141,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         var registrations = 0
         var settingsOpened = 0
         let transport = AuthorizationTransport()
-        let client = KeepAwakeLidClient(serviceStatus: { status }, signingRequirement: { _ in "test-only" },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
             registerService: {
                 registrations += 1
@@ -74,7 +171,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         var registrations = 0
         var settingsOpened = 0
         let transport = AuthorizationTransport()
-        let client = KeepAwakeLidClient(serviceStatus: { status }, signingRequirement: { _ in "test-only" },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
             registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 })
         client.authorize()
@@ -93,7 +190,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         var registrations = 0
         var settingsOpened = 0
         let transport = AuthorizationTransport()
-        let client = KeepAwakeLidClient(serviceStatus: { .enabled }, signingRequirement: { _ in "test-only" },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .enabled }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
             registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 })
         client.authorize()
@@ -110,7 +207,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
     func testUnresolvedStatusAfterRegisterDoesNotPretendEnabled() async {
         var registrations = 0
         var settingsOpened = 0
-        let client = KeepAwakeLidClient(serviceStatus: { .notFound }, signingRequirement: { _ in "test-only" },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .notFound }, signingRequirement: { _ in "test-only" },
             registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 })
         client.authorize()
         XCTAssertEqual(registrations, 1)
@@ -123,7 +220,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
     func testUnsignedPackageCannotRequestRegistrationOrSettings() async {
         var registrations = 0
         var settingsOpened = 0
-        let client = KeepAwakeLidClient(serviceStatus: { .notFound }, signingRequirement: { _ in nil },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .notFound }, signingRequirement: { _ in nil },
             registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 })
         client.authorize()
         XCTAssertEqual(registrations, 0)
@@ -198,7 +295,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         var status: SMAppService.Status = .enabled
         let transport = AuthorizationTransport()
         transport.autoStatus = false
-        let client = KeepAwakeLidClient(serviceStatus: { status }, signingRequirement: { _ in "test-only" },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy, requestTimeout: 1)
         client.authorize()
         status = .requiresApproval
@@ -413,10 +510,13 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
 
     @MainActor
     private func client(_ transport: AuthorizationTransport, timeout: TimeInterval = 1,
-                        unregister: @escaping () async throws -> Void = {}) -> KeepAwakeLidClient {
-        KeepAwakeLidClient(serviceStatus: { .enabled }, signingRequirement: { _ in "test-only" },
+                        unregister: @escaping () async throws -> Void = {},
+                        readIntent: @escaping () -> Bool = { false }, saveIntent: @escaping (Bool) -> Void = { _ in },
+                        status: @escaping () -> SMAppService.Status = { .enabled },
+                        register: @escaping () throws -> Void = {}, settings: @escaping () -> Void = {}) -> KeepAwakeLidClient {
+        KeepAwakeLidClient(readEnabledIntent: readIntent, saveEnabledIntent: saveIntent, serviceStatus: status, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy, requestTimeout: timeout,
-            unregisterService: unregister)
+            registerService: register, unregisterService: unregister, openSystemSettings: settings)
     }
 
     @MainActor

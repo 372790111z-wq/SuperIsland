@@ -101,7 +101,7 @@ final class KeepAwakeTaskIdentityTests: XCTestCase {
     func testAuthorizationRevokedDuringRecoveryCannotBeReenabledByLateSuccess() async {
         var status: SMAppService.Status = .enabled
         let transport = RecoveryAuthorizationTransport()
-        let client = KeepAwakeLidClient(serviceStatus: { status }, signingRequirement: { _ in "test-only" },
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: { _, _ in transport }, requestTimeout: 1)
         client.authorize()
         let readyDeadline = KeepAwakeClock.now() + 1
