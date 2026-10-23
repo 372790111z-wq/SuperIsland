@@ -163,6 +163,20 @@ fi
     return (common + (enable if mode == "enable" else remove)).replace("@SHA256@", policy["sha256"])
 
 
+def distribution_xml(title, identifier, architecture, mode):
+    require(architecture in ("arm64", "x86_64") and mode in ("enable", "remove"), "Unsupported distribution")
+    require(re.fullmatch(r"com\.workview\.SuperIsland\.LocalSigning\.[0-9a-f]{16}\.(enable|remove)", identifier), "Invalid package identifier")
+    title = html.escape(title, quote=True)
+    return ('<?xml version="1.0"?><installer-gui-script minSpecVersion="2"><title>' + title +
+            '</title><welcome file="' + mode + '.html" mime-type="text/html"/>' +
+            '<options customize="never" hostArchitectures="' + architecture + '"/>' +
+            '<volume-check script="true"><allowed-os-versions><os-version min="14.0"/></allowed-os-versions></volume-check>' +
+            '<domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>' +
+            '<choices-outline><line choice="trust"/></choices-outline><choice id="trust" visible="false" title="' + title +
+            '" description="' + title + '"><pkg-ref id="' + identifier + '"/></choice><pkg-ref id="' + identifier +
+            '" version="1.0" auth="Root">' + mode + '.pkg</pkg-ref></installer-gui-script>')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package-dir", type=Path, required=True)
@@ -224,7 +238,7 @@ def main():
             welcome = resources / (mode + ".html")
             welcome.write_text('<html><meta charset="utf-8"><body><h2>' + title + '</h2><p>' + detail + '</p><p>这是未经 Apple 公证的内部测试安装包，可能被系统阻止；请保留系统保护并使用已公证版本进行正式分发。</p><p>本包不安装 App、不注册辅助程序、不修改电源。请先将配套 SuperIsland.app 放入 /Applications，再在 App 设置中单独授权。</p><p>证书 SHA-256：<code>' + policy["sha256"] + '</code></p></body></html>')
             distribution = work / (mode + ".xml")
-            distribution.write_text('<?xml version="1.0"?><installer-gui-script minSpecVersion="2"><title>' + title + '</title><welcome file="' + welcome.name + '"/><options customize="never" hostArchitectures="' + policy["architecture"] + '"/><allowed-os-versions><os-version min="14.0"/></allowed-os-versions><domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/><choices-outline><line choice="trust"/></choices-outline><choice id="trust" visible="false" title="' + title + '"><pkg-ref id="' + identifier + '"/></choice><pkg-ref id="' + identifier + '" version="1.0" auth="Root">' + html.escape(component.name) + '</pkg-ref></installer-gui-script>')
+            distribution.write_text(distribution_xml(title, identifier, policy["architecture"], mode))
             destination = out / ("SuperIsland-Local-Test-" + mode + ".pkg")
             package.run("productbuild", "--distribution", distribution, "--resources", resources, "--package-path", work, destination)
             expanded = work / (mode + "-expanded")
