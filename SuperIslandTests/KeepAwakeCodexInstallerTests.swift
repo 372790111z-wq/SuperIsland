@@ -2,6 +2,34 @@ import XCTest
 @testable import SuperIsland
 
 final class KeepAwakeCodexInstallerTests: XCTestCase {
+    func testLifecycleRefreshAddsOnlyOwnedSessionStartAndPreservesNotifyTrustAndDisabledHandlers() throws {
+        let f = try Fixture(); defer { f.cleanup() }
+        try json(["notify": [String](), "other": true]).write(to: f.config)
+        try install(f)
+        var root = try object(f.hooks), hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        hooks["SessionStart"] = [["hooks": [["type": "command", "command": "/other/start", "enabled": false]]]]
+        hooks.removeValue(forKey: "Interrupt") // An explicit unrelated user edit must not be undone.
+        root["hooks"] = hooks
+        try json(root).write(to: f.hooks)
+        let config = try Data(contentsOf: f.config), receipt = try Data(contentsOf: f.receipt)
+        try KeepAwakeCodexInstaller.refreshOwnedLifecycleHooks(home: f.home)
+        let updated = try object(f.hooks)
+        XCTAssertEqual(commands(updated, event: "SessionStart").count, 2)
+        XCTAssertEqual(commands(updated, event: "SessionStart").first, "/other/start")
+        XCTAssertTrue(commands(updated, event: "Interrupt").isEmpty)
+        XCTAssertEqual(try Data(contentsOf: f.config), config)
+        XCTAssertEqual(try Data(contentsOf: f.receipt), receipt)
+        let stable = try Data(contentsOf: f.hooks)
+        try KeepAwakeCodexInstaller.refreshOwnedLifecycleHooks(home: f.home)
+        XCTAssertEqual(try Data(contentsOf: f.hooks), stable)
+
+        var disabled = try object(f.hooks); disabled["enabled"] = false
+        var disabledHooks = try XCTUnwrap(disabled["hooks"] as? [String: Any]); disabledHooks.removeValue(forKey: "SessionStart")
+        disabled["hooks"] = disabledHooks; try json(disabled).write(to: f.hooks)
+        let before = try Data(contentsOf: f.hooks)
+        try KeepAwakeCodexInstaller.refreshOwnedLifecycleHooks(home: f.home)
+        XCTAssertEqual(try Data(contentsOf: f.hooks), before)
+    }
     private let source = KeepAwakeSource(id: "codex-cli", name: "Codex CLI", integration: "fixture", hookFamily: "codex")
 
     func testInstallAndUninstallPreserveOtherHooksSettingsAndEmptyNotify() throws {

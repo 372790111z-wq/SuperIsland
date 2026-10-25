@@ -4,6 +4,60 @@ import CryptoKit
 import CoreFoundation
 import Security
 
+/// Same-user, bounded admission proofs, containing only SHA256 session IDs.
+/// This does not read the transcript or infer completion from a missing file.
+struct KeepAwakeCodexSessionProof {
+    let credential: URL
+    var url: URL { credential.appendingPathExtension("sessions.json") }
+    private struct Store: Codable { var version = 1; var sessions = Set<String>() }
+    private func valid(_ identity: String) -> Bool {
+        identity.utf8.count == 64 && identity.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+    private func locked<T>(_ body: () throws -> T) throws -> T {
+        var info = stat()
+        let parent = credential.deletingLastPathComponent().path
+        guard lstat(parent, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == getuid(), info.st_mode & 0o077 == 0 else { throw CocoaError(.fileReadNoPermission) }
+        let fd = open(url.appendingPathExtension("lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { throw CocoaError(.fileReadNoPermission) }
+        defer { close(fd) }
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(), info.st_mode & 0o077 == 0, flock(fd, LOCK_EX) == 0 else { throw CocoaError(.fileReadNoPermission) }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
+    }
+    private func read() throws -> Store {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else {
+            if errno == ENOENT { return Store() }
+            throw CocoaError(.fileReadNoPermission)
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(), info.st_mode & 0o077 == 0, info.st_size <= 524288 else { throw CocoaError(.fileReadNoPermission) }
+        let data = try handle.read(upToCount: 524289) ?? Data()
+        let store = try JSONDecoder().decode(Store.self, from: data)
+        guard store.version == 1, store.sessions.count <= 4096, store.sessions.allSatisfy(valid) else { throw CocoaError(.fileReadCorruptFile) }
+        return store
+    }
+    func contains(_ identity: String) throws -> Bool {
+        guard valid(identity) else { return false }
+        return try locked { try read().sessions.contains(identity) }
+    }
+    func remember(_ identity: String) throws {
+        guard valid(identity) else { throw CocoaError(.fileReadCorruptFile) }
+        try locked {
+            var store = try read()
+            guard store.sessions.contains(identity) || store.sessions.count < 4096 else { throw CocoaError(.fileWriteOutOfSpace) }
+            store.sessions.insert(identity)
+            try JSONEncoder().encode(store).write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+    }
+}
+
 /// Public hook metadata contract. Extra vendor fields and version strings do
 /// not affect compatibility. Unsupported events cannot invent running state.
 enum KeepAwakeHookContract {
@@ -58,6 +112,27 @@ enum KeepAwakeHookContract {
     struct Metadata: Equatable {
         var taskID: String?
         var startsTask: Bool
+    }
+    /// Internal, non-persisted Codex workers also emit generic tool/prompt hooks,
+    /// but do not run root SessionStart/SessionEnd or a root notify callback.
+    /// An explicit null transcript alone is therefore not task identity. A
+    /// legitimate --ephemeral root is admitted by its public SessionStart proof;
+    /// explicitly identified user subagents and older wire formats remain valid.
+    static func codexTaskInputIsIdentified(_ input: [String: Any], verifiedSession: Bool) -> Bool {
+        if verifiedSession { return true }
+        if codexIdentity(input["agent_id"]) != nil { return true }
+        guard let transcript = input["transcript_path"] else { return true } // Older contract.
+        guard let path = transcript as? String else { return false }
+        return path.hasPrefix("/") && path.utf8.count <= 4096 &&
+            !path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+    }
+
+    static func codexRootSessionProof(_ input: [String: Any]) -> String? {
+        guard input["hook_event_name"] as? String == "SessionStart",
+              let source = input["source"] as? String,
+              ["startup", "resume", "clear", "compact", "fork"].contains(source),
+              let session = codexIdentity(input["session_id"]) else { return nil }
+        return anonymousIdentity(session)
     }
     /// Only documented same-turn identity is accepted. The raw vendor value
     /// never leaves this process. Version, cwd, transcript and tool IDs cannot
