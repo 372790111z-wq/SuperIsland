@@ -68,8 +68,9 @@ enum KeepAwakeCodexInstaller {
         let lock = try acquireLock(root: root)
         defer { flock(lock, LOCK_UN); close(lock) }
         try recover(root: root)
-        guard let receipt = try decodeReceipt(read(receiptURL), location: receiptURL), receipt.version == 2,
-              let before = try read(root.appendingPathComponent("hooks.json")),
+        guard let receipt = try decodeReceipt(read(receiptURL), location: receiptURL) else { return }
+        guard receipt.version == 2 else { return } // Legacy receipt migration remains an explicit install action.
+        guard let before = try read(root.appendingPathComponent("hooks.json")),
               let object = try JSONSerialization.jsonObject(with: before) as? [String: Any],
               let hooks = object["hooks"] as? [String: Any],
               let groups = hooks["UserPromptSubmit"] as? [[String: Any]],
