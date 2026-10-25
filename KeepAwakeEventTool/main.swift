@@ -55,6 +55,12 @@ func run(arguments args: [String] = CommandLine.arguments,
     }
     guard input.count <= 2_097_152,
           let payload = try JSONSerialization.jsonObject(with: input) as? [String: Any] else { return }
+    if KeepAwakeHookContract.sources.contains(credential.source) {
+        guard KeepAwakeHookContract.hasDesktopParent(source: credential.source) else { return }
+    }
+    if KeepAwakeHookContract.codexSources.contains(credential.source) && !isAutoHook && !isAutoNotify {
+        guard KeepAwakeHookContract.hasCodexParent(source: credential.source) else { return }
+    }
     if KeepAwakeHookContract.codexSources.contains(source), isHook || isAutoHook {
         let proof = KeepAwakeCodexSessionProof(credential: URL(fileURLWithPath: credentialPath))
         if let identity = KeepAwakeHookContract.codexRootSessionProof(payload) {
@@ -65,12 +71,6 @@ func run(arguments args: [String] = CommandLine.arguments,
             let session = (payload["session_id"] as? String).map(KeepAwakeHookContract.anonymousIdentity)
             guard try session.map({ try proof.contains($0) }) ?? false else { return }
         }
-    }
-    if KeepAwakeHookContract.sources.contains(credential.source) {
-        guard KeepAwakeHookContract.hasDesktopParent(source: credential.source) else { return }
-    }
-    if KeepAwakeHookContract.codexSources.contains(credential.source) && !isAutoHook && !isAutoNotify {
-        guard KeepAwakeHookContract.hasCodexParent(source: credential.source) else { return }
     }
     let state: String, metadata: KeepAwakeHookContract.Metadata, session: String
     if isCodexNotify || isAutoNotify {

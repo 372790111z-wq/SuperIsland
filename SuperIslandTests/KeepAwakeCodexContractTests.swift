@@ -75,6 +75,28 @@ final class KeepAwakeCodexContractTests: XCTestCase {
         XCTAssertThrowsError(try proof.contains(identity)); XCTAssertThrowsError(try proof.remember(identity))
         XCTAssertEqual(try Data(contentsOf: other), data)
     }
+    func testUnattributedProcessCannotRegisterAnEphemeralRootProof() throws {
+        let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        let inbox = root.appendingPathComponent("inbox")
+        try fm.createDirectory(at: inbox, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let credential = root.appendingPathComponent("credential.json")
+        try JSONSerialization.data(withJSONObject: ["source": "codex-cli", "generation": "fixture",
+            "key": Data(repeating: 7, count: 32).base64EncodedString(), "inbox": inbox.path]).write(to: credential)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: credential.path)
+        let process = Process(), input = Pipe(), output = Pipe()
+        process.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/KeepAwakeEventTool")
+        process.arguments = ["--superisland-ka1", "codex-cli", credential.path]
+        process.standardInput = input; process.standardOutput = output
+        try process.run()
+        try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject:
+            ["session_id": "untrusted-root", "source": "startup", "hook_event_name": "SessionStart", "transcript_path": NSNull()]))
+        try input.fileHandleForWriting.close(); process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertFalse(fm.fileExists(atPath: KeepAwakeCodexSessionProof(credential: credential).url.path))
+        XCTAssertTrue(try fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil).isEmpty)
+    }
     private let sources = ["codex-cli", "codex-desktop"]
     private func hook(_ event: String, turn: Any = "PRIVATE-TURN-A") -> [String: Any] {
         ["session_id": "PRIVATE-THREAD", "turn_id": turn, "hook_event_name": event]
