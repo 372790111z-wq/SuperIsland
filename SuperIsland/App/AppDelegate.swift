@@ -174,11 +174,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             terminationSignalScheduler.terminationDidBegin()
         }
         guard deferredTerminationTask == nil else { return .terminateLater }
-        guard WindowEnhancementController.shared.requiresTerminationPreparation || KeepAwakeService.shared.lid.shouldPrepareForTermination else {
+        guard WindowEnhancementController.shared.requiresTerminationPreparation || KeepAwakeService.shared.lid.shouldPrepareForTermination || ScreenshotLineFeature.shared.clearInProgress else {
             return .terminateNow
         }
 
         deferredTerminationTask = Task { @MainActor [weak self] in
+            await ScreenshotLineFeature.shared.prepareClearForTermination()
             await KeepAwakeService.shared.lid.prepareForTermination()
             let safeToTerminate = await WindowEnhancementController.shared.prepareForTermination()
             self?.deferredTerminationTask = nil
