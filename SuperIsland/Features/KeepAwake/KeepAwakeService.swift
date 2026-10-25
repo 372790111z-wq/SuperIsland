@@ -147,9 +147,10 @@ final class KeepAwakeService: ObservableObject {
          hookUninstaller: (@MainActor (KeepAwakeSource) throws -> Void)? = nil,
          codexResolver: @escaping @MainActor () throws -> KeepAwakeCodexEnvironment.Profile = { try KeepAwakeCodexEnvironment.discover() },
          codexHookInstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil,
-         codexHookUninstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil) {
+         codexHookUninstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil,
+         lidClient: KeepAwakeLidClient? = nil) {
         self.defaults = defaults
-        lid = KeepAwakeLidClient(
+        lid = lidClient ?? KeepAwakeLidClient(
             readEnabledIntent: { defaults.bool(forKey: KeepAwakeLidClient.enabledIntentKey) },
             saveEnabledIntent: { defaults.set($0, forKey: KeepAwakeLidClient.enabledIntentKey) })
         self.localSampler = localSampler
@@ -259,14 +260,38 @@ final class KeepAwakeService: ObservableObject {
         lid.message
     }
     private func cancelResume() { resumeGeneration &+= 1; recoveryInProgress = false }
-    func setEnabled(_ enabled: Bool) { cancelResume(); engine.setEnabled(enabled); tick() }
-    func automatic(_ enabled: Bool) { cancelResume(); engine.setAutomatic(enabled); tick() }
+    var releasePending: Bool { !engine.enabled && (power.hasPendingAssertions || lid.hasPendingRelease) }
+    var canEnable: Bool { engine.enabled || (!releasePending && !recoveryInProgress) }
+    func setEnabled(_ enabled: Bool) {
+        guard !enabled || canEnable else { return }
+        cancelResume()
+        if !enabled { completionSleep.cancel(); completionSleepError = nil }
+        else if isNotebook { lid.restoreAuthorizedIntent() }
+        engine.setEnabled(enabled); tick()
+    }
+    func automatic(_ enabled: Bool) {
+        guard !enabled || canEnable else { return }
+        cancelResume(); completionSleep.cancel()
+        if enabled && isNotebook { lid.restoreAuthorizedIntent() }
+        engine.setAutomatic(enabled); tick()
+    }
     func selectMode(_ mode: KeepAwakeEngine.Mode) { cancelResume(); engine.selectMode(mode); tick() }
-    func manual(minutes: Int) { cancelResume(); engine.startManual(minutes: minutes, now: KeepAwakeClock.now()); tick() }
+    func manual(minutes: Int) {
+        guard canEnable else { return }
+        cancelResume(); completionSleep.cancel()
+        if isNotebook { lid.restoreAuthorizedIntent() }
+        engine.startManual(minutes: minutes, now: KeepAwakeClock.now()); tick()
+    }
     func pause() { cancelResume(); engine.togglePause(now: KeepAwakeClock.now()); tick() }
-    func stop() { cancelResume(); engine.stop(); tick() }
+    func stop() { setEnabled(false) }
+    func retryRelease() {
+        guard !engine.enabled else { return }
+        completionSleep.cancel()
+        lid.retryOwnedRelease()
+        tick()
+    }
     func resume() {
-        guard !recoveryInProgress else { return }
+        guard engine.enabled, !recoveryInProgress else { return }
         environment = KeepAwakePower.environment()
         guard engine.unsafeReason(environment) == nil else {
             record("恢复检查未通过，保护条件仍然存在。"); tick(); return
@@ -469,6 +494,14 @@ final class KeepAwakeService: ObservableObject {
         } else if !next.hold && actualHold {
             decision.title = "正在重试释放"
             decision.detail = "系统尚未确认释放，不能显示已恢复。"
+        }
+        if !engine.enabled && power.hasPendingAssertions {
+            decision.title = "功能已关闭 · 系统保持释放未确认"
+            decision.detail = power.error ?? "正在重试释放本功能的保持断言。"
+        }
+        if !engine.enabled && lid.hasPendingRelease {
+            decision.title = lid.releaseFailed ? "功能已关闭 · 系统设置恢复失败" : "功能已关闭 · 正在恢复系统设置"
+            decision.detail = lid.message
         }
         finishCompletedLidTasks(now: now)
         let stateKey = decision.title + (runtimeError ?? "")

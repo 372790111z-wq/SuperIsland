@@ -37,6 +37,13 @@ final class KeepAwakeLidClient: ObservableObject {
     var registered: Bool { serviceStatus() == .enabled || serviceStatus() == .requiresApproval }
     var requiresApproval: Bool { serviceStatus() == .requiresApproval }
     var shouldPrepareForTermination: Bool { enabled || applied || busy || releaseNeeded }
+    /// Ownership, independent of whether the user enabled the module or helper.
+    var hasPendingRelease: Bool { releaseNeeded }
+    var releaseFailed: Bool { releaseNeeded && blocked }
+    func retryOwnedRelease() {
+        guard releaseNeeded, !busy else { return }
+        retryRelease()
+    }
     var releasedForCompletionSleep: Bool {
         enabled && !blocked && !busy && !applied && !releaseNeeded && serviceStatus() == .enabled
     }

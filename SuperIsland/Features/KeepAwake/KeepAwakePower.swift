@@ -49,6 +49,7 @@ final class KeepAwakePower {
     private var screenError: String?
     private var lastPolicy: KeepAwakeEngine.ScreenPolicy = .system
     var isHolding: Bool { systemID != 0 }
+    var hasPendingAssertions: Bool { systemID != 0 || displayID != 0 }
 
     static func environment() -> KeepAwakeEngine.Environment {
         var result = KeepAwakeEngine.Environment()

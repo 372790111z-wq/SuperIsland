@@ -1,7 +1,11 @@
 import SwiftUI
 
 struct KeepAwakeSettingsView: View {
-    @ObservedObject private var service = KeepAwakeService.shared
+    @ObservedObject private var service: KeepAwakeService
+    init(service: KeepAwakeService = .shared, initialTab: Int = 0) {
+        self.service = service
+        _tab = State(initialValue: initialTab)
+    }
     @State private var tab = 0
     @State private var duration = 60
     @State private var query = ""
@@ -22,12 +26,22 @@ struct KeepAwakeSettingsView: View {
             Text("保持唤醒").font(.title2.weight(.semibold))
             Text("按本地任务或手动计时保持 Mac 工作，屏幕与合盖支持分别管理。")
                 .font(.callout).foregroundStyle(.secondary)
+            SettingGroup {
+                SettingToggleRow(title: "启用保持唤醒", description: "关闭后立即停止本功能保持并恢复系统设置，不会取消外部任务。",
+                                 isOn: Binding(get: { service.engine.enabled }, set: service.setEnabled))
+                    .toggleStyle(.switch).disabled(!service.canEnable)
+                    .dataAnnotationID("si.ka.master")
+            }
             status
+            if service.releasePending {
+                Button(service.lid.busy ? "正在恢复系统设置…" : "重试恢复系统设置") { service.retryRelease() }
+                    .disabled(service.lid.busy).dataAnnotationID("si.ka.release-retry")
+            }
             Picker("管理分区", selection: $tab) {
                 Text("运行策略").tag(0); Text("任务来源 · \(KeepAwakeSource.all.count)").tag(1); Text("保护与恢复").tag(2)
             }.pickerStyle(.segmented)
             switch tab {
-            case 0: strategy
+            case 0: strategy.disabled(!service.engine.enabled)
             case 1: sourceList
             default: protection
             }
@@ -36,7 +50,7 @@ struct KeepAwakeSettingsView: View {
         .dataAnnotationID("si.ka.settings")
         .confirmationDialog("接入任务来源", isPresented: $showConnection, titleVisibility: .visible) {
             Button(proposedReadOnly ? "启用只读接入" : "备份并接入") {
-                guard let source = proposedSource else { return }
+                guard service.engine.enabled, let source = proposedSource else { return }
                 do { try service.connect(source, codexConnection: proposedCodexConnection) } catch { alert(error.localizedDescription) }
             }
             Button("取消", role: .cancel) {}
@@ -58,7 +72,7 @@ struct KeepAwakeSettingsView: View {
             }
         }
         .confirmationDialog("授权合盖运行", isPresented: $showLidAuthorization, titleVisibility: .visible) {
-            Button("继续系统授权") { service.lid.authorize() }
+            Button("继续系统授权") { if service.engine.enabled { service.lid.authorize() } }
             Button("取消", role: .cancel) {}
         } message: {
             Text("将注册 SuperIsland 自己的系统辅助程序。启用后会在保持期间暂时改变系统合盖休眠设置，辅助程序每 30 秒续期，任务可持续运行；只有主程序异常停止续期时，才在最多 3 分钟后恢复系统设置。与其他电源工具冲突时停止并提示。首次启用后仍需测试本机合盖任务是否连续运行。")
@@ -83,9 +97,6 @@ struct KeepAwakeSettingsView: View {
     private var strategy: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingGroup {
-                SettingToggleRow(title: "启用保持唤醒", description: "自动模式等待有效任务，手动模式需要点击开始。", isOn: Binding(get: { service.engine.enabled }, set: service.setEnabled))
-                    .dataAnnotationID("si.ka.master")
-                SettingRowDivider()
                 HStack {
                     Text("运行模式")
                     Spacer()
@@ -144,7 +155,7 @@ struct KeepAwakeSettingsView: View {
             Button("停止并恢复") { service.stop() }.dataAnnotationID("si.ka.stop")
             if service.engine.protection != nil {
                 Button(service.recoveryInProgress ? "正在检查恢复…" : "恢复检查并继续") { service.resume() }
-                    .disabled(service.recoveryInProgress)
+                    .disabled(!service.engine.enabled || service.recoveryInProgress)
             }
         }
     }
@@ -168,15 +179,17 @@ struct KeepAwakeSettingsView: View {
                             }
                         } else if service.connections.contains(source.id) {
                             Button("断开") {
+                                guard service.engine.enabled else { return }
                                 do { try service.disconnect(source) } catch { alert(error.localizedDescription) }
-                            }
+                            }.disabled(!service.engine.enabled)
                         } else if source.canConnect {
                             Button("接入…") {
+                                guard service.engine.enabled else { return }
                                 do {
                                     proposedCodexConnection = try service.prepareCodexConnection(source)
                                     proposedSource = source; showConnection = true
                                 } catch { alert(error.localizedDescription) }
-                            }
+                            }.disabled(!service.engine.enabled)
                         } else {
                             Text(source.isDeferred ? "暂缓接入" : source.id == "codex-desktop" ? "接口未提供" : "待验证")
                                 .font(.caption).foregroundStyle(.secondary)
@@ -210,15 +223,16 @@ struct KeepAwakeSettingsView: View {
                     Text(service.notificationStatus).font(.caption).foregroundStyle(.secondary)
                     Spacer(); Button("申请通知权限") { service.requestNotificationPermission() }
                 }.padding(16)
-            }.accessibilityElement(children: .contain).dataAnnotationID("si.ka.protection")
+            }.disabled(!service.engine.enabled)
+                .accessibilityElement(children: .contain).dataAnnotationID("si.ka.protection")
             controls
             if service.isNotebook {
                 SettingGroup {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(service.lidExplanation).font(.caption).foregroundStyle(.secondary)
                         HStack {
-                            Button("检查并释放租约") { service.lid.retryRelease() }.disabled(service.lid.busy || !service.lid.registered)
-                            Button("撤销合盖授权") { Task { await service.lid.revoke() } }.disabled(service.lid.busy || !service.lid.registered)
+                            Button("检查并释放租约") { service.lid.retryRelease() }.disabled(!service.engine.enabled || service.lid.busy || !service.lid.registered)
+                            Button("撤销合盖授权") { Task { await service.lid.revoke() } }.disabled(!service.engine.enabled || service.lid.busy || !service.lid.registered)
                         }
                     }.padding(16)
                 }.accessibilityElement(children: .contain).dataAnnotationID("si.ka.helper")
