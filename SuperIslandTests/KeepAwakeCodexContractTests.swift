@@ -4,6 +4,57 @@ import Darwin
 @testable import SuperIsland
 
 final class KeepAwakeCodexContractTests: XCTestCase {
+    func testChildHookOwnerMatchesNotifyRatherThanSharedParentSession() throws {
+        for child in ["child-a", "child-b"] {
+            for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "PreCompact", "PostCompact"] {
+                let input: [String: Any] = ["session_id": "shared-root", "agent_id": child,
+                    "turn_id": "round", "hook_event_name": event, "transcript_path": NSNull()]
+                let owner = try XCTUnwrap(KeepAwakeHookContract.codexHookSession(input))
+                let terminal = try XCTUnwrap(KeepAwakeHookContract.codexNotification([
+                    "type": "agent-turn-complete", "thread-id": child, "turn-id": "round"]))
+                XCTAssertEqual(owner, terminal.session)
+                XCTAssertNotEqual(owner, KeepAwakeHookContract.anonymousIdentity("shared-root"))
+                XCTAssertTrue(KeepAwakeHookContract.codexTaskInputIsIdentified(input, verifiedSession: false))
+            }
+        }
+        XCTAssertEqual(KeepAwakeHookContract.codexHookSession(hook("PreToolUse")),
+            KeepAwakeHookContract.anonymousIdentity("PRIVATE-THREAD"))
+    }
+    func testMalformedChildCannotFallBackToRootOrBorrowRootProof() {
+        for value: Any in ["", " \n", "child\n", 7, String(repeating: "x", count: 1025)] {
+            var input = hook("SessionStart"); input["source"] = "startup"; input["agent_id"] = value
+            XCTAssertNil(KeepAwakeHookContract.codexHookSession(input))
+            XCTAssertNil(KeepAwakeHookContract.codexRootSessionProof(input))
+            XCTAssertFalse(KeepAwakeHookContract.codexTaskInputIsIdentified(input, verifiedSession: true))
+        }
+        var child = hook("SessionStart"); child["source"] = "startup"; child["agent_id"] = "child"
+        XCTAssertNil(KeepAwakeHookContract.codexRootSessionProof(child))
+    }
+    func testChildrenWithSharedSessionAndSameTurnRemainIndependentThroughRelease() throws {
+        var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+        let env = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true)
+        func input(_ child: String) -> [String: Any] {
+            ["session_id": "root", "agent_id": child, "turn_id": "same-turn", "hook_event_name": "UserPromptSubmit"]
+        }
+        for child in ["one", "two"] {
+            let payload = input(child), metadata = KeepAwakeHookContract.metadata(source: "codex-desktop", input: payload)
+            XCTAssertTrue(engine.receive(.init(source: "codex-desktop", session: try XCTUnwrap(KeepAwakeHookContract.codexHookSession(payload)),
+                sequence: 1, state: .running, taskID: metadata.taskID, startsTask: metadata.startsTask), now: 0))
+        }
+        func finish(_ child: String, time: TimeInterval) throws {
+            let done = try XCTUnwrap(KeepAwakeHookContract.codexNotification([
+                "type": "agent-turn-complete", "thread-id": child, "turn-id": "same-turn"]))
+            engine.receive(.init(source: "codex-desktop", session: done.session, sequence: 2,
+                state: .completed, taskID: done.metadata.taskID, startsTask: false), now: time)
+        }
+        try finish("one", time: 1)
+        XCTAssertTrue(engine.evaluate(now: 100, environment: env).hold, "A sibling still runs even after the first child releases.")
+        XCTAssertEqual(engine.sessions.count, 2)
+        try finish("two", time: 101)
+        XCTAssertTrue(engine.evaluate(now: 130.9, environment: env).hold)
+        XCTAssertFalse(engine.evaluate(now: 131, environment: env).hold)
+        XCTAssertEqual(engine.sessions.count, 2, "Notify updates the existing owner instead of leaving a parent guard.")
+    }
     func testAnonymousEphemeralWorkersCannotInventPermanentTasks() {
         for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "PreCompact", "PostCompact"] {
             let input: [String: Any] = ["session_id": "worker", "turn_id": "worker-turn",

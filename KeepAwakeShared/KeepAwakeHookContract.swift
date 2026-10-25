@@ -118,7 +118,18 @@ enum KeepAwakeHookContract {
     /// An explicit null transcript alone is therefore not task identity. A
     /// legitimate --ephemeral root is admitted by its public SessionStart proof;
     /// explicitly identified user subagents and older wire formats remain valid.
+    /// Hook session_id is shared by the root and descendants. agent_id, when
+    /// supplied, is the concrete child thread that notify later identifies.
+    /// Keep the owner in the source/session/turn key; never join turns globally.
+    static func codexHookSession(_ input: [String: Any]) -> String? {
+        guard let root = codexIdentity(input["session_id"]) else { return nil }
+        if let agent = input["agent_id"], !(agent is NSNull) {
+            return codexIdentity(agent).map(anonymousIdentity)
+        }
+        return anonymousIdentity(root)
+    }
     static func codexTaskInputIsIdentified(_ input: [String: Any], verifiedSession: Bool) -> Bool {
+        guard codexHookSession(input) != nil else { return false }
         if verifiedSession { return true }
         if codexIdentity(input["agent_id"]) != nil { return true }
         guard let transcript = input["transcript_path"] else { return true } // Older contract.
@@ -129,6 +140,7 @@ enum KeepAwakeHookContract {
 
     static func codexRootSessionProof(_ input: [String: Any]) -> String? {
         guard input["hook_event_name"] as? String == "SessionStart",
+              input["agent_id"] == nil || input["agent_id"] is NSNull,
               let source = input["source"] as? String,
               ["startup", "resume", "clear", "compact", "fork"].contains(source),
               let session = codexIdentity(input["session_id"]) else { return nil }

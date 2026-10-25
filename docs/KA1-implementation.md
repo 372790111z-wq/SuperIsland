@@ -310,3 +310,11 @@ Qoder CN、WorkBuddy、ZCode 均已收到真实桌面任务的官方 hook 事件
 - 启动恢复时只为已有且启用的自有 hooks 窄补 `SessionStart`；保留 notify、其他 handlers、用户禁用状态、其他被用户移除的事件。使用现有配置事务与备份，不新增 hook 信任、不替用户批准 Codex 的信任提示。
 - 合盖验收记录由 SuperIsland 自身运行，不再依赖 Codex 工具执行进程。只有本机私有 KeepAwake 目录存在0600的 `acceptance-request.json` 才启动；请求包含 `id`（UUID）与 `expiresAt`（Unix秒，未来不超过900秒）。输出为同目录0600的 `acceptance-<UUID>-<AppPID>.jsonl`，包括明确接收的匿名轮次事件、当前未结束记录、实际保持与辅助程序释放状态、公开盖子/外屏/休眠标志、睡眠/唤醒通知及两种时钟。不记录正文、标题、路径或凭据。每两秒采样、最多2MiB，并同时按墙钟与连续时钟截止；正常关闭写结束原因，缺少结束记录仍视为观察缺口。该开关仅用于本机验收，没有新增产品页面。
 - 105项相关原生测试通过，另有6项直接复用生产事件工具处理代码的隔离读写检查通过；父进程角色仅在隔离 fixture 注入，不能据此声称新包已接入真实 Codex 或完成合盖。当前安装版仍为20261023224800。先安装候选验证开盖下的真实终结与记录持续，再安排下一轮合盖。SC1清理图片HTML仍待确认，本修正没有改其业务代码、PRD或标注。
+
+## 2026-10-25 · 开盖联调发现的子代理身份修正（候选）
+
+- 20261025105831 已获用户授权安装。App 内记录在本聊天真实完成之后仍持续超过两分钟，未复现原外部工具进程随轮次退出而中断的问题；这仅证明开盖记录跨轮存活，不代表自动释放或物理合盖休眠通过。
+- 首次回读发现同一轮的 running hook 与 completed notify 被写入不同会话。公开 [hooks 字段说明](https://learn.chatgpt.com/docs/hooks) 规定子代理 hook 的 `session_id` 使用父会话；公开 [hook_runtime](https://github.com/openai/codex/blob/main/codex-rs/core/src/hook_runtime.rs) 的 `agent_id` 则取具体子线程。原实现虽然接纳明确 `agent_id`，生成任务归属时仍只用 `session_id`，与 notify 的具体 `thread-id` 无法闭合。私有哈希证据在 `build/KA1TaskEndValidation/open-lid-first-heartbeat.json`。
+- 生产合同统一选择 hook 所属线程：有明确有效 `agent_id` 时使用它，否则使用有效 `session_id`。两者均只输出匿名摘要；畸形的显式子代理身份拒绝，不退回父会话，也不借用根会话凭据。notify 保持精确 thread/turn 配对，引擎保持来源、线程、轮次隔离，不做跨会话的全局 taskID 合并，不强制终结既有未知记录。其他 IDE 的身份映射未改。
+- 新增回归覆盖共享父 session 的两个子代理、同名轮次隔离、各自完成后的30秒释放，以及畸形身份。158项相关原生测试通过；另外6项复用生产事件工具处理函数的隔离检查核验 stdin/notify→身份→HMAC envelope 和正文脱敏。这些检查仍不是新候选的真实设备验收。
+- 边界：根会话 `SessionStart` 的匿名凭据证明根会话已启动，但同一家族的无 `agent_id` 临时内部工作会话共享该 session，单凭这项凭据不能保证区分所有临时根/内部工作场景；不再声称已覆盖这一歧义。没有真实生命周期闭环的已接纳任务仍保持，不按超时判定完成。新候选尚未安装，需再次验证真实任务自动释放，再安排合盖测试。PRD、界面、annotation 和待确认挂绳草稿未改。

@@ -62,6 +62,7 @@ func run(arguments args: [String] = CommandLine.arguments,
         guard KeepAwakeHookContract.hasCodexParent(source: credential.source) else { return }
     }
     if KeepAwakeHookContract.codexSources.contains(source), isHook || isAutoHook {
+        guard KeepAwakeHookContract.codexHookSession(payload) != nil else { return }
         let proof = KeepAwakeCodexSessionProof(credential: URL(fileURLWithPath: credentialPath))
         if let identity = KeepAwakeHookContract.codexRootSessionProof(payload) {
             try proof.remember(identity)
@@ -80,7 +81,12 @@ func run(arguments args: [String] = CommandLine.arguments,
         guard let sessionID = payload["session_id"] as? String, !sessionID.isEmpty, sessionID.utf8.count <= 1024,
               let hookState = KeepAwakeHookContract.eventState(source: credential.source, input: payload) else { return }
         state = hookState; metadata = KeepAwakeHookContract.metadata(source: credential.source, input: payload)
-        session = KeepAwakeHookContract.anonymousIdentity(sessionID)
+        if KeepAwakeHookContract.codexSources.contains(source) {
+            guard let owner = KeepAwakeHookContract.codexHookSession(payload) else { return }
+            session = owner
+        } else {
+            session = KeepAwakeHookContract.anonymousIdentity(sessionID)
+        }
     }
     let event = Event(source: credential.source, session: session, sequence: mach_continuous_time(), state: state,
                       taskID: metadata.taskID, startsTask: metadata.startsTask)
