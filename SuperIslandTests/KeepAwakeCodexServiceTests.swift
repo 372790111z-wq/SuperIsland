@@ -5,6 +5,57 @@ import XCTest
 /// service remains disabled; policy decisions are evaluated on a local copy so
 /// these fixtures never acquire a real power assertion or a helper lease.
 final class KeepAwakeCodexServiceTests: XCTestCase {
+    @MainActor func testAppOwnedAcceptanceRecorderIsExplicitBoundedAndSurvivesCallerScope() throws {
+        let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        var wall: TimeInterval = 1000, continuous: TimeInterval = 20, awake: TimeInterval = 20
+        let recorder = KeepAwakeAcceptanceRecorder(root: root, wall: { wall }, continuous: { continuous }, awake: { awake })
+        recorder.poll(); recorder.append("fixture-no-request")
+        XCTAssertTrue(try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).isEmpty)
+        let request = KeepAwakeAcceptanceRecorder.Request(id: UUID(), expiresAt: 1300)
+        try JSONEncoder().encode(request).write(to: recorder.requestURL)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: recorder.requestURL.path)
+        recorder.poll()
+        do { recorder.append("accepted-task-event", fields: ["source": "codex-desktop", "state": "completed"]) }
+        wall += 31; continuous += 31; awake += 31
+        recorder.append("power-sample", fields: ["actualHold": false, "lidClosed": true])
+        // Simulate genuine sleep: continuous clock advances, awake clock does not.
+        wall += 100; continuous += 100
+        recorder.append("system-did-wake")
+        wall += 200; continuous += 200; awake += 200
+        recorder.poll()
+        let files = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).filter { $0.pathExtension == "jsonl" }
+        let file = try XCTUnwrap(files.first)
+        let lines = try String(contentsOf: file, encoding: .utf8).split(separator: "\n").map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        XCTAssertEqual(lines.map { $0["event"] as? String }, ["recorder-started", "accepted-task-event", "power-sample", "system-did-wake", "recorder-finished"])
+        XCTAssertEqual(lines.last?["reason"] as? String, "deadline")
+        XCTAssertEqual((lines[3]["continuous"] as? Double ?? 0) - (lines[3]["awake"] as? Double ?? 0), 100)
+        XCTAssertEqual((try fm.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let size = try Data(contentsOf: file).count
+        recorder.poll(); recorder.append("after-deadline")
+        XCTAssertEqual(try Data(contentsOf: file).count, size)
+    }
+
+    @MainActor func testAcceptanceRecorderRejectsLongRequestsAndUsesContinuousDeadline() throws {
+        let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        var wall: TimeInterval = 1000, tick: TimeInterval = 0
+        let recorder = KeepAwakeAcceptanceRecorder(root: root, wall: { wall }, continuous: { tick }, awake: { tick })
+        func write(_ expires: TimeInterval) throws {
+            try JSONEncoder().encode(KeepAwakeAcceptanceRecorder.Request(id: UUID(), expiresAt: expires)).write(to: recorder.requestURL)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: recorder.requestURL.path)
+        }
+        try write(1901); recorder.poll()
+        XCTAssertFalse(recorder.sampleDue)
+        try write(1300); recorder.poll(); XCTAssertTrue(recorder.sampleDue)
+        wall = 500; tick = 301; recorder.poll() // Wall clock moved backwards.
+        XCTAssertFalse(recorder.sampleDue)
+    }
+
     private typealias Snapshot = KeepAwakeCodexMonitor.Snapshot
 
     private func snapshot(_ status: String, turn: String, turnStatus: String) -> Snapshot {

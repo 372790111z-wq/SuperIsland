@@ -4,6 +4,77 @@ import Darwin
 @testable import SuperIsland
 
 final class KeepAwakeCodexContractTests: XCTestCase {
+    func testAnonymousEphemeralWorkersCannotInventPermanentTasks() {
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "PreCompact", "PostCompact"] {
+            let input: [String: Any] = ["session_id": "worker", "turn_id": "worker-turn",
+                "hook_event_name": event, "transcript_path": NSNull()]
+            XCTAssertFalse(KeepAwakeHookContract.codexTaskInputIsIdentified(input, verifiedSession: false))
+            XCTAssertTrue(KeepAwakeHookContract.codexTaskInputIsIdentified(input, verifiedSession: true),
+                "A real --ephemeral root remains supported after its SessionStart proof.")
+        }
+    }
+    func testRootCompletionReleasesAfterThirtySecondsDespiteUnfinishedInternalWorkerHooks() {
+        let source = "codex-desktop"
+        var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+        let environment = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true)
+        func deliver(_ session: String, _ turn: String, _ event: String, transcript: Any, sequence: UInt64, time: TimeInterval) {
+            let payload: [String: Any] = ["session_id": session, "turn_id": turn, "hook_event_name": event, "transcript_path": transcript]
+            guard KeepAwakeHookContract.codexTaskInputIsIdentified(payload, verifiedSession: false),
+                  let state = KeepAwakeHookContract.eventState(source: source, input: payload),
+                  let typed = KeepAwakeEngine.TaskState(rawValue: state) else { return }
+            let metadata = KeepAwakeHookContract.metadata(source: source, input: payload)
+            engine.receive(.init(source: source, session: KeepAwakeHookContract.anonymousIdentity(session), sequence: sequence,
+                state: typed, taskID: metadata.taskID, startsTask: metadata.startsTask), now: time)
+        }
+        deliver("root", "root-turn", "UserPromptSubmit", transcript: "/fixture/rollout.jsonl", sequence: 1, time: 0)
+        deliver("code-worker", "worker-turn", "UserPromptSubmit", transcript: NSNull(), sequence: 2, time: 1)
+        deliver("code-worker", "worker-turn", "PostToolUse", transcript: NSNull(), sequence: 3, time: 2)
+        deliver("code-worker", "worker-turn", "Stop", transcript: NSNull(), sequence: 4, time: 3)
+        XCTAssertTrue(engine.evaluate(now: 10_000, environment: environment).hold, "The root still has no terminal event.")
+        let terminal = KeepAwakeHookContract.codexNotification(["type": "agent-turn-complete", "thread-id": "root", "turn-id": "root-turn"])!
+        engine.receive(.init(source: source, session: terminal.session, sequence: 5, state: .completed,
+            taskID: terminal.metadata.taskID, startsTask: false), now: 10_001)
+        XCTAssertEqual(engine.sessions.count, 1)
+        XCTAssertTrue(engine.evaluate(now: 10_030.9, environment: environment).hold)
+        XCTAssertFalse(engine.evaluate(now: 10_031, environment: environment).hold)
+    }
+    func testPersistedRootsLegacyHooksAndExplicitUserSubagentsRemainAdmitted() {
+        XCTAssertTrue(KeepAwakeHookContract.codexTaskInputIsIdentified(hook("UserPromptSubmit"), verifiedSession: false))
+        var root = hook("UserPromptSubmit"); root["transcript_path"] = "/fixture/root.jsonl"
+        XCTAssertTrue(KeepAwakeHookContract.codexTaskInputIsIdentified(root, verifiedSession: false))
+        root["transcript_path"] = NSNull(); root["agent_id"] = "user-spawned-agent"
+        XCTAssertTrue(KeepAwakeHookContract.codexTaskInputIsIdentified(root, verifiedSession: false))
+        root["agent_id"] = ""; root["transcript_path"] = "relative/path"
+        XCTAssertFalse(KeepAwakeHookContract.codexTaskInputIsIdentified(root, verifiedSession: false))
+    }
+    func testOnlyPublicRootLifecycleCanProvideEphemeralAdmissionProof() {
+        for source in ["startup", "resume", "clear", "compact", "fork"] {
+            var input = hook("SessionStart"); input["source"] = source
+            XCTAssertEqual(KeepAwakeHookContract.codexRootSessionProof(input), KeepAwakeHookContract.anonymousIdentity("PRIVATE-THREAD"))
+        }
+        for event in ["UserPromptSubmit", "SessionEnd", "SubagentStart", "PostToolUse"] {
+            var input = hook(event); input["source"] = "startup"
+            XCTAssertNil(KeepAwakeHookContract.codexRootSessionProof(input))
+        }
+        var unknown = hook("SessionStart"); unknown["source"] = "unknown-version-value"
+        XCTAssertNil(KeepAwakeHookContract.codexRootSessionProof(unknown))
+    }
+    func testRootProofPersistsWithoutRawIDsAndRejectsSymlinkSubstitution() throws {
+        let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        let proof = KeepAwakeCodexSessionProof(credential: root.appendingPathComponent("credential.json"))
+        let identity = KeepAwakeHookContract.anonymousIdentity("PRIVATE-ROOT-ID")
+        XCTAssertFalse(try proof.contains(identity)); try proof.remember(identity)
+        XCTAssertTrue(try KeepAwakeCodexSessionProof(credential: proof.credential).contains(identity))
+        let data = try Data(contentsOf: proof.url)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("PRIVATE-ROOT-ID"))
+        XCTAssertEqual((try fm.attributesOfItem(atPath: proof.url.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let other = root.appendingPathComponent("other.json"); try data.write(to: other)
+        try fm.removeItem(at: proof.url); try fm.createSymbolicLink(at: proof.url, withDestinationURL: other)
+        XCTAssertThrowsError(try proof.contains(identity)); XCTAssertThrowsError(try proof.remember(identity))
+        XCTAssertEqual(try Data(contentsOf: other), data)
+    }
     private let sources = ["codex-cli", "codex-desktop"]
     private func hook(_ event: String, turn: Any = "PRIVATE-TURN-A") -> [String: Any] {
         ["session_id": "PRIVATE-THREAD", "turn_id": turn, "hook_event_name": event]

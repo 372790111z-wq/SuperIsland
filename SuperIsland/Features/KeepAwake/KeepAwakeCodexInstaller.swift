@@ -46,7 +46,7 @@ enum KeepAwakeCodexInstaller {
         var id: String
         var changes: [Change]
     }
-    static let events = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "PreCompact", "PostCompact", "Stop", "Interrupt"]
+    static let events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "PreCompact", "PostCompact", "Stop", "Interrupt"]
     private static let stateName = ".superisland-keep-awake"
     private static let receiptName = "receipt.json"
     private static let maximumFileSize = 1_048_576
@@ -55,6 +55,44 @@ enum KeepAwakeCodexInstaller {
     }
     static func configurationURL(home: URL = FileManager.default.homeDirectoryForCurrentUser, codexHome: URL? = nil) -> URL {
         codexRoot(home: home, codexHome: codexHome).appendingPathComponent("config.toml")
+    }
+
+    /// Upgrade only declarations already owned by this installation. No TOML,
+    /// notification chain, trust setting, or third-party handler is rewritten.
+    /// An absent receipt is not permission to create an unsolicited connection.
+    static func refreshOwnedLifecycleHooks(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                                          codexHome: URL? = nil) throws {
+        let root = codexRoot(home: home, codexHome: codexHome)
+        let receiptURL = destination(receiptName, root: root)
+        guard FileManager.default.fileExists(atPath: receiptURL.path) else { return }
+        let lock = try acquireLock(root: root)
+        defer { flock(lock, LOCK_UN); close(lock) }
+        try recover(root: root)
+        guard let receipt = try decodeReceipt(read(receiptURL), location: receiptURL), receipt.version == 2,
+              let before = try read(root.appendingPathComponent("hooks.json")),
+              let object = try JSONSerialization.jsonObject(with: before) as? [String: Any],
+              let hooks = object["hooks"] as? [String: Any],
+              let groups = hooks["UserPromptSubmit"] as? [[String: Any]],
+              groups.contains(where: { group in
+                  (group["hooks"] as? [[String: Any]])?.contains {
+                      $0["type"] as? String == "command" && $0["command"] as? String == receipt.hookCommand
+                  } == true
+              }) else { throw Failure.conflict }
+        // A disabled whole file or disabled owned start must stay disabled.
+        guard object["enabled"] as? Bool != false,
+              groups.contains(where: { group in
+                  group["enabled"] as? Bool != false && (group["hooks"] as? [[String: Any]])?.contains {
+                      $0["type"] as? String == "command" && $0["command"] as? String == receipt.hookCommand && $0["enabled"] as? Bool != false
+                  } == true
+              }) else { return }
+        let existingStart = hooks["SessionStart"] as? [[String: Any]] ?? []
+        if existingStart.contains(where: { group in
+            (group["hooks"] as? [[String: Any]])?.contains {
+                $0["type"] as? String == "command" && $0["command"] as? String == receipt.hookCommand
+            } == true
+        }) { return }
+        let after = try editHooks(before, removing: nil, adding: receipt.hookCommand, addingEvents: ["SessionStart"])
+        try commit(root: root, changes: [.init(name: "hooks.json", before: before, after: after)])
     }
 
     static func install(source: KeepAwakeSource, credential: URL, home: URL, tool: URL,
@@ -309,7 +347,7 @@ enum KeepAwakeCodexInstaller {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(receipt)
     }
-    private static func editHooks(_ data: Data?, removing: String?, adding: String?) throws -> Data? {
+    private static func editHooks(_ data: Data?, removing: String?, adding: String?, addingEvents: [String] = events) throws -> Data? {
         guard data != nil || adding != nil else { return nil }
         var root: [String: Any]
         if let data {
@@ -340,7 +378,7 @@ enum KeepAwakeCodexInstaller {
             }
         }
         if let adding {
-            for event in events {
+            for event in addingEvents {
                 var groups = hooks[event] as? [[String: Any]] ?? []
                 let exists = groups.contains { group in
                     (group["hooks"] as? [[String: Any]])?.contains { $0["type"] as? String == "command" && $0["command"] as? String == adding } == true

@@ -1,6 +1,82 @@
 import AppKit
 import Combine
 import UserNotifications
+import Darwin
+
+/// Explicit opt-in, app-owned acceptance recording. It never controls power,
+/// invokes Codex, consumes IPC, or records prompts, paths, titles, or credentials.
+/// The recorder lives in this App rather than a tool worker that can be reaped
+/// when the very Codex turn under test ends.
+@MainActor
+final class KeepAwakeAcceptanceRecorder {
+    struct Request: Codable { var id: UUID; var expiresAt: TimeInterval }
+    let root: URL
+    private let wall: () -> TimeInterval
+    private let continuous: () -> TimeInterval
+    private let awake: () -> TimeInterval
+    private var handle: FileHandle?
+    private var request: Request?
+    private var lastRequest: UUID?
+    private var bytes = 0
+    private var nextSample: TimeInterval = 0
+    private var continuousDeadline: TimeInterval = 0
+    static let byteLimit = 2_097_152
+    var sampleDue: Bool { handle != nil && continuous() >= nextSample }
+    var requestURL: URL { root.appendingPathComponent("acceptance-request.json") }
+
+    init(root: URL, wall: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 },
+         continuous: @escaping () -> TimeInterval = { KeepAwakeClock.now() },
+         awake: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.root = root; self.wall = wall; self.continuous = continuous; self.awake = awake
+    }
+    func poll() {
+        if let request, wall() >= request.expiresAt || continuous() >= continuousDeadline { finish("deadline"); return }
+        guard handle == nil else { return }
+        do {
+            var info = stat()
+            guard lstat(root.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+                  info.st_uid == getuid(), info.st_mode & 0o077 == 0 else { return }
+            let fd = open(requestURL.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+            guard fd >= 0 else { return }
+            let input = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            defer { try? input.close() }
+            guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+                  info.st_uid == getuid(), info.st_mode & 0o077 == 0, info.st_size <= 1024 else { return }
+            let value = try JSONDecoder().decode(Request.self, from: input.read(upToCount: 1025) ?? Data())
+            guard value.id != lastRequest, value.expiresAt.isFinite,
+                  value.expiresAt > wall(), value.expiresAt <= wall() + 900 else { return }
+            lastRequest = value.id
+            let output = root.appendingPathComponent("acceptance-\(value.id.uuidString)-\(getpid()).jsonl")
+            let file = open(output.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+            guard file >= 0 else { return }
+            handle = FileHandle(fileDescriptor: file, closeOnDealloc: true)
+            request = value; bytes = 0; nextSample = 0
+            continuousDeadline = continuous() + min(900, value.expiresAt - wall())
+            append("recorder-started", fields: ["build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                "pid": getpid(), "expiresAt": value.expiresAt])
+        } catch { finish("recorder-error") }
+    }
+    func append(_ event: String, fields: [String: Any] = [:]) {
+        guard let handle else { return }
+        var row = fields
+        row["event"] = event; row["epoch"] = wall(); row["continuous"] = continuous(); row["awake"] = awake()
+        do {
+            var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]); data.append(10)
+            if event != "recorder-finished", bytes + data.count > Self.byteLimit - 2048 {
+                finish("byte-limit"); return
+            }
+            guard bytes + data.count <= Self.byteLimit else { return }
+            try handle.write(contentsOf: data); try handle.synchronize(); bytes += data.count
+            if event == "power-sample" { nextSample = continuous() + 2 }
+        } catch {
+            try? handle.close(); self.handle = nil; request = nil
+        }
+    }
+    func finish(_ reason: String) {
+        append("recorder-finished", fields: ["reason": reason])
+        try? handle?.close(); handle = nil; request = nil
+    }
+}
 
 @MainActor
 final class KeepAwakeService: ObservableObject {
@@ -55,6 +131,7 @@ final class KeepAwakeService: ObservableObject {
     private var completionSleep = KeepAwakeCompletionSleep()
     private var completionSleepError: String?
     private var mailbox: KeepAwakeMailbox
+    private let acceptance: KeepAwakeAcceptanceRecorder
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var started = false
@@ -88,6 +165,7 @@ final class KeepAwakeService: ObservableObject {
             .appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.workview.SuperIsland")
             .appendingPathComponent("KeepAwake")
         mailbox = KeepAwakeMailbox(root: support)
+        acceptance = KeepAwakeAcceptanceRecorder(root: support)
         if let data = defaults.data(forKey: Self.preferencesKey),
            let value = try? JSONDecoder().decode(KeepAwakeEngine.Preferences.self, from: data),
            (5...50).contains(value.minimumBattery) { engine.preferences = value }
@@ -122,7 +200,10 @@ final class KeepAwakeService: ObservableObject {
                         record("Codex 旧共享服务接入与 CLI 重叠，未恢复重复监测；请重新确认桌面来源。")
                         continue
                     }
-                    if binding.mode == .hooks { try mailbox.connect(source: source) }
+                    if binding.mode == .hooks {
+                        try KeepAwakeCodexInstaller.refreshOwnedLifecycleHooks(codexHome: binding.profile.codexHome)
+                        try mailbox.connect(source: source)
+                    }
                 } else if !item.readsLocalStatus { try mailbox.connect(source: source) }
                 connections.insert(source)
             }
@@ -139,6 +220,7 @@ final class KeepAwakeService: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.completionSleep.cancel()
+                    self.acceptance.append(notification.name == NSWorkspace.willSleepNotification ? "system-will-sleep" : "system-did-wake")
                     if notification.name == NSWorkspace.willSleepNotification {
                         self.power.apply(hold: false, policy: .system, notebook: self.isNotebook)
                         self.actualHold = self.power.isHolding
@@ -149,6 +231,7 @@ final class KeepAwakeService: ObservableObject {
         refreshNotificationPermission()
     }
     func shutdown() {
+        acceptance.finish("app-shutdown")
         completionSleep.cancel()
         cancelResume()
         codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
@@ -356,6 +439,7 @@ final class KeepAwakeService: ObservableObject {
         return "最近事件：未开始或已明确结束"
     }
     func tick() {
+        acceptance.poll()
         environment = KeepAwakePower.environment()
         let now = KeepAwakeClock.now()
         pollLocalSource(now: now)
@@ -363,6 +447,10 @@ final class KeepAwakeService: ObservableObject {
         for event in mailbox.read() where connections.contains(event.source) {
             let previous = engine.sessions[event.storageKey]
             if engine.receive(event, now: now) {
+                acceptance.append("accepted-task-event", fields: ["source": event.source,
+                    "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
+                    "taskHash": event.taskID.map(KeepAwakeHookContract.anonymousIdentity) ?? "legacy",
+                    "state": event.state.rawValue, "startsTask": event.startsTask ?? false])
                 receivedSources.insert(event.source)
                 if previous?.isUnfinished == true && event.state == .completed && engine.enabled &&
                     !KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) {
@@ -385,6 +473,20 @@ final class KeepAwakeService: ObservableObject {
         finishCompletedLidTasks(now: now)
         let stateKey = decision.title + (runtimeError ?? "")
         if lastLog != stateKey { lastLog = stateKey; record(decision.title) }
+        if acceptance.sampleDue {
+            let physical = KeepAwakeSystemSleep.snapshot()
+            let pending = engine.sessions.values.filter(\.isUnfinished)
+            acceptance.append("power-sample", fields: ["requestedHold": decision.hold, "actualHold": actualHold,
+                "lidApplied": lid.applied, "lidReleaseConfirmed": lid.releasedForCompletionSleep,
+                "lidClosed": physical.lidClosed.map { $0 as Any } ?? NSNull(),
+                "sleepDisabled": physical.sleepDisabled.map { $0 as Any } ?? NSNull(),
+                "externalDisplays": physical.externalDisplays.map { $0 as Any } ?? NSNull(),
+                "unfinishedCount": pending.count, "pendingTruncated": pending.count > 64,
+                "pending": pending.prefix(64).map { ["source": $0.event.source,
+                    "sessionHash": KeepAwakeHookContract.anonymousIdentity($0.event.session),
+                    "taskHash": $0.event.taskID.map(KeepAwakeHookContract.anonymousIdentity) ?? "legacy",
+                    "state": $0.event.state.rawValue] }])
+        }
     }
     private func finishCompletedLidTasks(now: TimeInterval) {
         let phase = engine.completionSleepPhase(now: now, environment: environment)
@@ -399,15 +501,19 @@ final class KeepAwakeService: ObservableObject {
         let released = !actualHold && power.displayID == 0 && lid.releasedForCompletionSleep
         guard completionSleep.update(phase: phase, ownsLidHold: actualHold && lid.applied,
                                      releasesConfirmed: released, snapshot: KeepAwakeSystemSleep.snapshot()) else { return }
+        acceptance.append("completion-sleep-request", fields: ["ownAssertionsReleased": released])
         // No await between the final policy evaluation and the physical recheck.
         // Newly received work cancels ready before a later tick can request sleep.
         switch KeepAwakeCompletionSleep.attempt(snapshot: KeepAwakeSystemSleep.snapshot,
                                                request: KeepAwakeSystemSleep.request) {
         case .skipped:
+            acceptance.append("completion-sleep-skipped")
             break
         case .accepted:
+            acceptance.append("completion-sleep-accepted")
             record("全部任务已结束；系统已接受合盖休眠请求，实际休眠仍由系统确认。")
         case .failed(let code):
+            acceptance.append("completion-sleep-rejected", fields: ["code": code])
             completionSleepError = "保持已释放，但系统未接受合盖休眠请求（\(code)）。"
             runtimeError = completionSleepError
         }
