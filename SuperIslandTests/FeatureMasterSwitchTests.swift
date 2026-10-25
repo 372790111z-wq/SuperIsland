@@ -232,6 +232,61 @@ final class FeatureMasterSwitchTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(wakeMenu.items.first { $0.title == "管理保持唤醒…" }).isEnabled)
     }
 
+    @MainActor func testMultipleWakeMenusStaySynchronizedWithoutReplacingTrackedRows() async throws {
+        let f = try Fixture(); defer { f.dispose() }
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .notRegistered })
+        let service = KeepAwakeService(defaults: f.defaults, root: f.root, codexAvailability: { false }, lidClient: client)
+        defer { service.shutdown() }
+        let controller = KeepAwakeMenuController(service: service)
+        let first = try XCTUnwrap(controller.item().submenu)
+        let standalone = controller.makeMenu()
+        let rebuiltMain = try XCTUnwrap(controller.item().submenu)
+        let menus = [first, standalone, rebuiltMain]
+        let originalRows = menus.map { $0.items.map(ObjectIdentifier.init) }
+        func master(_ menu: NSMenu) throws -> NSMenuItem {
+            try XCTUnwrap(menu.items.first { $0.title == "启用保持唤醒" })
+        }
+        service.setEnabled(true); try await wait(0.15)
+        for menu in menus { XCTAssertEqual(try master(menu).state, .on) }
+        standalone.performActionForItem(at: try XCTUnwrap(standalone.items.firstIndex { $0.title == "启用保持唤醒" }))
+        try await wait(0.15)
+        for menu in menus {
+            XCTAssertEqual(try master(menu).state, .off)
+            XCTAssertTrue(try master(menu).isEnabled)
+            controller.menuWillOpen(menu)
+        }
+        XCTAssertEqual(menus.map { $0.items.map(ObjectIdentifier.init) }, originalRows,
+                       "A live/tracking menu must update in place, even after rebuilding another main menu")
+        weak var transient: NSMenu?
+        autoreleasepool { let menu = controller.makeMenu(); transient = menu }
+        XCTAssertNil(transient, "Controller must not retain menus removed by App menu rebuilds")
+    }
+
+    @MainActor func testStandaloneWakeStatusItemIsIdempotentAndSurvivesModuleOff() async throws {
+        let f = try Fixture(); defer { f.dispose() }
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .notRegistered })
+        let service = KeepAwakeService(defaults: f.defaults, root: f.root, codexAvailability: { false }, lidClient: client)
+        defer { service.shutdown() }
+        let controller = KeepAwakeMenuController(service: service)
+        let item = controller.installStandaloneStatusItem()
+        // A dedicated temporary status item, removed below; no installed App,
+        // system permission, task or user preference is changed by this test.
+        item.button?.setAccessibilityLabel("MS1 临时回归图标")
+        defer { NSStatusBar.system.removeStatusItem(item) }
+        XCTAssertTrue(item === controller.installStandaloneStatusItem())
+        XCTAssertTrue(item.isVisible)
+        XCTAssertNotNil(item.button?.image)
+        let menu = try XCTUnwrap(item.menu)
+        XCTAssertNotNil(menu.items.first { $0.title == "启用保持唤醒" })
+        XCTAssertNil(menu.items.first { $0.title == "保持唤醒" }, "Standalone menu directly exposes actions")
+        service.setEnabled(true); try await wait(0.15)
+        service.setEnabled(false); try await wait(0.15)
+        XCTAssertTrue(item === controller.installStandaloneStatusItem())
+        XCTAssertTrue(item.isVisible, "Turning off the feature must keep its re-enable entry point")
+        XCTAssertTrue(item.button?.toolTip?.contains("已关闭") == true)
+        XCTAssertEqual(menu.items.first { $0.title == "启用保持唤醒" }?.state, .off)
+    }
+
     @MainActor func testNativeSettingsRenderVisibleOffStateAndReadableTabs() async throws {
         let f = try Fixture(); defer { f.dispose() }
         let line = f.line(); line.start(appName: "MS1Test", installUI: false); defer { line.stop() }
