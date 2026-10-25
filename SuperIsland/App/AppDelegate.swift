@@ -247,6 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         didBootstrapApp = true
         KeepAwakeService.shared.openSettings = { Self.showSettingsWindow(initialPane: .keepAwake) }
         KeepAwakeService.shared.start()
+        keepAwakeMenu.installStandaloneStatusItem()
         defer { startZilanSuppressionReceiver() }
 
         // The WE1 bundle remains isolated from production analytics, updates,
