@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import XCTest
 @testable import SuperIsland
@@ -102,8 +103,12 @@ final class ScreenshotLineClearTests: XCTestCase {
         let change = f.pasteboard.changeCount
         let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
         XCTAssertGreaterThan(line.items.count, line.visibleItems.count)
+        var feedback = [String]()
+        let observation = line.$status.sink { if !$0.isEmpty { feedback.append($0) } }
+        defer { observation.cancel() }
         line.requestClearAll { _ in .alertSecondButtonReturn }; await wait(line)
         XCTAssertTrue(line.items.isEmpty, line.status); XCTAssertEqual(f.io.names.count, 16, line.status)
+        XCTAssertTrue(feedback.isEmpty, "Successful clear must emit neither progress nor success messages: \(feedback)")
         XCTAssertTrue(f.io.names.contains("video.mov")); XCTAssertTrue(f.io.names.contains("audio-scope.m4a"))
         for item in [external, unlisted, backup, export] { XCTAssertTrue(f.exists(item)) }
         XCTAssertEqual(f.pasteboard.changeCount, change)
@@ -134,7 +139,7 @@ final class ScreenshotLineClearTests: XCTestCase {
         let f = try Fixture(); defer { f.dispose() }; _ = try f.file("one.png"); try f.index()
         let line = f.line(preferenceFailure: true); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
         line.requestClearAll { alert in alert.suppressionButton?.state = .on; return .alertSecondButtonReturn }; await wait(line)
-        XCTAssertTrue(line.askBeforeClearAll); XCTAssertTrue(line.status.contains("询问偏好未保存")); XCTAssertTrue(line.items.isEmpty)
+        XCTAssertTrue(line.askBeforeClearAll); XCTAssertTrue(line.status.contains("询问偏好未保存")); XCTAssertFalse(line.status.contains("已清空")); XCTAssertTrue(line.items.isEmpty)
     }
     @MainActor func testDisabledAndEmptyCannotStartBatch() async throws {
         let f = try Fixture(); defer { f.dispose() }; _ = try f.file("one.png"); try f.index()
@@ -149,9 +154,10 @@ final class ScreenshotLineClearTests: XCTestCase {
         f.io.failureName = "a.png"
         let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
         line.requestClearAll { _ in .alertSecondButtonReturn }; await wait(line)
-        XCTAssertEqual(line.items, [a]); XCTAssertTrue(f.exists(a)); XCTAssertFalse(f.exists(b)); XCTAssertTrue(line.status.contains("未能清理")); XCTAssertFalse(line.clearRecoveryPending)
+        XCTAssertEqual(line.items, [a]); XCTAssertTrue(f.exists(a)); XCTAssertFalse(f.exists(b)); XCTAssertTrue(line.status.contains("未能清理")); XCTAssertFalse(line.status.contains("已清空")); XCTAssertFalse(line.clearRecoveryPending)
         f.io.failureName = nil; line.requestClearAll { _ in .alertSecondButtonReturn }; await wait(line)
         XCTAssertTrue(line.items.isEmpty); XCTAssertEqual(Set(f.io.names), ["a.png", "b.mov"])
+        XCTAssertTrue(line.status.isEmpty, "Successful retry removes the previous error without a success message")
     }
     @MainActor func testIdentityChangeAfterConfirmationIsRetained() async throws {
         let f = try Fixture(); defer { f.dispose() }; let item = try f.file("one.png"); try f.index()
@@ -493,6 +499,7 @@ final class ScreenshotLineClearTests: XCTestCase {
         let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }; await wait(line)
         XCTAssertEqual(Set(line.items.map(\.id)), [a.id, b.id]); XCTAssertTrue(f.exists(a)); XCTAssertTrue(f.exists(b))
         XCTAssertFalse(line.clearRecoveryPending); XCTAssertTrue(f.io.names.isEmpty)
+        XCTAssertTrue(line.status.isEmpty, "Successful recovery must be silent")
     }
     @MainActor func testOwnedPanelHasOpaqueReadableSurfaceInBothAppearancesWhileInactive() async throws {
         let f = try Fixture(); defer { f.dispose() }

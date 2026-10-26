@@ -626,8 +626,10 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
                 }
             }
             self.clearCommitsInProgress = true
-            self.setStatus(SL("正在清空挂绳…"))
-            var removed = 0, moved = 0, missing = 0, failed = 0
+            // Normal progress and successful completion stay silent. Clear an old
+            // batch error only after an explicit decision to start this batch.
+            self.setStatus("")
+            var missing = 0, failed = 0
             var warnings = Set<String>()
             for selection in plan.selections {
                 guard self.started, self.isEnabled, !self.clearCancelled else { break }
@@ -638,7 +640,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
                 if !outcome.removed.isEmpty {
                     let exact = Set(outcome.removed.map(\.id))
                     self.items.removeAll { exact.contains($0.id) && outcome.removed.contains($0) }
-                    removed += outcome.removed.count; moved += outcome.moved; missing += outcome.missing
+                    missing += outcome.missing
                     if await self.persistClearIndex() {
                         if let id = outcome.journal {
                             do { try await Task.detached { try store.acknowledge([id]) }.value }
@@ -659,13 +661,12 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
             }
             self.page = min(self.page, max(0, (self.items.count - 1) / self.pageCapacity))
             if self.items.isEmpty { self.hideLine() } else if self.isEnabled { self.placePanel() }
-            var message = SL("已清空 ") + String(removed) + SL(" 项内容；") + String(moved) + SL(" 份托管副本已移到废纸篓。外部原文件保留。")
-            if failed > 0 { message += String(failed) + SL(" 项未能清理，保留在挂绳，可重试。") }
-            if missing > 0 { message += String(missing) + SL(" 项原文件已缺失，仅移除失效记录。") }
-            if self.clearCancelled { message += SL("已停止后续清理，剩余项目保留。") }
-            if preferenceFailed { message += SL("询问偏好未保存，下次仍会确认。") }
-            if !warnings.isEmpty { message += warnings.sorted().joined(separator: " ") }
-            self.setStatus(message)
+            var errors = [String]()
+            if failed > 0 { errors.append(String(failed) + SL(" 项未能清理，保留在挂绳，可重试。")) }
+            if missing > 0 { errors.append(String(missing) + SL(" 项原文件已缺失，仅移除失效记录。")) }
+            if preferenceFailed { errors.append(SL("询问偏好未保存，下次仍会确认。")) }
+            errors.append(contentsOf: warnings.sorted())
+            self.setStatus(errors.joined(separator: " "))
         }
         refreshMenuState()
     }
@@ -698,11 +699,11 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
                 catch { self.setStatus(SL("清理恢复记录保存失败，请重试。")); return }
             }
             self.clearRecoveryPending = !saved || !result.errors.isEmpty
-            var message = self.clearRecoveryPending ? SL("清理尚未恢复，请重试恢复。") : SL("挂绳清理记录已恢复。")
-            if result.restored > 0 { message += SL("待处理副本已恢复，未继续删除。") }
-            if result.uncertain > 0 { message += SL("部分文件已不在原位置，请检查废纸篓。") }
-            if !result.errors.isEmpty { message += result.errors.map { SL($0) }.joined(separator: " ") }
-            self.setStatus(message)
+            var errors = [String]()
+            if self.clearRecoveryPending { errors.append(SL("清理尚未恢复，请重试恢复。")) }
+            if result.uncertain > 0 { errors.append(SL("部分文件已不在原位置，请检查废纸篓。")) }
+            errors.append(contentsOf: result.errors.map { SL($0) })
+            self.setStatus(errors.joined(separator: " "))
             if self.items.isEmpty { self.hideLine() }
         }
     }
