@@ -31,6 +31,34 @@ final class WindowMinimizationSessionController {
         let bundleIdentifier: String?
     }
 
+    /// Reads stored ownership only. Inspecting diagnostics must never ask AX
+    /// for fresh state or change which windows belong to a reversible batch.
+    struct DiagnosticSnapshot: Equatable {
+        var retainedCount = 0
+        var minimizeRequestedCount = 0
+        var minimizedCount = 0
+        var restoreRequestedCount = 0
+        var unidentifiedCount = 0
+        /// Sum of the retained references' existing missing observations.
+        var missingObservationCount = 0
+    }
+
+    /// Counts the branches of the most recent restore attempt. No window
+    /// identifiers, titles, application names, or additional AX reads are kept.
+    struct RestoreDiagnostics: Equatable {
+        var applicationTerminated = 0
+        var snapshotUnavailable = 0
+        var identityAmbiguous = 0
+        var unidentifiedUnavailable = 0
+        var missingPending = 0
+        var missingRetired = 0
+        var minimizedUnreadable = 0
+        var restoreNotSettable = 0
+        var restoreWriteFailed = 0
+        var restorePending = 0
+        var restored = 0
+    }
+
     /// The production backend uses AX; tests replace these operations without
     /// enumerating, minimizing, raising, or activating real windows.
     struct Environment {
@@ -70,11 +98,15 @@ final class WindowMinimizationSessionController {
         var phase: Phase
     }
 
+    private enum UnavailableReason {
+        case snapshotUnavailable, identityAmbiguous, unidentifiedUnavailable
+    }
+
     private enum WindowResolution {
         case found(AXUIElement)
         case applicationTerminated
         case notFoundInSuccessfulSnapshot
-        case temporarilyUnavailable
+        case temporarilyUnavailable(UnavailableReason)
     }
 
     private struct Session {
@@ -87,6 +119,7 @@ final class WindowMinimizationSessionController {
     private let environment: Environment
     private var session: Session?
     private var cancelMinimizationObservation: (() -> Void)?
+    private(set) var lastRestoreDiagnostics = RestoreDiagnostics()
 
     init(environment: Environment? = nil) {
         self.environment = environment ?? Self.liveEnvironment()
@@ -99,8 +132,27 @@ final class WindowMinimizationSessionController {
     var activeMode: Mode? { session?.mode }
     var hasActiveSession: Bool { session != nil }
 
+    var diagnosticSnapshot: DiagnosticSnapshot {
+        guard let session else { return .init() }
+        return session.windows.reduce(into: DiagnosticSnapshot()) { snapshot, reference in
+            snapshot.retainedCount += 1
+            switch reference.phase {
+            case .minimizeRequested: snapshot.minimizeRequestedCount += 1
+            case .minimized: snapshot.minimizedCount += 1
+            case .restoreRequested: snapshot.restoreRequestedCount += 1
+            }
+            if reference.windowNumber == nil, reference.identifier == nil {
+                snapshot.unidentifiedCount += 1
+            }
+            snapshot.missingObservationCount += reference.missingObservationCount
+        }
+    }
+
     func restoreActiveSession() -> Outcome? {
-        guard let session else { return nil }
+        guard let session else {
+            lastRestoreDiagnostics = .init()
+            return nil
+        }
         return restore(session)
     }
 
@@ -265,6 +317,9 @@ final class WindowMinimizationSessionController {
     }
 
     private func restore(_ session: Session) -> Outcome {
+        lastRestoreDiagnostics = .init()
+        var diagnostics = RestoreDiagnostics()
+        defer { lastRestoreDiagnostics = diagnostics }
         var restored = 0
         var pending = 0
         var failed = 0
@@ -286,10 +341,16 @@ final class WindowMinimizationSessionController {
                 window = resolved
             case .applicationTerminated:
                 environment.diagnostic("restore terminated \(identity)")
+                diagnostics.applicationTerminated += 1
                 missing += 1
                 continue
-            case .temporarilyUnavailable:
+            case let .temporarilyUnavailable(reason):
                 environment.diagnostic("restore identityUnavailable \(identity)")
+                switch reason {
+                case .snapshotUnavailable: diagnostics.snapshotUnavailable += 1
+                case .identityAmbiguous: diagnostics.identityAmbiguous += 1
+                case .unidentifiedUnavailable: diagnostics.unidentifiedUnavailable += 1
+                }
                 failed += 1
                 retryable.append(reference)
                 continue
@@ -302,8 +363,10 @@ final class WindowMinimizationSessionController {
                 }
                 let elapsed = now.timeIntervalSince(reference.firstMissingObservationAt ?? now)
                 if reference.missingObservationCount >= 3, elapsed >= 0.4 {
+                    diagnostics.missingRetired += 1
                     missing += 1
                 } else {
+                    diagnostics.missingPending += 1
                     failed += 1
                     retryable.append(reference)
                 }
@@ -311,6 +374,7 @@ final class WindowMinimizationSessionController {
             }
             guard let isMinimized = environment.minimized(window) else {
                 environment.diagnostic("restore minimizedUnknown \(identity)")
+                diagnostics.minimizedUnreadable += 1
                 if reference.phase == .restoreRequested { pending += 1 } else { failed += 1 }
                 retryable.append(reference)
                 continue
@@ -321,6 +385,7 @@ final class WindowMinimizationSessionController {
                 // longer needs mutation, but it is still a successful final
                 // state for the batch.
                 activationCandidates.append(reference.processIdentifier)
+                diagnostics.restored += 1
                 restored += 1
                 continue
             }
@@ -328,12 +393,14 @@ final class WindowMinimizationSessionController {
             // false write: its accepted true request may still be in flight.
             guard environment.canMinimize(window) else {
                 environment.diagnostic("restore notSettable \(identity)")
+                diagnostics.restoreNotSettable += 1
                 failed += 1
                 retryable.append(reference)
                 continue
             }
             let restoreError = environment.setMinimized(window, false)
             guard restoreError == .success else {
+                diagnostics.restoreWriteFailed += 1
                 environment.diagnostic("restore writeFailed \(identity) error=\(restoreError.rawValue)")
                 failed += 1
                 retryable.append(reference)
@@ -342,11 +409,13 @@ final class WindowMinimizationSessionController {
             activationCandidates.append(reference.processIdentifier)
             reference.phase = .restoreRequested
             guard environment.minimized(window) == false else {
+                diagnostics.restorePending += 1
                 pending += 1
                 retryable.append(reference)
                 continue
             }
             environment.raiseWindow(window)
+            diagnostics.restored += 1
             restored += 1
         }
 
@@ -480,22 +549,22 @@ final class WindowMinimizationSessionController {
         }
 
         let snapshot = environment.windows(reference.processIdentifier)
-        guard snapshot.succeeded else { return .temporarilyUnavailable }
+        guard snapshot.succeeded else { return .temporarilyUnavailable(.snapshotUnavailable) }
         let windows = snapshot.windows
         if let windowNumber = reference.windowNumber {
             let matches = windows.filter { environment.windowNumber($0) == windowNumber }
             if matches.count == 1 { return .found(matches[0]) }
-            if matches.count > 1 { return .temporarilyUnavailable }
+            if matches.count > 1 { return .temporarilyUnavailable(.identityAmbiguous) }
         }
         if let identifier = reference.identifier {
             let matches = windows.filter {
                 environment.identifier($0) == identifier
             }
             if matches.count == 1 { return .found(matches[0]) }
-            if matches.count > 1 { return .temporarilyUnavailable }
+            if matches.count > 1 { return .temporarilyUnavailable(.identityAmbiguous) }
         }
         guard reference.windowNumber != nil || reference.identifier != nil else {
-            return .temporarilyUnavailable
+            return .temporarilyUnavailable(.unidentifiedUnavailable)
         }
         return .notFoundInSuccessfulSnapshot
     }

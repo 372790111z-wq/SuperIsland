@@ -161,6 +161,8 @@ final class WindowEnhancementController {
     private var preparingForTermination = false
     private var windowMutationIntent: WindowMutationIntent = .commit
     private var lastWindowMutationCompletion: WindowMutationCompletion = .committed
+    private var diagnosticTerminationAttemptID: UInt64 = 0
+    private var lastLoggedRestoreDiagnostics: WindowMinimizationSessionController.RestoreDiagnostics?
 
     private static let geometryTolerance: CGFloat = 2
     private static let fullScreenTransitionTimeout: TimeInterval = 4
@@ -267,11 +269,77 @@ final class WindowEnhancementController {
             lastWindowMutationCompletion == .unresolved
     }
 
+    /// In-memory observations only. In particular, requesting diagnostics must
+    /// never probe or activate another application's windows.
+    private func terminationDiagnosticMetadata(
+        attemptID: UInt64
+    ) -> [String: WindowInteractionDiagnosticValue] {
+        let batch = minimizationSessions.diagnosticSnapshot
+        return [
+            "attempt": .integer(Int64(clamping: attemptID)),
+            "activeMutation": .flag(activeWindowMutationTask != nil),
+            "generation": .integer(Int64(clamping: windowMutationGeneration)),
+            "lastCompletion": .code(lastWindowMutationCompletion.rawValue),
+            "recoveryRequested": .flag(windowMutationIntent == .recover),
+            "preparing": .flag(preparingForTermination),
+            "hasSession": .flag(minimizationSessions.hasActiveSession),
+            "retained": .integer(Int64(batch.retainedCount)),
+            "minimizeRequested": .integer(Int64(batch.minimizeRequestedCount)),
+            "minimized": .integer(Int64(batch.minimizedCount)),
+            "restoreRequested": .integer(Int64(batch.restoreRequestedCount)),
+            "unidentified": .integer(Int64(batch.unidentifiedCount)),
+            "missingObservations": .integer(Int64(batch.missingObservationCount))
+        ]
+    }
+
+    func recordTerminationDiagnostics(
+        _ event: WindowTerminationDiagnostics.Event,
+        attemptID: UInt64,
+        extra: [String: WindowInteractionDiagnosticValue] = [:]
+    ) {
+        WindowTerminationDiagnostics.shared.record(
+            event,
+            metadata: terminationDiagnosticMetadata(attemptID: attemptID)
+                .merging(extra) { _, latest in latest }
+        )
+    }
+
+    private func recordRestoreDiagnostics(attemptID: UInt64) {
+        let result = minimizationSessions.lastRestoreDiagnostics
+        guard result != lastLoggedRestoreDiagnostics else { return }
+        lastLoggedRestoreDiagnostics = result
+        WindowTerminationDiagnostics.shared.record(.recoveryAttempt, metadata: [
+            "attempt": .integer(Int64(clamping: attemptID)),
+            "appTerminated": .integer(Int64(result.applicationTerminated)),
+            "snapshotUnavailable": .integer(Int64(result.snapshotUnavailable)),
+            "identityAmbiguous": .integer(Int64(result.identityAmbiguous)),
+            "unidentifiedUnavailable": .integer(Int64(result.unidentifiedUnavailable)),
+            "missingPending": .integer(Int64(result.missingPending)),
+            "missingRetired": .integer(Int64(result.missingRetired)),
+            "minimizedUnreadable": .integer(Int64(result.minimizedUnreadable)),
+            "restoreNotSettable": .integer(Int64(result.restoreNotSettable)),
+            "restoreWriteFailed": .integer(Int64(result.restoreWriteFailed)),
+            "restorePending": .integer(Int64(result.restorePending)),
+            "restored": .integer(Int64(result.restored))
+        ])
+    }
+
     /// Stops every new input source, then gives an already-started full-screen
     /// transaction a bounded opportunity to reach its verified final state.
     /// Returning false cancels App termination instead of killing the process
     /// with a window left between full-screen and windowed states.
-    func prepareForTermination(timeout: TimeInterval = 18) async -> Bool {
+    func prepareForTermination(
+        timeout: TimeInterval = 18,
+        diagnosticAttemptID: UInt64 = 0
+    ) async -> Bool {
+        let diagnosticStartedAt = ProcessInfo.processInfo.systemUptime
+        diagnosticTerminationAttemptID = diagnosticAttemptID
+        lastLoggedRestoreDiagnostics = nil
+        defer {
+            diagnosticTerminationAttemptID = 0
+            lastLoggedRestoreDiagnostics = nil
+        }
+        recordTerminationDiagnostics(.preparationStarted, attemptID: diagnosticAttemptID)
         preparingForTermination = true
         requestActiveWindowMutationRecovery()
         preferencesCancellable?.cancel()
@@ -285,18 +353,29 @@ final class WindowEnhancementController {
         commandTabMonitor.stop()
         missionControlMonitor.stop()
         dockDisplayLockController.stop()
-        _ = restoreMinimizedWindowsForShutdown()
+        _ = restoreMinimizedWindowsForShutdown(diagnosticAttemptID: diagnosticAttemptID)
 
         let deadline = Date().addingTimeInterval(timeout)
+        var lastDiagnosticState = terminationDiagnosticMetadata(attemptID: diagnosticAttemptID)
         while (activeWindowMutationTask != nil || minimizationSessions.hasActiveSession), Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
             if minimizationSessions.hasActiveSession {
-                _ = restoreMinimizedWindowsForShutdown()
+                _ = restoreMinimizedWindowsForShutdown(diagnosticAttemptID: diagnosticAttemptID)
+            }
+            let state = terminationDiagnosticMetadata(attemptID: diagnosticAttemptID)
+            if state != lastDiagnosticState {
+                WindowTerminationDiagnostics.shared.record(.recoveryProgress, metadata: state)
+                lastDiagnosticState = state
             }
         }
-        let recoveryComplete = restoreMinimizedWindowsForShutdown()
+        let recoveryComplete = restoreMinimizedWindowsForShutdown(diagnosticAttemptID: diagnosticAttemptID)
         let windowMutationResolved = activeWindowMutationTask == nil &&
             lastWindowMutationCompletion != .unresolved
+        recordTerminationDiagnostics(.preparationFinished, attemptID: diagnosticAttemptID, extra: [
+            "allowed": .flag(windowMutationResolved && recoveryComplete),
+            "batchRecovered": .flag(recoveryComplete),
+            "durationMS": .integer(Int64(max(0, ProcessInfo.processInfo.systemUptime - diagnosticStartedAt) * 1_000))
+        ])
         guard windowMutationResolved, recoveryComplete else {
             preparingForTermination = false
             start()
@@ -355,7 +434,7 @@ final class WindowEnhancementController {
                 feedback("无法确认窗口，操作已取消")
                 return
             }
-            beginWindowMutation { [weak self] generation in
+            beginWindowMutation(kind: .fullScreenLayout) { [weak self] generation in
                 guard let self else { return .unresolved }
                 return await self.performFullScreenLayout(
                     layout,
@@ -421,7 +500,7 @@ final class WindowEnhancementController {
         exactWindowNumber: Int?
     ) {
         let initialDisplayID = displayID(forAXFrame: context.frame)
-        beginWindowMutation { [weak self] generation in
+        beginWindowMutation(kind: .windowedLayout) { [weak self] generation in
             guard let self else { return .unresolved }
             return await self.performWindowedLayout(
                 layout,
@@ -719,13 +798,16 @@ final class WindowEnhancementController {
     }
 
     @discardableResult
-    private func restoreMinimizedWindowsForShutdown() -> Bool {
+    private func restoreMinimizedWindowsForShutdown(diagnosticAttemptID: UInt64? = nil) -> Bool {
         // AX can transiently reject unminimize while an App is transitioning.
         // Retry once synchronously; any remaining references stay owned by the
         // session controller rather than being silently forgotten.
-        guard case let .restored(_, _, pending, failed, _) = minimizationSessions.restoreActiveSession(),
+        let result = minimizationSessions.restoreActiveSession()
+        if let diagnosticAttemptID { recordRestoreDiagnostics(attemptID: diagnosticAttemptID) }
+        guard case let .restored(_, _, pending, failed, _) = result,
               failed + pending > 0 else { return !minimizationSessions.hasActiveSession }
         _ = minimizationSessions.restoreActiveSession()
+        if let diagnosticAttemptID { recordRestoreDiagnostics(attemptID: diagnosticAttemptID) }
         return !minimizationSessions.hasActiveSession
     }
 
@@ -747,7 +829,7 @@ final class WindowEnhancementController {
                 feedback("无法确认窗口，操作已取消")
                 return
             }
-            beginWindowMutation { [weak self] generation in
+            beginWindowMutation(kind: .fullScreenCenter) { [weak self] generation in
                 guard let self else { return .unresolved }
                 return await self.performFullScreenCenter(
                     context: context,
@@ -827,7 +909,7 @@ final class WindowEnhancementController {
                 feedback("无法确认窗口，操作已取消")
                 return
             }
-            beginWindowMutation { [weak self] generation in
+            beginWindowMutation(kind: .fullScreenDisplayMove) { [weak self] generation in
                 guard let self else { return .unresolved }
                 return await self.performFullScreenDisplayMove(
                     context: context,
@@ -950,7 +1032,7 @@ final class WindowEnhancementController {
         case recover
     }
 
-    private enum WindowMutationCompletion: Equatable {
+    private enum WindowMutationCompletion: String {
         case committed
         case restored
         case safeWindowed
@@ -991,6 +1073,7 @@ final class WindowEnhancementController {
     }
 
     private func beginWindowMutation(
+        kind: WindowMutationKind,
         _ operation: @escaping @MainActor (UInt64) async -> WindowMutationCompletion
     ) {
         windowMutationGeneration &+= 1
@@ -1003,6 +1086,8 @@ final class WindowEnhancementController {
             if self.windowMutationGeneration == generation {
                 self.lastWindowMutationCompletion = completion
                 self.activeWindowMutationTask = nil
+                self.recordTerminationDiagnostics(.mutationFinished, attemptID: self.diagnosticTerminationAttemptID,
+                                                 extra: ["kind": .code(kind.rawValue)])
                 if !self.preparingForTermination {
                     self.windowMutationIntent = .commit
                 }
@@ -1012,6 +1097,12 @@ final class WindowEnhancementController {
                 }
             }
         }
+        recordTerminationDiagnostics(.mutationStarted, attemptID: diagnosticTerminationAttemptID,
+                                     extra: ["kind": .code(kind.rawValue)])
+    }
+
+    private enum WindowMutationKind: String {
+        case fullScreenLayout, windowedLayout, fullScreenCenter, fullScreenDisplayMove
     }
 
     private func isWindowMutationCurrent(_ generation: UInt64) -> Bool {
