@@ -152,11 +152,13 @@ import CoreGraphics
         saveTask = Task { [weak self] in
             defer { self?.pendingWrites -= 1 }
             do {
-                try await repository.save(data, revision: revision)
-                if let self, self.generation == expectedGeneration, !self.stopped { self.storageError = nil; self.panel?.showPersistenceError(nil) }
+                let saved = try await repository.save(data, revision: revision)
+                if saved, let self, self.generation == expectedGeneration, self.revision == revision, !self.stopped {
+                    self.storageError = nil; self.panel?.showPersistenceError(nil)
+                }
             }
             catch {
-                guard let self, !self.stopped, self.generation == expectedGeneration else { return }
+                guard let self, !self.stopped, self.generation == expectedGeneration, self.revision == revision else { return }
                 self.storageError = "回顾记录保存失败，不能保证重启后可恢复。"
                 self.ledger.markStorageFailure(); self.latest = self.ledger.latest
                 self.panel?.showPersistenceError(self.storageError)

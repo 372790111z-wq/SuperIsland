@@ -154,6 +154,23 @@ final class KeepAwakeRecapTests: XCTestCase {
         c.observe(frame(2));c.observe(frame(3,closed:false));XCTAssertTrue(c.canOpen);locked=true;XCTAssertFalse(c.canOpen)
         c.shutdown();await c.flush()
     }
+    @MainActor func testUnpreparedStorageDoesNotSilentlyClearPersistenceFailure() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: root.path)
+        let name = "KA2-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let c = KeepAwakeRecapController(defaults: defaults, root: root, isLocked: { false })
+        c.start(installUI: false); await c.flush()
+        XCTAssertNotNil(c.storageError)
+        c.observe(frame(0, closed: false, hold: false)); c.observe(frame(1))
+        await c.flush()
+        XCTAssertNotNil(c.storageError)
+        XCTAssertTrue(c.ledger.current?.issues.contains("回顾记录未能保存") == true)
+        c.shutdown(); await c.flush()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Recap/summary.json").path))
+    }
     @MainActor func testAutomaticPresentationWaitsForUnlockIsOncePerCycleAndManualCanReopen() async throws {
         let root=try root();defer{try? FileManager.default.removeItem(at:root)};let name="KA2-"+UUID().uuidString;let defaults=UserDefaults(suiteName:name)!;defer{defaults.removePersistentDomain(forName:name)}
         var locked=true;var presentations=[Bool]()
