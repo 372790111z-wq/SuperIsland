@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import plistlib
 import stat
+import struct
 import subprocess
 import tempfile
 
@@ -37,6 +38,78 @@ def app_digest(app):
             entry = ['directory']
         entries.append([path.relative_to(app).as_posix(), mode, *entry])
     return hashlib.sha256(json.dumps(entries, ensure_ascii=False).encode()).hexdigest()
+
+
+def runtime_sections(path):
+    """Fingerprint mapped Mach-O sections, excluding link-edit/debug symbols."""
+    data = path.read_bytes()
+    if len(data) < 32 or struct.unpack_from('<I', data)[0] != 0xfeedfacf:
+        raise ValueError('Expected a thin little-endian 64-bit Mach-O: ' + str(path))
+    count, command_bytes = struct.unpack_from('<II', data, 16)
+    end = 32 + command_bytes
+    if end > len(data):
+        raise ValueError('Truncated Mach-O load commands')
+    position, sections = 32, {}
+    for _ in range(count):
+        if position + 8 > end:
+            raise ValueError('Truncated Mach-O command')
+        command, size = struct.unpack_from('<II', data, position)
+        if size < 8 or position + size > end:
+            raise ValueError('Invalid Mach-O command size')
+        if command == 0x19:  # LC_SEGMENT_64
+            if size < 72:
+                raise ValueError('Truncated segment command')
+            segment = data[position + 8:position + 24].split(b'\0')[0].decode()
+            section_count = struct.unpack_from('<I', data, position + 64)[0]
+            if 72 + section_count * 80 > size:
+                raise ValueError('Truncated Mach-O sections')
+            for index in range(section_count):
+                item = position + 72 + index * 80
+                name = data[item:item + 16].split(b'\0')[0].decode()
+                address, length, offset = struct.unpack_from('<QQI', data, item + 32)
+                flags = struct.unpack_from('<I', data, item + 64)[0]
+                if segment in ('__LINKEDIT', '__DWARF'):
+                    continue
+                zero_fill = flags & 0xff in (1, 0xc, 0x12)
+                if not zero_fill and offset + length > len(data):
+                    raise ValueError('Truncated runtime section')
+                key = segment + ',' + name
+                if key in sections:
+                    raise ValueError('Duplicate runtime section')
+                digest = None if zero_fill else hashlib.sha256(data[offset:offset + length]).hexdigest()
+                sections[key] = (address, length, flags, digest)
+        position += size
+    if not sections:
+        raise ValueError('No runtime sections found')
+    return sections
+
+
+def strip_release_symbols(app, command=run):
+    """Strip only staged, first-party code; preserve runtime bytes and exports.
+
+    Build outputs and dSYMs remain untouched for crash symbolication. Every
+    caller must sign the staged App after this operation.
+    """
+    report = {}
+    for name in ('SuperIsland', 'KeepAwakeHelper', 'KeepAwakeEventTool'):
+        binary = app / 'Contents/MacOS' / name
+        if not binary.exists():
+            continue
+        if binary.is_symlink():
+            raise ValueError('Refusing to strip a symlink: ' + name)
+        before = binary.stat().st_size
+        sections = runtime_sections(binary)
+        exports = command('nm', '-g', '-U', '-j', binary).stdout
+        libraries = command('otool', '-L', binary).stdout.splitlines()[1:]
+        command('strip', '-S', '-x', binary)
+        if (runtime_sections(binary) != sections or
+                command('nm', '-g', '-U', '-j', binary).stdout != exports or
+                command('otool', '-L', binary).stdout.splitlines()[1:] != libraries):
+            raise ValueError('Symbol stripping changed runtime code, metadata or linkage: ' + name)
+        report[name] = dict(before_bytes=before, after_bytes=binary.stat().st_size,
+                            runtime_sections_identical=True, exports_identical=True,
+                            linked_libraries_identical=True)
+    return report
 
 
 def requirement(app):
@@ -96,9 +169,25 @@ def main():
     # Branding does not transfer ownership of production OAuth/deep links.
     info.pop('CFBundleURLTypes', None)
     (candidate / 'Contents/Info.plist').write_bytes(plistlib.dumps(info, sort_keys=False))
+    symbol_stripping = strip_release_symbols(candidate)
+    # --deep may replace a raw nested executable's identifier with its file
+    # name. First sign all nested code, then pin the IPC helper identities and
+    # reseal only the outer bundle without rewriting those nested signatures.
     run('codesign', '--force', '--deep', '--sign', args.signing_identity, '--timestamp=none',
         '--entitlements', root / 'SuperIsland/SuperIsland.entitlements', candidate)
+    nested_identifiers = {}
+    for name in ('KeepAwakeHelper', 'KeepAwakeEventTool'):
+        nested = candidate / 'Contents/MacOS' / name
+        if nested.exists():
+            identifier = 'com.workview.SuperIsland.' + name
+            run('codesign', '--force', '--sign', args.signing_identity, '--timestamp=none',
+                '--identifier', identifier, '--options', 'runtime', nested)
+            nested_identifiers[name] = identifier
+    run('codesign', '--force', '--sign', args.signing_identity, '--timestamp=none',
+        '--entitlements', root / 'SuperIsland/SuperIsland.entitlements', candidate)
     run('codesign', '--verify', '--deep', '--strict', candidate)
+    for name, identifier in nested_identifiers.items():
+        run('codesign', '--verify', '--strict', '-R', f'=identifier "{identifier}"', candidate / 'Contents/MacOS' / name)
     assert requirement(candidate) == stable_requirement, 'Application identity changed'
     archive = output / f'SuperIsland-{build}-arm64.zip'
     run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', candidate, archive)
@@ -107,6 +196,8 @@ def main():
         extracted = Path(directory) / 'SuperIsland.app'
         run('ditto', '-x', '-k', archive, directory)
         run('codesign', '--verify', '--deep', '--strict', extracted)
+        for name, identifier in nested_identifiers.items():
+            run('codesign', '--verify', '--strict', '-R', f'=identifier "{identifier}"', extracted / 'Contents/MacOS' / name)
         assert sha(extracted / 'Contents/MacOS/SuperIsland') == sha(staged_binary)
         assert plistlib.loads((extracted / 'Contents/Info.plist').read_bytes()) == info
     manifest = dict(source_revision=head, source_tree=tree, build_number=build,
@@ -116,7 +207,8 @@ def main():
                     candidate_binary_sha256=sha(staged_binary),
                     source_binary_sha256=sha(binary), source_app_sha256=receipt['sourceAppSHA256'],
                     zip_sha256=sha(archive),
-                    signed=True, installed=False, notarized=False)
+                    signed=True, installed=False, notarized=False, nested_identifiers=nested_identifiers,
+                    symbol_stripping=symbol_stripping)
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     (output / 'SHA256SUMS.txt').write_text(f'{sha(archive)}  {archive.name}\n')
     (output / '说明.txt').write_text(

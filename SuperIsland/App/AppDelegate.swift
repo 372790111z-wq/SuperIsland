@@ -60,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateWindowController: UpdateWindowController?
     private var updateCancellable: AnyCancellable?
     private var statusItem: NSStatusItem?
+    private var fullScreenProbe: ChromeFullScreenProbe?
+    private let keepAwakeMenu = KeepAwakeMenuController()
     private var menuBarDefaultsObserver: NSObjectProtocol?
     private var settingsResetObservers: [NSObjectProtocol] = []
     private var runtimeDefaultsSnapshot: RuntimeDefaultsSnapshot?
@@ -74,6 +76,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let settingsInitialContentSize = NSSize(width: 960, height: 680)
     private static let settingsMinimumContentSize = NSSize(width: 800, height: 560)
 
+    private static var isKeepAwakePreview: Bool {
+        #if DEBUG
+        return ["com.workview.SuperIsland.KA1Preview", "com.workview.SuperIsland.KA1LongTaskPreview"].contains(Bundle.main.bundleIdentifier ?? "")
+        #else
+        return false
+        #endif
+    }
+
     private static var isWE1DebugBundle: Bool {
         Bundle.main.bundleIdentifier == "com.workview.SuperIsland.WE1Debug"
     }
@@ -87,8 +97,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSClassFromString("XCTestCase") != nil
     }
 
+    static var isFullScreenProbe: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "WE1FullscreenProbe") as? Bool == true
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !Self.isRunningUnitTests else { return }
+        if Self.isFullScreenProbe {
+            NSApp.setActivationPolicy(.accessory)
+            fullScreenProbe = ChromeFullScreenProbe()
+            return
+        }
+        if Self.isKeepAwakePreview {
+            KeepAwakeService.shared.openSettings = { Self.showSettingsWindow(initialPane: .keepAwake) }
+            KeepAwakeService.shared.start()
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+            item.button?.image = NSImage(systemSymbolName: "cup.and.saucer", accessibilityDescription: "SuperIsland KA1 预览")
+            let menu = NSMenu(); menu.addItem(keepAwakeMenu.item())
+            menu.addItem(makeMenuItem(title: "退出 KA1 预览", action: #selector(quitApp)))
+            item.menu = menu; statusItem = item
+            Self.showSettingsWindow(initialPane: .keepAwake)
+            return
+        }
         // The WE1 package is an isolated local test harness. It must not report
         // production analytics or claim the production superisland:// URL
         // handler while both builds are installed side by side.
@@ -122,7 +152,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        guard !Self.isRunningUnitTests else { return }
+        guard !Self.isRunningUnitTests, !Self.isFullScreenProbe else { return }
+        KeepAwakeService.shared.shutdown()
+        if Self.isKeepAwakePreview { return }
         ScreenshotLineFeature.shared.stop()
         zilanSuppressionReceiver?.stop()
         WindowEnhancementController.shared.stop()
@@ -137,30 +169,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !Self.isRunningUnitTests else { return .terminateNow }
+        if Self.isKeepAwakePreview { KeepAwakeService.shared.shutdown(); return .terminateNow }
         if Self.isWE1DebugBundle {
             terminationSignalScheduler.terminationDidBegin()
         }
         guard deferredTerminationTask == nil else { return .terminateLater }
-        guard WindowEnhancementController.shared.requiresTerminationPreparation else {
+        guard WindowEnhancementController.shared.requiresTerminationPreparation || KeepAwakeService.shared.lid.shouldPrepareForTermination || ScreenshotLineFeature.shared.clearInProgress || KeepAwakeService.shared.recap.hasPendingPersistence else {
             return .terminateNow
         }
 
         deferredTerminationTask = Task { @MainActor [weak self] in
+            await ScreenshotLineFeature.shared.prepareClearForTermination()
+            await KeepAwakeService.shared.lid.prepareForTermination()
+            await KeepAwakeService.shared.recap.prepareForTermination()
             let safeToTerminate = await WindowEnhancementController.shared.prepareForTermination()
             self?.deferredTerminationTask = nil
+            if !safeToTerminate { KeepAwakeService.shared.recap.start() }
             sender.reply(toApplicationShouldTerminate: safeToTerminate)
         }
         return .terminateLater
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard !Self.isRunningUnitTests else { return }
+        guard !Self.isRunningUnitTests, !Self.isKeepAwakePreview, !Self.isFullScreenProbe else { return }
         AppState.shared.setAppActive(true)
         WindowEnhancementController.shared.refreshSystemIntegrations()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
-        guard !Self.isRunningUnitTests else { return }
+        guard !Self.isRunningUnitTests, !Self.isKeepAwakePreview, !Self.isFullScreenProbe else { return }
         AppState.shared.setAppActive(false)
     }
 
@@ -211,6 +248,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func bootstrapApp() {
         guard !didBootstrapApp else { return }
         didBootstrapApp = true
+        KeepAwakeService.shared.openSettings = { Self.showSettingsWindow(initialPane: .keepAwake) }
+        KeepAwakeService.shared.start()
+        keepAwakeMenu.installStandaloneStatusItem()
         defer { startZilanSuppressionReceiver() }
 
         // The WE1 bundle remains isolated from production analytics, updates,
@@ -610,6 +650,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         modulesItem.submenu = modulesMenu
         menu.addItem(modulesItem)
+        menu.addItem(keepAwakeMenu.item())
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeMenuItem(title: "设置...", action: #selector(openSettings), keyEquivalent: ","))
@@ -740,6 +781,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Self.showSettingsWindow()
         }
     }
+
+    static var managedSettingsWindow: NSWindow? { fallbackSettingsWindowController?.window }
 
     static func showSettingsWindow(initialPane: SettingsPane = .general) {
         // Avoid opening the SwiftUI Settings scene via AppKit selectors in menu-bar mode.

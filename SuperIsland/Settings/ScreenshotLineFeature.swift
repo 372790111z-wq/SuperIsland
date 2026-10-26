@@ -15,7 +15,148 @@ import CoreGraphics
 
 @MainActor private func SL(_ text: String) -> String { ScreenshotLineText.translate(text) }
 
-private enum ScreenshotLinePrefs {
+
+/// Own the panel's public AppKit controls and opaque surface. NSAlert's private
+/// content view depends on its original window and must not be transplanted.
+@MainActor final class ScreenshotLineClearConfirmation: NSObject, NSWindowDelegate {
+    final class Surface: NSView {
+        override var isOpaque: Bool { true }
+        override func draw(_ dirtyRect: NSRect) {
+            NSColor.windowBackgroundColor.setFill()
+            bounds.fill()
+        }
+    }
+    final class Panel: NSPanel {
+        var cancelHandler: (() -> Void)?
+        override var canBecomeKey: Bool { true }
+        override var canBecomeMain: Bool { false }
+        override func cancelOperation(_ sender: Any?) { cancelHandler?() }
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            if event.keyCode == 53 { cancelHandler?(); return true }
+            return super.performKeyEquivalent(with: event)
+        }
+    }
+    let alert: NSAlert
+    let panel: Panel
+    let cancelButton: NSButton
+    let clearButton: NSButton
+    let suppressionButton: NSButton
+    let titleLabel: NSTextField
+    let messageLabel: NSTextField
+    private var continuation: CheckedContinuation<NSApplication.ModalResponse, Never>?
+    private var result: NSApplication.ModalResponse?
+
+    init(alert: NSAlert) {
+        self.alert = alert
+        cancelButton = NSButton(title: alert.buttons[0].title, target: nil, action: nil)
+        clearButton = NSButton(title: alert.buttons[1].title, target: nil, action: nil)
+        suppressionButton = NSButton(checkboxWithTitle: alert.suppressionButton?.title ?? "", target: nil, action: nil)
+        titleLabel = NSTextField(wrappingLabelWithString: alert.messageText)
+        messageLabel = NSTextField(wrappingLabelWithString: alert.informativeText)
+        panel = Panel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 320),
+                      styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
+        super.init()
+        panel.isReleasedWhenClosed = false
+        panel.animationBehavior = .none
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.hidesOnDeactivate = false
+        panel.level = .modalPanel
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.backgroundColor = .windowBackgroundColor
+        panel.isOpaque = true
+        panel.hasShadow = true
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(kind)?.isHidden = true
+        }
+        let surface = Surface(frame: NSRect(x: 0, y: 0, width: 360, height: 320))
+        panel.contentView = surface
+        let icon = NSImageView(image: alert.icon ?? NSApp.applicationIconImage)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.setAccessibilityElement(false)
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        messageLabel.font = .systemFont(ofSize: 13)
+        messageLabel.textColor = .labelColor
+        for label in [titleLabel, messageLabel] {
+            label.alignment = .center
+            label.preferredMaxLayoutWidth = 312
+            label.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
+        suppressionButton.state = alert.suppressionButton?.state ?? .off
+        suppressionButton.setAccessibilityIdentifier(alert.suppressionButton?.accessibilityIdentifier())
+        let buttons = NSStackView(views: [cancelButton, clearButton])
+        buttons.orientation = .horizontal
+        buttons.distribution = .fillEqually
+        buttons.spacing = 12
+        for button in [cancelButton, clearButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .large
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.heightAnchor.constraint(equalToConstant: 32).isActive = true
+            button.target = self
+        }
+        cancelButton.action = #selector(cancelClicked(_:))
+        cancelButton.keyEquivalent = "\r"
+        clearButton.action = #selector(clearClicked(_:))
+        clearButton.keyEquivalent = ""
+        let stack = NSStackView(views: [icon, titleLabel, messageLabel, suppressionButton, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        surface.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: surface.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -24),
+            stack.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -24),
+            icon.widthAnchor.constraint(equalToConstant: 64), icon.heightAnchor.constraint(equalToConstant: 64),
+            titleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            messageLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+        panel.setContentSize(NSSize(width: 360, height: surface.fittingSize.height))
+        surface.layoutSubtreeIfNeeded()
+        panel.center()
+        panel.setAccessibilityIdentifier(alert.window.accessibilityIdentifier())
+        panel.setAccessibilitySubrole(alert.window.accessibilitySubrole())
+        panel.delegate = self
+        panel.cancelHandler = { [weak self] in self?.cancel() }
+        panel.defaultButtonCell = cancelButton.cell as? NSButtonCell
+        panel.initialFirstResponder = cancelButton
+    }
+    func present() async -> NSApplication.ModalResponse {
+        if let result { return result }
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            panel.orderFrontRegardless()
+            panel.makeKey()
+        }
+    }
+    func cancel() { finish(.alertFirstButtonReturn) }
+    @objc private func cancelClicked(_ sender: Any?) { cancel() }
+    @objc private func clearClicked(_ sender: Any?) { finish(.alertSecondButtonReturn) }
+    private func finish(_ response: NSApplication.ModalResponse) {
+        guard result == nil else { return }
+        result = response
+        // Only the visible checkbox supplies the decision; requestClearAll saves
+        // it only after an explicit clear, never after cancellation.
+        alert.suppressionButton?.state = suppressionButton.state
+        // Hide in the button action itself, before resuming any async cleanup.
+        // No modal-loop polling, animation delay or status message on cancel.
+        panel.orderOut(nil)
+        let pending = continuation
+        continuation = nil
+        pending?.resume(returning: response)
+    }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { cancel(); return false }
+}
+
+enum ScreenshotLinePrefs {
     static var domain: CFString {
         (ProcessInfo.processInfo.environment["SCREENSHOT_LINE_CAPTURE_DOMAIN"] ?? "com.apple.screencapture") as CFString
     }
@@ -93,8 +234,8 @@ private enum ScreenshotLineError: Error {
     }
 }
 
-struct ScreenshotLineItem: Codable, Identifiable, Equatable {
-    enum Kind: String, Codable { case image, recording }
+struct ScreenshotLineItem: Codable, Identifiable, Equatable, Sendable {
+    enum Kind: String, Codable, Sendable { case image, recording }
     let id: UUID
     var path: String
     var kind: Kind
@@ -109,8 +250,26 @@ struct ScreenshotLineItem: Codable, Identifiable, Equatable {
 final class ScreenshotLineFeature: NSObject, ObservableObject {
     static let shared = ScreenshotLineFeature()
 
+    @Published private(set) var isEnabled: Bool
+    @Published private(set) var recoveryError: String?
+    @Published private(set) var recoveryPending: Bool
     @Published private(set) var items: [ScreenshotLineItem] = []
     @Published private(set) var status = ""
+    @Published private(set) var clearInProgress = false
+    @Published private(set) var clearRecoveryPending = false
+    @Published private(set) var askBeforeClearAll: Bool
+    private(set) var clearTask: Task<Void, Never>?
+    private var clearStore: ScreenshotLineClearTransaction?
+    private(set) var clearConfirmation: ScreenshotLineClearConfirmation?
+    private var clearCancelled = false
+    private var clearIndexDirty = false
+    private var clearCommitsInProgress = false
+    private var editingItemIDs = Set<UUID>()
+    private let clearTrash: @Sendable (URL) throws -> Void
+    private let clearSave: @Sendable (Data, URL) throws -> Void
+    private let clearPreferenceWriter: ((Bool) throws -> Void)?
+    private let clearIndexWriter: ((Data, URL) throws -> Void)?
+
     @Published private(set) var takeoverActive = false
     @Published private(set) var shortcutConflict = false
     @Published private(set) var page = 0
@@ -125,7 +284,14 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     @Published var lineSize: Int { didSet { defaults.set(lineSize, forKey: "screenshotLine.size"); placePanel() } }
     @Published var keepAfterFinder: Bool { didSet { defaults.set(keepAfterFinder, forKey: "screenshotLine.keepAfterFinder") } }
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
+    private let supportOverride: URL?
+    private let pasteboard: NSPasteboard
+    private let readCapture: (String) -> ScreenshotLinePrefs.Value
+    private let writeCapture: (String, ScreenshotLinePrefs.Value) -> Void
+    private var watchGeneration = 0
+    private var installsUI = true
+    private var menuObserver: AnyCancellable?
     private var appName = "ScreenshotLine"
     private var support = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
     private var panel: NSPanel?
@@ -141,7 +307,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     private var interactionInProgress = false
     private var revealed = false
     private var started = false
-    private var lastClipboardChange = NSPasteboard.general.changeCount
+    private var lastClipboardChange = 0
     private var screenObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
     private var watchedSystemFolder: URL?
@@ -163,7 +329,27 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     var slotWidth: CGFloat { photoBounds.width + 30 }
     private var pageCapacity: Int { max(1, Int(((panel?.frame.width ?? 960) - 100) / slotWidth)) }
 
-    private override init() {
+    init(defaults: UserDefaults = .standard, supportDirectory: URL? = nil,
+         pasteboard: NSPasteboard = .general,
+         readCapture: @escaping (String) -> ScreenshotLinePrefs.Value = ScreenshotLinePrefs.Value.read,
+         writeCapture: @escaping (String, ScreenshotLinePrefs.Value) -> Void = { $1.write($0) },
+         clearTrash: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) },
+         clearSave: @escaping @Sendable (Data, URL) throws -> Void = ScreenshotLineClearTransaction.durableWrite,
+         clearPreferenceWriter: ((Bool) throws -> Void)? = nil,
+         clearIndexWriter: ((Data, URL) throws -> Void)? = nil) {
+        self.defaults = defaults
+        self.clearTrash = clearTrash
+        self.clearSave = clearSave
+        self.clearPreferenceWriter = clearPreferenceWriter
+        self.clearIndexWriter = clearIndexWriter
+        askBeforeClearAll = defaults.object(forKey: "screenshotLine.askBeforeClearAll") as? Bool ?? true
+        supportOverride = supportDirectory
+        self.pasteboard = pasteboard
+        self.readCapture = readCapture
+        self.writeCapture = writeCapture
+        isEnabled = defaults.object(forKey: "screenshotLine.enabled") as? Bool ?? true
+        recoveryPending = defaults.bool(forKey: "screenshotLine.recoveryPending")
+        lastClipboardChange = pasteboard.changeCount
         watchEnabled = defaults.object(forKey: "screenshotLine.watch") as? Bool ?? true
         clipboardEnabled = defaults.bool(forKey: "screenshotLine.clipboard")
         peekEnabled = defaults.object(forKey: "screenshotLine.peek") as? Bool ?? true
@@ -191,27 +377,30 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
     var hasOlder: Bool { items.count > (page + 1) * pageCapacity }
 
-    func start(appName: String) {
+    func start(appName: String, installUI: Bool = true) {
         guard !started else { return }
         started = true
         self.appName = appName
+        installsUI = installUI
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        support = ProcessInfo.processInfo.environment["SCREENSHOT_LINE_SUPPORT_DIR"]
+        support = supportOverride ?? ProcessInfo.processInfo.environment["SCREENSHOT_LINE_SUPPORT_DIR"]
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? base.appendingPathComponent(appName, isDirectory: true).appendingPathComponent("ScreenshotLine", isDirectory: true)
         try? FileManager.default.createDirectory(at: managedFolder, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: clipboardFolder, withIntermediateDirectories: true)
         try? appName.write(to: support.appendingPathComponent(".screenshot-line-owner"), atomically: true, encoding: .utf8)
-        restoreIndex()
+        support = support.resolvingSymlinksInPath().standardizedFileURL
+        clearStore = ScreenshotLineClearTransaction(support: support, roots: [managedFolder, clipboardFolder], trash: clearTrash, save: clearSave)
+        if clearStore?.hasRecovery == true {
+            restoreIndex(preserveMissing: true)
+            retryClearRecovery()
+        } else { restoreIndex() }
         restoreInterruptedTakeover()
-        makePanel()
-        makeMenu()
-        registerHotKey()
-        refreshWatch()
-        refreshClipboard()
-        pointerTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
+        if installUI { makePanel(); makeMenu() }
+        refreshRuntime()
+        guard installUI else { return }
+        menuObserver = objectWillChange.debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshMenuState() }
         menuClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             DispatchQueue.main.async { self?.menuBarClicked() }
         }
@@ -232,6 +421,10 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func stop() {
+        cancelClear()
+        started = false
+        watchGeneration &+= 1
+        menuObserver = nil
         watcher?.stop(); watcher = nil
         clipboardTimer?.invalidate(); clipboardTimer = nil
         pointerTimer?.invalidate(); pointerTimer = nil
@@ -240,28 +433,66 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         menuClickMonitor = nil; localMenuClickMonitor = nil; scrollMonitor = nil
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
-        if takeoverActive { restoreTakeover() }
+        if takeoverActive || recoveryPending { restoreTakeover() }
         panel?.orderOut(nil)
     }
 
+    var moduleStatus: String {
+        if recoveryPending { return SL("功能已关闭 · 系统设置恢复失败") }
+        return isEnabled ? SL("截图挂绳已开启") : SL("截图挂绳已关闭")
+    }
+    func setEnabled(_ value: Bool) {
+        guard value != isEnabled else { return }
+        guard !value || !recoveryPending else { return }
+        isEnabled = value
+        defaults.set(value, forKey: "screenshotLine.enabled")
+        if !value {
+            cancelClear()
+            hideLine()
+            panel?.orderOut(nil)
+            if takeoverActive || recoveryPending { restoreTakeover() }
+        }
+        refreshRuntime()
+        refreshMenuState()
+    }
+    private func refreshRuntime() {
+        registerHotKey()
+        refreshWatch()
+        refreshClipboard()
+        pointerTimer?.invalidate(); pointerTimer = nil
+        if started && isEnabled && installsUI {
+            menuBarSince = nil; awaySince = nil; menuHoverSuppressed = false
+            pointerTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.tick() }
+            }
+        }
+    }
+    private func refreshMenuState() {
+        statusItem?.button?.toolTip = SL("截图挂绳") + " · " + moduleStatus
+        if let menu = statusItem?.menu { menuNeedsUpdate(menu) }
+    }
     private func setStatus(_ message: String) { status = message }
 
-    private func persistIndex() {
+    @discardableResult private func persistIndex() -> Bool {
+        if clearCommitsInProgress { clearIndexDirty = true; return true }
         do {
             let data = try JSONEncoder().encode(items)
-            try data.write(to: support.appendingPathComponent("index.json"), options: .atomic)
-        } catch { setStatus(SL("挂绳记录保存失败：") + error.localizedDescription) }
+            let url = support.appendingPathComponent("index.json")
+            if let clearIndexWriter { try clearIndexWriter(data, url) }
+            else { try data.write(to: url, options: .atomic) }
+            return true
+        } catch { setStatus(SL("挂绳记录保存失败：") + error.localizedDescription); return false }
     }
 
-    private func restoreIndex() {
+    private func restoreIndex(preserveMissing: Bool = false) {
         guard let data = try? Data(contentsOf: support.appendingPathComponent("index.json")),
               let old = try? JSONDecoder().decode([ScreenshotLineItem].self, from: data) else { return }
-        items = old.filter { FileManager.default.fileExists(atPath: $0.path) }
+        items = preserveMissing ? old : old.filter { FileManager.default.fileExists(atPath: $0.path) }
         if items.count != old.count { persistIndex() }
     }
 
     private func add(_ url: URL, owned: Bool) {
-        guard FileManager.default.fileExists(atPath: url.path), !items.contains(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) else { return }
+        guard started, isEnabled, FileManager.default.fileExists(atPath: url.path), !items.contains(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) else { return }
         let kind: ScreenshotLineItem.Kind = ["mov", "mp4"].contains(url.pathExtension.lowercased()) ? .recording : .image
         if kind == .recording {
             let preview = AVAssetImageGenerator(asset: AVURLAsset(url: url))
@@ -269,7 +500,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         } else { guard NSImage(contentsOf: url) != nil else { return } }
         items.append(.init(id: UUID(), path: url.path, kind: kind, owned: owned, createdAt: Date()))
         page = 0
-        setStatus("")
+        if !clearInProgress && !clearRecoveryPending { setStatus("") }
         persistIndex()
         placePanel()
         if peekEnabled && !menuHoverSuppressed { reveal(peek: true) }
@@ -289,7 +520,196 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         }
     }
 
+    private func persistClearIndex() async -> Bool {
+        do {
+            repeat {
+                clearIndexDirty = false
+                let snapshot = items
+                let data = try JSONEncoder().encode(snapshot)
+                let url = support.appendingPathComponent("index.json")
+                if let clearIndexWriter { try clearIndexWriter(data, url) }
+                else { try await Task.detached { try ScreenshotLineClearTransaction.durableWrite(data, url) }.value }
+                if items != snapshot { clearIndexDirty = true }
+            } while clearIndexDirty
+            return true
+        } catch {
+            clearIndexDirty = false
+            setStatus(SL("挂绳记录保存失败：") + error.localizedDescription)
+            return false
+        }
+    }
+
+    var canClearAll: Bool { started && isEnabled && !items.isEmpty && !clearInProgress && !clearRecoveryPending }
+
+    @discardableResult func setAskBeforeClearAll(_ value: Bool) -> Bool {
+        guard isEnabled, !clearInProgress else { return false }
+        return saveAskBeforeClearAll(value)
+    }
+    private func saveAskBeforeClearAll(_ value: Bool) -> Bool {
+        do {
+            if let clearPreferenceWriter { try clearPreferenceWriter(value) }
+            else {
+                defaults.set(value, forKey: "screenshotLine.askBeforeClearAll")
+                guard defaults.synchronize(), defaults.object(forKey: "screenshotLine.askBeforeClearAll") as? Bool == value else {
+                    throw ScreenshotLineClearTransaction.Failure.invalidJournal
+                }
+            }
+            askBeforeClearAll = value
+            return true
+        } catch {
+            askBeforeClearAll = true
+            defaults.set(true, forKey: "screenshotLine.askBeforeClearAll")
+            setStatus(SL("询问偏好未保存，下次仍会确认。"))
+            return false
+        }
+    }
+
+    /// The same presenter is exercised by the isolated native view tests.
+    func makeClearAlert(count: Int) -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = SL("清空挂绳上的 ") + String(count) + SL(" 项内容？")
+        alert.informativeText = SL("托管副本将移到废纸篓，外部原文件保留。")
+        alert.addButton(withTitle: SL("取消"))
+        alert.addButton(withTitle: SL("清空"))
+        alert.buttons[0].keyEquivalent = "\r"
+        alert.buttons[1].keyEquivalent = ""
+        alert.window.defaultButtonCell = alert.buttons[0].cell as? NSButtonCell
+        alert.window.initialFirstResponder = alert.buttons[0]
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = SL("下次不再询问")
+        alert.suppressionButton?.state = .off
+        alert.window.setAccessibilityIdentifier("data-annotation-id=" + accessibilityPrefix + "clear-confirm")
+        alert.suppressionButton?.setAccessibilityIdentifier("data-annotation-id=" + accessibilityPrefix + "clear-confirm-suppress")
+        return alert
+    }
+
+    /// An independent nonactivating panel leaves other windows alone and
+    /// suspends only this operation, allowing KeepAwake work to keep running.
+    func presentClearAlert(_ alert: NSAlert) async -> NSApplication.ModalResponse {
+        guard clearConfirmation == nil, !clearCancelled else { return .alertFirstButtonReturn }
+        let confirmation = ScreenshotLineClearConfirmation(alert: alert)
+        clearConfirmation = confirmation
+        defer { clearConfirmation = nil }
+        return await confirmation.present()
+    }
+
+    /// Optional confirmation injection is restricted to this same facade in tests;
+    /// production always uses the simple native alert when asking is enabled.
+    func requestClearAll(confirm: ((NSAlert) -> NSApplication.ModalResponse)? = nil) {
+        guard canClearAll, let store = clearStore else { return }
+        let snapshot = items
+        let busy = editingItemIDs.union(fallingItemIDs)
+            .union(interactionInProgress ? Set(snapshot.map(\.id)) : [])
+        clearInProgress = true; clearCancelled = false
+        clearTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.clearCommitsInProgress = false
+                self.clearInProgress = false; self.clearTask = nil
+                if self.clearIndexDirty { self.clearIndexDirty = false; _ = self.persistIndex() }
+                self.refreshMenuState()
+            }
+            // Capture file identity before presenting confirmation, off the UI thread.
+            let plan = await Task.detached { store.plan(snapshot, busyIDs: busy) }.value
+            guard self.started, self.isEnabled, !self.clearCancelled else { return }
+            var preferenceFailed = false
+            if self.askBeforeClearAll {
+                let alert = self.makeClearAlert(count: plan.count)
+                let response: NSApplication.ModalResponse
+                if let confirm { response = confirm(alert) }
+                else { response = await self.presentClearAlert(alert) }
+                guard response == .alertSecondButtonReturn, self.isEnabled, !self.clearCancelled else {
+                    return
+                }
+                if alert.suppressionButton?.state == .on {
+                    preferenceFailed = !self.saveAskBeforeClearAll(false)
+                }
+            }
+            self.clearCommitsInProgress = true
+            // Normal progress and successful completion stay silent. Clear an old
+            // batch error only after an explicit decision to start this batch.
+            self.setStatus("")
+            var missing = 0, failed = 0
+            var warnings = Set<String>()
+            for selection in plan.selections {
+                guard self.started, self.isEnabled, !self.clearCancelled else { break }
+                guard selection.items.allSatisfy({ self.items.contains($0) }) else {
+                    failed += selection.items.count; warnings.insert(SL("项目在确认后发生变化，已保留。")); continue
+                }
+                let outcome = await Task.detached { store.execute(selection) }.value
+                if !outcome.removed.isEmpty {
+                    let exact = Set(outcome.removed.map(\.id))
+                    self.items.removeAll { exact.contains($0.id) && outcome.removed.contains($0) }
+                    missing += outcome.missing
+                    if await self.persistClearIndex() {
+                        if let id = outcome.journal {
+                            do { try await Task.detached { try store.acknowledge([id]) }.value }
+                            catch { self.clearRecoveryPending = true; warnings.insert(SL("清理恢复记录未完成，请重试恢复。")) }
+                        }
+                    } else {
+                        self.clearRecoveryPending = true
+                        warnings.insert(SL("文件操作已完成，但挂绳记录保存失败；请重试恢复。"))
+                    }
+                } else { failed += selection.items.count }
+                if let error = outcome.error { warnings.insert(SL(error)) }
+                if store.hasRecovery && outcome.removed.isEmpty { self.clearRecoveryPending = true }
+                if self.clearRecoveryPending { break }
+            }
+            if self.clearIndexDirty, !(await self.persistClearIndex()) {
+                self.clearRecoveryPending = true
+                warnings.insert(SL("挂绳记录保存失败，请重试恢复。"))
+            }
+            self.page = min(self.page, max(0, (self.items.count - 1) / self.pageCapacity))
+            if self.items.isEmpty { self.hideLine() } else if self.isEnabled { self.placePanel() }
+            var errors = [String]()
+            if failed > 0 { errors.append(String(failed) + SL(" 项未能清理，保留在挂绳，可重试。")) }
+            if missing > 0 { errors.append(String(missing) + SL(" 项原文件已缺失，仅移除失效记录。")) }
+            if preferenceFailed { errors.append(SL("询问偏好未保存，下次仍会确认。")) }
+            errors.append(contentsOf: warnings.sorted())
+            self.setStatus(errors.joined(separator: " "))
+        }
+        refreshMenuState()
+    }
+
+    private func cancelClear() {
+        clearCancelled = true
+        clearConfirmation?.cancel()
+    }
+    func prepareClearForTermination() async {
+        cancelClear()
+        await clearTask?.value
+    }
+    func retryClearRecovery() {
+        guard !clearInProgress, let store = clearStore else { return }
+        clearInProgress = true; clearRecoveryPending = true; clearCommitsInProgress = true
+        clearTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.clearCommitsInProgress = false
+                self.clearInProgress = false; self.clearTask = nil
+                if self.clearIndexDirty { self.clearIndexDirty = false; _ = self.persistIndex() }
+                self.refreshMenuState()
+            }
+            let result = await Task.detached { store.recover() }.value
+            // Restore staged files BEFORE filtering missing records at startup.
+            self.items.removeAll { result.removed.contains($0) }
+            let saved = await self.persistClearIndex()
+            if saved {
+                do { try await Task.detached { try store.acknowledge(result.journals) }.value }
+                catch { self.setStatus(SL("清理恢复记录保存失败，请重试。")); return }
+            }
+            self.clearRecoveryPending = !saved || !result.errors.isEmpty
+            var errors = [String]()
+            if self.clearRecoveryPending { errors.append(SL("清理尚未恢复，请重试恢复。")) }
+            if result.uncertain > 0 { errors.append(SL("部分文件已不在原位置，请检查废纸篓。")) }
+            errors.append(contentsOf: result.errors.map { SL($0) })
+            self.setStatus(errors.joined(separator: " "))
+            if self.items.isEmpty { self.hideLine() }
+        }
+    }
+
     func close(_ item: ScreenshotLineItem) {
+        guard isEnabled, !clearInProgress, !clearRecoveryPending else { return }
         guard let current = items.first(where: { $0.id == item.id }), !fallingItemIDs.contains(item.id) else { return }
         if isManaged(current) { trash(current) }
         else { animateRemoval(current) }
@@ -306,6 +726,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func trash(_ item: ScreenshotLineItem) {
+        guard isEnabled, !clearInProgress, !clearRecoveryPending else { return }
         guard let current = items.first(where: { $0.id == item.id }), !fallingItemIDs.contains(item.id) else { return }
         if !isManaged(current) {
             let alert = NSAlert()
@@ -314,7 +735,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
             alert.addButton(withTitle: SL("移到废纸篓"))
             alert.addButton(withTitle: SL("取消"))
             NSApp.activate(ignoringOtherApps: true)
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard alert.runModal() == .alertFirstButtonReturn, isEnabled else { return }
         }
         do {
             try FileManager.default.trashItem(at: current.url, resultingItemURL: nil)
@@ -323,8 +744,9 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func copy(_ item: ScreenshotLineItem) {
+        guard isEnabled else { return }
         guard FileManager.default.fileExists(atPath: item.path) else { setStatus(ScreenshotLineError.fileMissing.message); return }
-        let pb = NSPasteboard.general
+        let pb = pasteboard
         let objects: [NSPasteboardWriting]
         var exportedURL: URL?
         if item.kind == .image {
@@ -357,15 +779,16 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         }
     }
 
-    func open(_ item: ScreenshotLineItem) { NSWorkspace.shared.open(item.url) }
-    func revealInFinder(_ item: ScreenshotLineItem) { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
-    func quickLook(_ item: ScreenshotLineItem) { ScreenshotLinePreview.shared.show(item.url) }
+    func open(_ item: ScreenshotLineItem) { guard isEnabled else { return }; NSWorkspace.shared.open(item.url) }
+    func revealInFinder(_ item: ScreenshotLineItem) { guard isEnabled else { return }; NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+    func quickLook(_ item: ScreenshotLineItem) { guard isEnabled else { return }; ScreenshotLinePreview.shared.show(item.url) }
 
     func saveToFolder(_ item: ScreenshotLineItem) {
+        guard isEnabled, !clearInProgress, !clearRecoveryPending else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.prompt = SL("保存到这里")
-        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        guard panel.runModal() == .OK, isEnabled, let folder = panel.url else { return }
         var target = folder.appendingPathComponent(item.url.lastPathComponent)
         var n = 2
         while FileManager.default.fileExists(atPath: target.path) {
@@ -382,6 +805,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func edit(_ item: ScreenshotLineItem) {
+        guard isEnabled, !clearInProgress, !clearRecoveryPending else { return }
         guard FileManager.default.fileExists(atPath: item.path) else { setStatus(ScreenshotLineError.fileMissing.message); return }
         var target = item.url
         var backup: URL?
@@ -403,9 +827,11 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
             catch { setStatus(SL("无法建立编辑副本：") + error.localizedDescription); return }
         }
         let sourceID = item.id
+        editingItemIDs.insert(sourceID)
         let createdCopy = !item.owned
         let completion: (URL?) -> Void = { [weak self] result in
             guard let self else { return }
+            self.editingItemIDs.remove(sourceID)
             guard let result else {
                 if createdCopy { try? FileManager.default.removeItem(at: target) }
                 if let backup { try? FileManager.default.removeItem(at: backup) }
@@ -424,23 +850,27 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func chooseWatchFolder() {
+        guard isEnabled else { return }
         let picker = NSOpenPanel()
         picker.canChooseDirectories = true; picker.canChooseFiles = false
         picker.prompt = SL("监听")
-        if picker.runModal() == .OK, let folder = picker.url {
+        if picker.runModal() == .OK, isEnabled, let folder = picker.url {
             defaults.set(folder.path, forKey: "screenshotLine.watchFolder")
             refreshWatch()
         }
     }
 
     func resetWatchFolder() {
+        guard isEnabled else { return }
         defaults.removeObject(forKey: "screenshotLine.watchFolder")
         refreshWatch()
     }
 
     private func refreshWatch() {
+        watchGeneration &+= 1
+        let generation = watchGeneration
         watcher?.stop(); watcher = nil
-        guard started, watchEnabled else { return }
+        guard started, isEnabled, watchEnabled else { return }
         watchedSystemSavesFile = ScreenshotLinePrefs.savesScreenshotFile()
         if customWatchFolder == nil, !takeoverActive, !watchedSystemSavesFile {
             watchedSystemFolder = ScreenshotLinePrefs.screenshotFolder()
@@ -456,22 +886,27 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         let owned = folder.standardizedFileURL == managedFolder.standardizedFileURL
         watcher = ScreenshotLineWatcher(folder: folder, acceptsAnyImage: owned || customWatchFolder != nil,
                                         acceptsRecording: owned) { [weak self] url in
-            self?.add(url, owned: owned)
-        } onFailure: { [weak self] in self?.setStatus(SL("截图目录不可用或无访问权限：") + folder.path) }
+            guard let self, self.isEnabled, self.watchGeneration == generation else { return }
+            self.add(url, owned: owned)
+        } onFailure: { [weak self] in
+            guard let self, self.isEnabled, self.watchGeneration == generation else { return }
+            self.setStatus(SL("截图目录不可用或无访问权限：") + folder.path)
+        }
         watcher?.start()
     }
 
     private func refreshClipboard() {
         clipboardTimer?.invalidate(); clipboardTimer = nil
-        lastClipboardChange = NSPasteboard.general.changeCount
-        guard started, clipboardEnabled else { return }
+        lastClipboardChange = pasteboard.changeCount
+        guard started, isEnabled, clipboardEnabled else { return }
         clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.readClipboard() }
         }
     }
 
     private func readClipboard() {
-        let pb = NSPasteboard.general
+        guard started, isEnabled, clipboardEnabled else { return }
+        let pb = pasteboard
         guard pb.changeCount != lastClipboardChange else { return }
         lastClipboardChange = pb.changeCount
         guard let entries = pb.pasteboardItems, entries.count == 1, let entry = entries.first else { return }
@@ -497,11 +932,11 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func enableTakeover() {
-        guard !takeoverActive else { return }
+        guard isEnabled, !recoveryPending, !takeoverActive else { return }
         let current = ScreenshotLinePrefs.screenshotFolder()
         if FileManager.default.fileExists(atPath: snapshotURL.path)
             || ["location", "location-screenshot", "location-screenrecording"].contains(where: {
-                ScreenshotLinePrefs.Value.read($0).text.map { URL(fileURLWithPath: $0).standardizedFileURL == managedFolder.standardizedFileURL } ?? false
+                readCapture($0).text.map { URL(fileURLWithPath: $0).standardizedFileURL == managedFolder.standardizedFileURL } ?? false
             }) {
             setStatus(ScreenshotLineError.missingSnapshot.message); return
         }
@@ -514,15 +949,16 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         alert.informativeText = SL("系统保存目标会暂时改为 ") + managedFolder.path + SL("。关闭接管或正常退出时恢复原设置。")
         alert.addButton(withTitle: SL("开启接管")); alert.addButton(withTitle: SL("取消"))
         NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn, isEnabled, !recoveryPending else { return }
         do {
             try FileManager.default.createDirectory(at: managedFolder, withIntermediateDirectories: true)
             guard !FileManager.default.fileExists(atPath: snapshotURL.path) else { throw ScreenshotLineError.anotherOwner }
-            let original = Dictionary(uniqueKeysWithValues: ScreenshotLinePrefs.keys.map { ($0, ScreenshotLinePrefs.Value.read($0)) })
+            let original = Dictionary(uniqueKeysWithValues: ScreenshotLinePrefs.keys.map { ($0, readCapture($0)) })
             let snapshot = ScreenshotLinePrefs.Snapshot(original: original, owned: takeoverValues)
             try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
-            for (key, value) in snapshot.owned { value.write(key) }
-            guard snapshot.owned.allSatisfy({ ScreenshotLinePrefs.Value.read($0.key) == $0.value }) else {
+            defaults.set(true, forKey: "screenshotLine.recoveryPending")
+            for (key, value) in snapshot.owned { writeCapture(key, value) }
+            guard snapshot.owned.allSatisfy({ readCapture($0.key) == $0.value }) else {
                 restoreTakeover(); throw ScreenshotLineError.unverified
             }
             takeoverActive = true
@@ -534,40 +970,44 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func restoreTakeover() {
-        guard let data = try? Data(contentsOf: snapshotURL),
-              var snapshot = try? JSONDecoder().decode(ScreenshotLinePrefs.Snapshot.self, from: data) else {
-            let wasActive = takeoverActive
-            takeoverActive = false
-            if wasActive || FileManager.default.fileExists(atPath: snapshotURL.path) { setStatus(ScreenshotLineError.missingSnapshot.message) }
-            refreshWatch(); return
-        }
-        var unresolved: [String: ScreenshotLinePrefs.Value] = [:]
-        for (key, original) in snapshot.original {
-            guard let expected = snapshot.owned[key] else { continue }
-            if ScreenshotLinePrefs.Value.read(key) == expected {
-                original.write(key)
-                if ScreenshotLinePrefs.Value.read(key) != original { unresolved[key] = original }
-            } else if ScreenshotLinePrefs.Value.read(key) != original { unresolved[key] = original }
-        }
-        if unresolved.isEmpty {
-            try? FileManager.default.removeItem(at: snapshotURL)
-            setStatus("")
-        }
-        else {
-            snapshot.original = unresolved
-            try? JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
-            setStatus(SL("部分系统设置已由其他程序改动，未覆盖；请检查截图选项。"))
-        }
+        let exists = FileManager.default.fileExists(atPath: snapshotURL.path)
+        guard takeoverActive || recoveryPending || exists else { return }
         takeoverActive = false
-        refreshWatch()
+        recoveryPending = true
+        defaults.set(true, forKey: "screenshotLine.recoveryPending")
+        do {
+            let snapshot = try JSONDecoder().decode(ScreenshotLinePrefs.Snapshot.self, from: Data(contentsOf: snapshotURL))
+            guard !snapshot.original.isEmpty, snapshot.original.keys.allSatisfy({ snapshot.owned[$0] != nil }) else {
+                throw ScreenshotLineError.missingSnapshot
+            }
+            var unresolved = false
+            for (key, original) in snapshot.original {
+                guard let expected = snapshot.owned[key] else { continue }
+                // Only restore settings still owned by this snapshot. A third party's
+                // subsequent change is retained, and the recovery obligation stays visible.
+                if readCapture(key) == expected { writeCapture(key, original) }
+                if readCapture(key) != original { unresolved = true }
+            }
+            guard !unresolved else { throw ScreenshotLineError.anotherOwner }
+            try FileManager.default.removeItem(at: snapshotURL)
+            recoveryPending = false
+            defaults.set(false, forKey: "screenshotLine.recoveryPending")
+            recoveryError = nil
+            setStatus(SL("系统截图设置已恢复。"))
+        } catch {
+            recoveryError = SL("系统设置恢复失败：") + ((error as? ScreenshotLineError)?.message ?? error.localizedDescription)
+            setStatus(recoveryError!)
+            // Keep the complete snapshot for read-back/retry, including originals
+            // already restored; do not discard it on a partial write or file error.
+            isEnabled = false
+            defaults.set(false, forKey: "screenshotLine.enabled")
+            hideLine()
+        }
+        refreshRuntime()
     }
 
     private func restoreInterruptedTakeover() {
-        guard FileManager.default.fileExists(atPath: snapshotURL.path) else { return }
-        restoreTakeover()
-        if !FileManager.default.fileExists(atPath: snapshotURL.path) {
-            setStatus(SL("已检查并恢复上次中断的截图设置。"))
-        }
+        if recoveryPending || FileManager.default.fileExists(atPath: snapshotURL.path) { restoreTakeover() }
     }
 
     private func makePanel() {
@@ -602,6 +1042,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     private func reveal(peek: Bool = false) {
+        guard started, isEnabled else { return }
         placePanel()
         guard let panel else { return }
         animationGeneration += 1
@@ -631,8 +1072,8 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func toggleLine() { revealed ? hideLine() : reveal() }
-    func older() { if hasOlder { page += 1 } }
-    func newer() { page = max(0, page - 1) }
+    func older() { if isEnabled && hasOlder { page += 1 } }
+    func newer() { guard isEnabled else { return }; page = max(0, page - 1) }
     func interactionBegan() { interactionInProgress = true; awaySince = nil }
     func interactionEnded() { interactionInProgress = false; awaySince = nil }
     func finishedDrag(_ item: ScreenshotLineItem, operation: NSDragOperation) {
@@ -641,7 +1082,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     func promisedFileWritten(_ item: ScreenshotLineItem, to destination: URL, inFinder: Bool) {
-        guard inFinder, FileManager.default.fileExists(atPath: destination.path) else { return }
+        guard !clearInProgress, !clearRecoveryPending, inFinder, FileManager.default.fileExists(atPath: destination.path) else { return }
         guard let current = items.first(where: { $0.id == item.id }) else { return }
         if isManaged(current) {
             do {
@@ -681,6 +1122,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
 
     private func tick() {
+        guard started, isEnabled else { return }
         if Date() >= nextWatchCheck {
             nextWatchCheck = Date().addingTimeInterval(2)
             if watchEnabled, customWatchFolder == nil, !takeoverActive,
@@ -734,6 +1176,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
 
     private func registerHotKey() {
         hotKey = nil
+        guard started, isEnabled, installsUI else { shortcutConflict = false; return }
         let choice = defaults.string(forKey: "screenshotLine.shortcut") ?? "ctrl-option-t"
         guard choice != "none" else { shortcutConflict = false; return }
         let config: (UInt32, UInt32)
@@ -746,7 +1189,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         shortcutConflict = hotKey == nil
     }
 
-    func setShortcut(_ value: String) { defaults.set(value, forKey: "screenshotLine.shortcut"); registerHotKey() }
+    func setShortcut(_ value: String) { guard isEnabled else { return }; defaults.set(value, forKey: "screenshotLine.shortcut"); registerHotKey() }
     var shortcut: String { defaults.string(forKey: "screenshotLine.shortcut") ?? "ctrl-option-t" }
     var managedFiles: [URL] {
         let fm = FileManager.default
@@ -754,11 +1197,12 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
     func trashManagedFile(_ url: URL) {
+        guard isEnabled, !clearInProgress, !clearRecoveryPending else { return }
         let alert = NSAlert()
         alert.messageText = SL("移到废纸篓？")
         alert.informativeText = url.path
         alert.addButton(withTitle: SL("移到废纸篓")); alert.addButton(withTitle: SL("取消"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn, isEnabled else { return }
         do { try FileManager.default.trashItem(at: url, resultingItemURL: nil); items.removeAll { $0.url == url }; persistIndex(); objectWillChange.send() }
         catch { setStatus(SL("移动失败：") + error.localizedDescription) }
     }
@@ -767,28 +1211,55 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
 extension ScreenshotLineFeature: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        menu.autoenablesItems = false
         @discardableResult func action(_ title: String, _ handler: @escaping () -> Void) -> NSMenuItem {
             let item = ScreenshotLineMenuItem(title: title, action: handler)
             menu.addItem(item)
             return item
         }
+        let master = action(SL("启用截图挂绳")) { [weak self] in
+            guard let self else { return }; self.setEnabled(!self.isEnabled)
+        }
+        master.setAccessibilityIdentifier("data-annotation-id=si.sc.menu-master")
+        master.state = isEnabled ? .on : .off
+        master.isEnabled = isEnabled || !recoveryPending
+        let state = NSMenuItem(title: moduleStatus, action: nil, keyEquivalent: "")
+        state.isEnabled = false; menu.addItem(state)
+        if recoveryPending { action(SL("重试恢复系统设置")) { [weak self] in self?.restoreTakeover() } }
+        menu.addItem(.separator())
+        let dependentStart = menu.items.count
         action(revealed ? SL("收起挂绳") : SL("展开挂绳")) { [weak self] in self?.toggleLine() }
         action(SL("查看较早项目")) { [weak self] in self?.older() }
         action(SL("查看较新项目")) { [weak self] in self?.newer() }
         menu.addItem(.separator())
-        let clipboard = action(SL("接收纯图片剪贴板")) { [weak self] in self?.clipboardEnabled.toggle() }
+        let clipboard = action(SL("接收纯图片剪贴板")) { [weak self] in if let self, self.isEnabled { self.clipboardEnabled.toggle() } }
         clipboard.state = clipboardEnabled ? .on : .off
-        let keep = action(SL("Finder 拖后保留")) { [weak self] in self?.keepAfterFinder.toggle() }
+        let keep = action(SL("Finder 拖后保留")) { [weak self] in if let self, self.isEnabled { self.keepAfterFinder.toggle() } }
         keep.state = keepAfterFinder ? .on : .off
         let sizeMenu = NSMenu()
         for (value, title) in [(0, SL("小")), (1, SL("中")), (2, SL("大"))] {
-            let choice = ScreenshotLineMenuItem(title: title) { [weak self] in self?.lineSize = value }
+            let choice = ScreenshotLineMenuItem(title: title) { [weak self] in if let self, self.isEnabled { self.lineSize = value } }
             choice.state = lineSize == value ? .on : .off
             sizeMenu.addItem(choice)
         }
         let sizeItem = NSMenuItem(title: SL("卡片大小"), action: nil, keyEquivalent: "")
         sizeItem.submenu = sizeMenu
         menu.addItem(sizeItem)
+        for item in menu.items.dropFirst(dependentStart) { item.isEnabled = isEnabled && !clearInProgress && !clearRecoveryPending }
+        menu.addItem(.separator())
+        let clear = action(SL("清空挂绳") + (items.isEmpty ? "" : " (\(items.count))")) { [weak self] in self?.requestClearAll() }
+        clear.setAccessibilityIdentifier("data-annotation-id=" + accessibilityPrefix + "clear-all")
+        clear.isEnabled = canClearAll
+        if clearRecoveryPending {
+            let retry = action(SL("重试恢复挂绳清理")) { [weak self] in self?.retryClearRecovery() }
+            retry.isEnabled = !clearInProgress
+        }
+        if !status.isEmpty {
+            let feedback = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+            feedback.isEnabled = false
+            feedback.setAccessibilityIdentifier("data-annotation-id=" + accessibilityPrefix + "clear-result")
+            menu.addItem(feedback)
+        }
         menu.addItem(.separator())
         action(SL("打开截图挂绳设置")) { [weak self] in self?.openSettings?() }
     }
@@ -1404,7 +1875,8 @@ private struct ScreenshotLineDragHandle: NSViewRepresentable {
 }
 
 struct ScreenshotLineSettingsView: View {
-    @ObservedObject private var line = ScreenshotLineFeature.shared
+    @ObservedObject private var line: ScreenshotLineFeature
+    init(line: ScreenshotLineFeature = .shared) { self.line = line }
     @State private var shortcut = "ctrl-option-t"
     var body: some View {
         ScrollView {
@@ -1412,6 +1884,25 @@ struct ScreenshotLineSettingsView: View {
                 Text(SL("截图挂绳")).font(.title2.weight(.semibold))
                 Text(SL("独立挂绳位于菜单栏下方；截图与录屏仍使用系统快捷键。"))
                     .foregroundStyle(.secondary)
+                SettingGroup {
+                    SettingToggleRow(title: SL("启用截图挂绳"), description: SL("关闭后停止接收与展示，保留图片和设置。"),
+                                     isOn: Binding(get: { line.isEnabled }, set: line.setEnabled))
+                        .toggleStyle(.switch)
+                        .disabled(!line.isEnabled && line.recoveryPending)
+                        .dataAnnotationID("si.sc.master")
+                }
+                Text(line.moduleStatus).foregroundStyle(.secondary)
+                if !line.status.isEmpty { Text(line.status).foregroundStyle(.orange).dataAnnotationID("si.sc.clear-result") }
+                if line.clearRecoveryPending {
+                    Button(SL("重试恢复挂绳清理")) { line.retryClearRecovery() }
+                        .disabled(line.clearInProgress)
+                        .dataAnnotationID("si.sc.clear-recovery")
+                }
+                if line.recoveryPending {
+                    Button(SL("重试恢复系统设置")) { line.restoreTakeover() }
+                        .dataAnnotationID("si.sc.recovery")
+                }
+                VStack(alignment: .leading, spacing: 16) {
                 Toggle(SL("监听新截图"), isOn: $line.watchEnabled)
                     .accessibilityIdentifier(line.accessibilityPrefix + "watch-toggle")
                 HStack {
@@ -1422,6 +1913,9 @@ struct ScreenshotLineSettingsView: View {
                 }
                 Toggle(SL("接收纯图片剪贴板"), isOn: $line.clipboardEnabled)
                     .accessibilityIdentifier(line.accessibilityPrefix + "clipboard-toggle")
+                Toggle(SL("清空挂绳前询问"), isOn: Binding(get: { line.askBeforeClearAll }, set: { _ = line.setAskBeforeClearAll($0) }))
+                    .disabled(line.clearInProgress)
+                    .dataAnnotationID("si.sc.clear-ask-before")
                 Toggle(SL("新内容短暂展开"), isOn: $line.peekEnabled)
                 Toggle(SL("在全屏 App 上显示"), isOn: $line.fullscreenEnabled)
                 Toggle(SL("Finder 拖后保留在挂绳"), isOn: $line.keepAfterFinder)
@@ -1455,7 +1949,6 @@ struct ScreenshotLineSettingsView: View {
                         .accessibilityIdentifier(line.accessibilityPrefix + "line")
                     Button(SL("打开托管文件夹")) { NSWorkspace.shared.open(line.managedFolder) }
                 }
-                if !line.status.isEmpty { Text(line.status).foregroundStyle(.orange) }
                 Divider()
                 Text(SL("托管文件不会自动过期；点击卡片 × 后移入可恢复的废纸篓。"))
                     .foregroundStyle(.secondary)
@@ -1468,9 +1961,10 @@ struct ScreenshotLineSettingsView: View {
                         Text(url.lastPathComponent).lineLimit(1)
                         Spacer()
                         Button(SL("打开")) { NSWorkspace.shared.open(url) }
-                        Button(SL("移到废纸篓")) { line.trashManagedFile(url) }
+                        Button(SL("移到废纸篓")) { line.trashManagedFile(url) }.disabled(line.clearInProgress || line.clearRecoveryPending)
                     }
                 }
+                }.disabled(!line.isEnabled).opacity(line.isEnabled ? 1 : 0.5)
             }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear { shortcut = line.shortcut }
