@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import plistlib
 import subprocess
+import struct
 import tempfile
 import unittest
 
@@ -15,6 +16,40 @@ SPEC.loader.exec_module(PACKAGE)
 
 
 class KeepAwakeTestPackageTests(unittest.TestCase):
+    def testSymbolStrippingKeepsMappedSectionsAndPublicLinkage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / 'Probe.app'
+            binary = app / 'Contents/MacOS/SuperIsland'
+            binary.parent.mkdir(parents=True)
+            data = bytearray(280)
+            struct.pack_into('<8I', data, 0, 0xfeedfacf, 0x100000c, 0, 2, 1, 152, 0, 0)
+            struct.pack_into('<II16sQQQQiiII', data, 32, 0x19, 152, b'__TEXT', 0x100000000, 260, 0, 260, 5, 5, 1, 0)
+            struct.pack_into('<16s16sQQIIIIIIII', data, 104, b'__text', b'__TEXT', 0x100000100, 4, 256, 0, 0, 0, 0, 0, 0, 0)
+            data[256:260] = b'CODE'; binary.write_bytes(data)
+            before = PACKAGE._local.runtime_sections(binary)
+            def command(*args):
+                if args[0] == 'strip': binary.write_bytes(binary.read_bytes()[:260])
+                output = '_public_export\n' if args[0] == 'nm' else str(binary) + ':\n\t/usr/lib/libSystem.B.dylib\n'
+                return subprocess.CompletedProcess(args, 0, output, '')
+            report = PACKAGE._local.strip_release_symbols(app, command)
+            self.assertEqual(PACKAGE._local.runtime_sections(binary), before)
+            self.assertEqual(report['SuperIsland']['before_bytes'], 280)
+            self.assertEqual(report['SuperIsland']['after_bytes'], 260)
+            def corrupting_command(*args):
+                if args[0] == 'strip':
+                    damaged = bytearray(binary.read_bytes()); damaged[256] ^= 1; binary.write_bytes(damaged)
+                return command(*args)
+            with self.assertRaisesRegex(ValueError, 'changed runtime'):
+                PACKAGE._local.strip_release_symbols(app, corrupting_command)
+
+    def testSymbolStrippingRejectsMalformedExecutableBeforeWriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / 'Probe.app'; binary = app / 'Contents/MacOS/SuperIsland'
+            binary.parent.mkdir(parents=True); binary.write_bytes(b'not-macho')
+            commands = []
+            with self.assertRaises(ValueError):
+                PACKAGE._local.strip_release_symbols(app, lambda *args: commands.append(args))
+            self.assertFalse(commands)
     def testReceiptBindsCheckoutRevisionTreeAndSuccessfulStableBuild(self):
         root = Path("/fixture/checkout")
         receipt = dict(exitCode=0, sourceUnchangedDuringBuild=True,

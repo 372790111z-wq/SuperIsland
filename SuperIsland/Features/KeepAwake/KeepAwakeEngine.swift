@@ -1,7 +1,7 @@
 import Foundation
 
 /// Pure policy: no IOKit, preferences, UI, filesystem or wall clock side effects.
-struct KeepAwakeEngine {
+struct KeepAwakeEngine: Equatable {
     enum Mode: String, Codable { case automatic, manual }
     enum ScreenPolicy: String, Codable, CaseIterable {
         case system, awake, off

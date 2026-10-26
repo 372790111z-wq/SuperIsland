@@ -85,7 +85,10 @@ import SwiftUI
     func dismiss() { panel.orderOut(nil) }
     func updateSummary(_ value: KeepAwakeRecap.Cycle?) { if let value { presentation.refresh(value) } }
     func showPersistenceError(_ error: String?) { presentation.persistenceError = error }
-    func updatePreference(_ value: Bool, editable: Bool) { presentation.autoShow = value; presentation.editable = editable }
+    func updatePreference(_ value: Bool, editable: Bool) {
+        if presentation.autoShow != value { presentation.autoShow = value }
+        if presentation.editable != editable { presentation.editable = editable }
+    }
 }
 
 private struct KeepAwakeRecapView: View {
