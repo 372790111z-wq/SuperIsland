@@ -251,6 +251,16 @@ final class KeepAwakeRecapTests: XCTestCase {
             let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
             view.cacheDisplay(in: view.bounds, to: bitmap)
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent(appearance.rawValue + ".png"))
+            // Export native logical size as well, so a Retina screenshot is
+            // not mistaken for a window twice its actual dimensions.
+            let logical = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil,
+                pixelsWide: Int(view.bounds.width), pixelsHigh: Int(view.bounds.height),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+            logical.size = view.bounds.size
+            view.cacheDisplay(in: view.bounds, to: logical)
+            try XCTUnwrap(logical.representation(using: .png, properties: [:]))
+                .write(to: output.appendingPathComponent("1x-" + appearance.rawValue + ".png"))
             evidence[appearance.rawValue] = ids.sorted()
         }
         try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys])
