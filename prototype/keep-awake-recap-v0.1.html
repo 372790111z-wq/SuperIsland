@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SuperIsland · 开盖回顾 · 交互预览 v0.1</title>
+<style>
+:root{color-scheme:dark;--page:#141516;--panel:#242527;--raised:#2e3032;--text:#f3f4f5;--muted:#b3b6bd;--line:#ffffff15;--green:#79d6ae;--green-bg:#224136;--amber:#efc589;--amber-bg:#493b27;--red:#ffa6a2;--red-bg:#4b2c2e;--blue:#9cc7ff;--focus:#b8d7ff;--control:#383b40}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:#f3f4f5;font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif}button,input,select{font:inherit}button{cursor:pointer;color:inherit}button:disabled{cursor:default;opacity:.45}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--focus);outline-offset:3px}[hidden]{display:none!important}svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.review{max-width:1450px;margin:auto;padding:28px 32px 36px}.review-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}.eyebrow{font-size:11px;letter-spacing:.13em;color:#a4adb8;font-weight:600}.review-head h1{font-size:23px;letter-spacing:-.5px;margin:4px 0}.review-head p{font-size:12px;color:#a4adb8;margin:0}.draft{border:1px solid #434950;border-radius:20px;padding:6px 12px;color:#c4cbd4;font-size:11px;white-space:nowrap}.layout{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:24px;align-items:start}
+.stage{min-height:820px;position:relative;border:1px solid #4a4e55;border-radius:16px;overflow:hidden;background:radial-gradient(ellipse at 13% 86%,#748087 0,transparent 50%),radial-gradient(ellipse at 96% 0,#394857 0,transparent 62%),linear-gradient(145deg,#46575e,#293037 55%,#817669);box-shadow:0 22px 65px #0003}.menubar{height:31px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;background:#161a2050;color:#eef1f5;font-size:11px}.menu-left,.menu-right{display:flex;align-items:center;gap:15px}.menu-left strong{font-size:12px}.notch{position:absolute;top:0;left:50%;transform:translateX(-50%);width:145px;height:27px;background:#090a0b;border-radius:0 0 15px 15px}.cup{display:flex;align-items:center;justify-content:center;width:32px;height:26px;border:0;background:none;border-radius:5px}.cup:hover,.cup[aria-expanded=true]{background:#ffffff26}.cup svg{width:17px;height:17px}.fake-window{position:absolute;left:7%;top:160px;width:55%;height:460px;border:1px solid #ffffff18;border-radius:13px;background:#11172040;filter:blur(2px);opacity:.38;pointer-events:none}.fake-title{height:35px;border-bottom:1px solid #ffffff1a;padding:14px;display:flex;gap:5px}.fake-title i{width:7px;height:7px;background:#ffffff65;border-radius:50%}.fake-lines{padding:30px}.fake-lines i{display:block;width:75%;height:7px;background:#ffffff26;border-radius:4px;margin-bottom:18px}.fake-lines i:nth-child(2n){width:50%}.canvas{position:relative;z-index:1;padding:36px 22px 42px;display:flex;align-items:flex-start;justify-content:center;min-height:780px}.recap{width:470px;max-width:100%;padding:24px 25px 18px;background:var(--panel);border:1px solid var(--line);border-radius:23px;box-shadow:0 24px 64px #0005;color:var(--text);transition:opacity .15s}.panel-head{display:flex;align-items:center;gap:12px;margin-bottom:25px}.app-icon{width:43px;height:43px;object-fit:contain;border-radius:11px}.brand{flex:1;min-width:0}.brand strong{font-size:15px;letter-spacing:-.2px;font-weight:650}.brand h2{font-size:12px;font-weight:500;color:var(--muted);margin:0}.icon-button{display:inline-flex;align-items:center;justify-content:center;width:29px;height:29px;border:0;border-radius:50%;background:var(--raised);color:var(--muted);flex:none}.icon-button:hover{color:var(--text);filter:brightness(1.15)}.icon-button svg{width:15px;height:15px}.session-date{color:var(--muted);font-size:11px;margin:0 0 13px}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:18px}.metric strong{font-size:35px;line-height:1.15;letter-spacing:-1.5px;font-weight:650;font-variant-numeric:tabular-nums;white-space:nowrap}.metric strong span{font-size:17px;letter-spacing:0;font-weight:500;margin-left:3px}.metric.accent strong{color:var(--green)}.metric label{display:block;color:var(--muted);font-size:12px;margin-top:7px}.summary{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 17px}.badge{display:inline-flex;gap:5px;align-items:center;font-size:11px;font-weight:600;line-height:1.3;padding:6px 9px;border-radius:7px;background:var(--raised);color:var(--muted)}.badge svg{width:13px;height:13px}.good{color:var(--green);background:var(--green-bg)}.warn{color:var(--amber);background:var(--amber-bg)}.bad{color:var(--red);background:var(--red-bg)}.power{border:1px solid var(--line);background:#ffffff03;border-radius:11px;padding:3px 12px;margin-bottom:19px}.power-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;font-size:11px}.power-row+.power-row{border-top:1px solid var(--line)}.power-label{color:var(--muted)}.power-value{font-weight:550;text-align:right;display:flex;align-items:center;gap:5px}.power-value svg{width:13px;height:13px}.power-value.good,.power-value.warn,.power-value.bad{background:none}.notice{font-size:11px;line-height:1.65;margin:0 0 17px;padding:10px 12px;border-radius:9px;background:var(--amber-bg);color:var(--amber)}.notice.bad{background:var(--red-bg);color:var(--red)}.tasks-heading{display:flex;justify-content:space-between;align-items:center;font-size:11px;margin-bottom:2px}.tasks-heading strong{font-weight:550}.tasks-heading span{color:var(--muted)}.tasks{max-height:226px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--control) transparent}.task{display:flex;align-items:center;gap:11px;padding:14px 0;border-bottom:1px solid var(--line)}.task:last-child{border-bottom:0}.source-icon{height:33px;width:33px;border-radius:9px;display:flex;align-items:center;justify-content:center;background:var(--raised);font-size:14px;font-weight:650;flex:none}.source-icon.q{background:#45384f;color:#d8b8f0}.task-main{min-width:0;flex:1}.task-main strong{font-size:12px;font-weight:550;display:block}.task-main small{display:block;font-size:10px;color:var(--muted);margin-top:2px}.task .badge{font-size:10px;padding:5px 7px;white-space:nowrap}.aux{margin-top:5px;color:var(--muted);font-size:10px;border-top:1px solid var(--line);padding-top:10px}.aux summary{cursor:pointer;list-style:none;display:flex;gap:5px;align-items:center}.aux summary:before{content:"›";font-size:14px;line-height:12px;transition:transform .12s}.aux[open] summary:before{transform:rotate(90deg)}.aux p{line-height:1.7;margin:8px 0 4px}.background-item{font-size:10px;margin:7px 0 3px;padding:8px 10px;background:var(--raised);border-radius:6px;display:flex;justify-content:space-between;gap:8px}.links{display:flex;flex-wrap:wrap;gap:17px;align-items:flex-start;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}.links details{font-size:10px;color:var(--muted);min-width:0}.links summary{cursor:pointer;list-style:none}.links summary:hover{color:var(--text)}.links details[open]{flex:1 0 100%}.definitions{font-size:10px;line-height:1.8;color:var(--muted);margin-top:10px}.definitions p{margin:0 0 7px}.definitions b{color:var(--text);font-weight:500}.timeline{margin:10px 0 0;padding:0;list-style:none;min-width:235px}.timeline li{display:flex;gap:14px;justify-content:space-between;padding:4px 0;font-size:10px}.timeline time{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}.timeline span{text-align:right}.panel-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:15px;padding-top:14px;border-top:1px solid var(--line)}.auto-label{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--muted);cursor:pointer}.auto-label input{appearance:none;position:relative;width:28px;height:17px;border:0;border-radius:20px;background:#5b5e64;cursor:pointer;margin:0}.auto-label input:after{content:"";width:13px;height:13px;border-radius:50%;position:absolute;left:2px;top:2px;background:#fff;transition:transform .15s}.auto-label input:checked{background:#397d63}.auto-label input:checked:after{transform:translateX(11px)}.passive-note{font-size:9px;color:var(--muted)}.empty-copy{padding:22px 5px;color:var(--muted);font-size:12px;text-align:center}.empty-copy svg{width:30px;height:30px;display:block;margin:0 auto 13px}.empty-copy strong{display:block;color:var(--text);font-size:14px;margin-bottom:5px}.menu{color:var(--text);position:absolute;right:15px;top:35px;width:205px;padding:5px;background:var(--panel);border:1px solid var(--line);border-radius:9px;box-shadow:0 8px 25px #0004;z-index:4}.menu p{margin:4px 9px 6px;color:var(--muted);font-size:10px}.menu button{width:100%;padding:8px 9px;font-size:11px;border:0;border-radius:5px;text-align:left;background:none}.menu button:hover{background:var(--raised)}.stage-placeholder{width:330px;max-width:100%;margin-top:180px;text-align:center;color:#eef1f4;text-shadow:0 1px 12px #0004}.stage-placeholder svg{width:32px;height:32px;margin-bottom:12px}.stage-placeholder h3{font-size:16px;font-weight:550;margin:0 0 6px}.stage-placeholder p{font-size:12px;color:#d8dfe6;line-height:1.8;margin:0}.closed-screen{position:absolute;inset:31px 0 0;background:#101316;display:flex;align-items:center;justify-content:center;z-index:2;color:#aab4c3}.closed-screen .stage-placeholder{margin:0}.review-tools{padding-top:3px}.tool-heading{font-size:12px;font-weight:600;margin:0 0 10px}.tool-note{font-size:11px;line-height:1.8;color:#a6afb9;margin:9px 0 18px}.scenarios{display:flex;flex-direction:column;gap:6px}.scenario{display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;padding:11px 12px;background:#202327;border:1px solid #32373d;border-radius:8px;font-size:12px;color:#bdc5cf}.scenario[aria-pressed=true]{color:#e5edf7;background:#303a47;border-color:#6f8299}.scenario small{font-size:10px;color:#909ba9}.tool-separator{height:1px;background:#31373f;margin:23px 0}.tool-label{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:#adb8c6;margin-bottom:10px;gap:10px}.tool-label select{border:1px solid #434a55;background:#23272d;color:#e0e7ee;border-radius:6px;font-size:11px;padding:5px 7px}.demo-action{padding:9px 10px;background:#303b4a;border:1px solid #566983;border-radius:7px;width:100%;font-size:11px;color:#e1edfd;margin:3px 0}.demo-action.secondary{background:#22272e;border-color:#3c4550}.demo-action:hover{filter:brightness(1.16)}.scope{font-size:11px;color:#a2adba;line-height:1.8}.scope p{margin:0 0 10px}.scope b{color:#d5dee8;font-weight:550}.key{font:10px ui-monospace,monospace;padding:1px 4px;background:#30363f;border:1px solid #4c5561;border-radius:4px}.review-status{font-size:10px;color:#a4b4c8;line-height:1.7;min-height:18px;margin-top:9px}.review-bottom{font-size:11px;color:#8e99a7;line-height:1.8;margin-top:15px}
+body.light{color-scheme:light;--panel:#f7f7f8;--raised:#e7e8eb;--text:#212327;--muted:#5d626b;--line:#00000012;--green:#186449;--green-bg:#deeee5;--amber:#79500e;--amber-bg:#f3e9d5;--red:#9e3634;--red-bg:#f8e3e1;--blue:#285d9b;--focus:#3d71a9;--control:#c2c6cc}.light .recap{box-shadow:0 24px 64px #0004}.light .power{background:#fff6}.light .source-icon.q{background:#e6dfee;color:#77548d}
+@media(max-width:1050px){.review{padding:23px 20px}.layout{grid-template-columns:minmax(0,1fr) 225px;gap:18px}.canvas{padding:30px 15px}.recap{padding:22px}.notch{width:115px}.menu-right{gap:5px}.metrics{gap:12px}.metric strong{font-size:31px}}@media(max-width:760px){.review{padding:18px 12px}.review-head{align-items:flex-start}.review-head h1{font-size:20px}.review-head p{max-width:235px}.draft{font-size:10px;padding:4px 8px}.layout{display:flex;flex-direction:column;gap:18px}.stage{width:100%;min-height:740px}.canvas{padding:24px 12px;min-height:700px}.review-tools{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:16px}.review-tools .tool-separator{display:none}.scenarios{gap:5px}.scope{grid-column:1/-1}.review-tools .controls{padding-top:0}.notch{width:92px}.menu-left{gap:8px}.menu-left strong{font-size:10px}.menu-right{font-size:9px}.metric strong{font-size:32px}.recap{padding:21px 20px}.review-bottom{margin-bottom:12px}}@media(max-width:400px){.stage{border-radius:12px}.menubar{padding:0 10px}.menu-left .desktop-word{display:none}.recap{padding:20px 17px;border-radius:19px}.metric strong{font-size:30px}.task{gap:8px}.passive-note{max-width:92px;text-align:right}.links{gap:12px}.review-tools{gap:12px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<main class="review">
+  <header class="review-head">
+    <div><div class="eyebrow">SUPERISLAND / KEEP AWAKE</div><h1>开盖后的任务回顾</h1><p>开盖回顾 · 可交互需求稿 v0.1</p></div>
+    <span class="draft">演示数据 · 待确认</span>
+  </header>
+  <div class="layout">
+    <section class="stage" aria-label="MacBook 桌面与开盖回顾演示">
+      <div class="menubar">
+        <div class="menu-left"><span aria-hidden="true">●</span><strong>SuperIsland</strong><span class="desktop-word">桌面</span></div>
+        <div class="notch" aria-hidden="true"></div>
+        <div class="menu-right"><button id="cup" class="cup" aria-label="保持唤醒菜单" aria-expanded="false"></button><span aria-hidden="true">◒</span><span>10月26日　10:19</span></div>
+      </div>
+      <div class="menu" id="cup-menu" hidden><p>保持唤醒</p><button id="view-last">最近一次合盖回顾</button><button id="menu-auto" role="menuitemcheckbox" aria-checked="true">✓ 开盖后自动显示回顾</button></div>
+      <div class="fake-window" aria-hidden="true"><div class="fake-title"><i></i><i></i><i></i></div><div class="fake-lines"><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+      <div class="canvas">
+        <section id="recap" class="recap" role="dialog" aria-modal="false" aria-labelledby="recap-title" tabindex="-1">
+          <header class="panel-head">
+            <img class="app-icon" src="assets/recap-superisland-icon.png" width="43" height="43" alt="">
+            <div class="brand"><strong>SuperIsland</strong><h2 id="recap-title">本次合盖回顾</h2></div>
+            <button id="dismiss" class="icon-button" aria-label="关闭合盖回顾"></button>
+          </header>
+          <p class="session-date" id="session-date"></p>
+          <div class="metrics">
+            <div class="metric"><strong id="closed-duration"></strong><label>合盖时长</label></div>
+            <div class="metric accent"><strong id="held-duration"></strong><label>保持运行时长</label></div>
+          </div>
+          <div class="summary" id="summary" aria-label="本次任务汇总"></div>
+          <div class="power" id="power" aria-label="保持释放与系统休眠"></div>
+          <p class="notice" id="notice" hidden></p>
+          <div id="task-section"><div class="tasks-heading"><strong>本次任务</strong><span id="task-count"></span></div><div id="tasks" class="tasks" aria-label="任务状态列表"></div></div>
+          <div class="empty-copy" id="empty-copy" hidden></div>
+          <details class="aux" id="aux"><summary id="aux-summary"></summary><div id="aux-content"></div></details>
+          <div class="links">
+            <details id="timeline-details"><summary>本次时间线</summary><ol class="timeline" id="timeline"></ol></details>
+            <details id="definition-details"><summary>统计说明</summary><div class="definitions"><p><b>合盖时长</b>：本次关盖到开盖的时间。</p><p><b>保持运行时长</b>：合盖期间，本功能实际保持生效的时段。多任务同时运行只计一次，不代表 CPU 工作时长。</p><p><b>任务数量</b>：按独立任务去重，工具调用不单独计数。明确的后台检查另列；类型不明的记录会注明。</p><p><b>已确认休眠</b>：有实际睡眠记录才这样显示。只有请求受理，显示“休眠尚未确认”。</p></div></details>
+          </div>
+          <footer class="panel-footer"><label class="auto-label"><input type="checkbox" id="auto-show" checked role="switch">开盖后自动显示</label><span class="passive-note">关闭窗口不会停止任务</span></footer>
+        </section>
+        <div class="stage-placeholder" id="placeholder" hidden><div id="placeholder-icon"></div><h3 id="placeholder-title"></h3><p id="placeholder-text"></p></div>
+      </div>
+      <div class="closed-screen" id="closed-screen" hidden><div class="stage-placeholder"><div id="closed-icon"></div><h3>合盖中 · 演示</h3><p>使用右侧“模拟开盖并解锁”查看本次回顾。</p></div></div>
+    </section>
+    <aside class="review-tools" aria-label="仅预览使用的演示控制">
+      <section><h2 class="tool-heading">切换回顾情景</h2><div class="scenarios" id="scenarios">
+        <button class="scenario" data-scenario="completed" aria-pressed="true"><span>全部已完成</span><small>释放并休眠</small></button>
+        <button class="scenario" data-scenario="running" aria-pressed="false"><span>还有任务未结束</span><small>继续保持</small></button>
+        <button class="scenario" data-scenario="failure" aria-pressed="false"><span>出现异常</span><small>恢复未确认</small></button>
+        <button class="scenario" data-scenario="accepted" aria-pressed="false"><span>仅请求已受理</span><small>休眠未确认</small></button>
+        <button class="scenario" data-scenario="incomplete" aria-pressed="false"><span>信息不完整</span><small>保留未知</small></button>
+        <button class="scenario" data-scenario="empty" aria-pressed="false"><span>没有用户任务</span><small>不自动弹出</small></button>
+      </div><p class="tool-note">此处仅切换演示数据，不读取或控制本机任务。</p></section>
+      <section class="controls"><h2 class="tool-heading">体验开盖与关闭</h2><label class="tool-label">弹窗外观<select id="appearance" aria-label="弹窗外观"><option value="dark">深色</option><option value="light">浅色</option></select></label><label class="tool-label">设备<select id="device" aria-label="演示设备"><option value="book">MacBook</option><option value="mini">Mac mini · 无机盖</option></select></label><button class="demo-action" id="lid-action">模拟合盖</button><button class="demo-action secondary" id="repeat-wake">重复开盖通知</button><button class="demo-action secondary" id="manual-reopen">从杯子菜单重新查看</button><p class="review-status" id="review-status" aria-live="polite"></p><p class="tool-note"><span class="key">Esc</span> 关闭回顾。关闭后，原任务保持策略不变。</p></section>
+      <section class="scope"><div class="tool-separator"></div><p><b>已确认内容</b><br>开盖回顾、两项时长、任务来源与状态、释放和实际休眠结果；默认不展示任务正文。</p><p><b>建议默认值 · 待确认</b><br>解锁后自动显示，每次合盖只出现一次；本次有保持、任务或异常才弹出。可关闭自动显示，从现有杯子菜单重新查看最近一次。</p><p><b>信息边界</b><br>所有数字均为演示。后台检查只有明确分类时才分列，不凭标题或正文猜测；无法确认就显示“信息不完整”。Mac mini 不触发开盖回顾。</p></section>
+    </aside>
+  </div>
+  <footer class="review-bottom">本稿只呈现新增交互，不写入本机设置，不读取真实任务，不执行保持、释放或休眠。当前原生 App 与已确认功能保持原样。</footer>
+</main>
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const icons = {
+    x:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>',
+    cup:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h12v6a6 6 0 0 1-12 0V8ZM16 9h2a3 3 0 0 1 0 6h-2M3 21h16M7 3v2M12 2v3"/></svg>',
+    check:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
+    warning:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5M12 17h.01"/></svg>',
+    clock:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    moon:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14a8.5 8.5 0 0 1-10-10A9 9 0 1 0 20 14Z"/></svg>',
+    laptop:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="13" rx="1.5"/><path d="M2 20h20M8 16l-1 4M16 16l1 4"/></svg>'
+  };
+  const task = (id, source, state, detail) => ({id,source,state,detail});
+  const scenarios = {
+    completed: {closed:1140, spans:[[0,600],[300,840]], end:'10:19', tasks:[task('01','Codex 桌面端','completed','任务 01 · 10:10 完成'),task('02','Qoder 桌面端','completed','任务 02 · 10:13:30 完成')], hold:['已自动释放 · 10:14','good','check'],sleep:['已确认休眠 · 10:14:04','good','moon'],timeline:[['10:00','合盖，继续保持任务'],['10:10','任务 01 完成'],['10:13:30','任务 02 完成，等待 30 秒'],['10:14','保持已释放'],['10:14:04','系统实际休眠'],['10:19','开盖并解锁']],background:1},
+    running: {closed:1140,spans:[[0,1140]],end:'10:19',tasks:[task('01','Codex 桌面端','completed','任务 01 · 10:10 完成'),task('02','Qoder 桌面端','waiting','任务 02 · 等待你的确认'),task('03','Codex CLI','running','任务 03 · 仍在运行')],hold:['继续保持','warn','clock'],sleep:['未休眠 · 还有未结束任务','','clock'],notice:'还有 2 项任务未结束。等待确认也会继续保持；关闭回顾不会停止任务。',timeline:[['10:00','合盖，继续保持任务'],['10:10','任务 01 完成'],['10:17','任务 02 等待确认'],['10:19','开盖，仍在保持']],background:1},
+    failure: {closed:1140,spans:[[0,840]],end:'10:19',tasks:[task('01','Codex 桌面端','completed','任务 01 · 10:10 完成'),task('02','Qoder 桌面端','failed','任务 02 · 10:13:30 失败')],hold:['释放尚未确认','bad','warning'],sleep:['休眠尚未确认','warn','warning'],notice:'辅助程序未能确认恢复系统休眠设置。请到“保持唤醒 → 保护与恢复”查看并重试。',noticeTone:'bad',timeline:[['10:00','合盖，继续保持任务'],['10:10','任务 01 完成'],['10:13:30','任务 02 失败，所有任务已终结'],['10:14','普通保持结束，系统恢复未确认'],['10:19','开盖，显示恢复异常']],background:0},
+    accepted: {closed:1140,spans:[[0,840]],end:'10:19',tasks:[task('01','Codex 桌面端','completed','任务 01 · 10:10 完成'),task('02','Qoder 桌面端','completed','任务 02 · 10:13:30 完成')],hold:['已自动释放 · 10:14','good','check'],sleep:['休眠尚未确认','warn','warning'],notice:'系统已受理休眠请求，但没有实际睡眠记录，暂不能确认本次是否休眠。',timeline:[['10:00','合盖，继续保持任务'],['10:13:30','全部任务明确完成'],['10:14','保持已释放'],['10:14:04','休眠请求已受理，实际结果未知'],['10:19','开盖']],background:1},
+    incomplete: {closed:1140,spans:null,end:'10:19',tasks:[task('01','Codex 桌面端','completed','任务 01 · 10:10 完成'),task('02','Qoder 桌面端','unknown','任务 02 · 最近状态无法确认')],hold:['继续保持 · 任务状态未知','warn','clock'],sleep:['无法确认','','warning'],notice:'部分来源信息不完整，不能把失联当作完成。保持时长缺少完整记录，暂不显示数值。',timeline:[['10:00','合盖记录完整'],['10:10','任务 01 完成'],['10:12','部分任务及保持时段记录缺失'],['10:19','开盖，保留未知状态']],unclassified:1,background:0},
+    empty: {closed:180,spans:[],end:'10:03',tasks:[],hold:['本次未启用保持','','clock'],sleep:['未收集休眠记录','','moon'],timeline:[['10:00','合盖，无用户任务'],['10:03','开盖']],background:1}
+  };
+  const labels = {completed:['已完成','good','check'],failed:['失败','bad','warning'],cancelled:['已取消','','x'],running:['运行中','warn','clock'],waiting:['等待确认','warn','clock'],unknown:['状态未知','warn','warning']};
+  let auto = true;
+  try { const saved=localStorage.getItem('superisland.recap.prototype.v1.auto'); if(saved==='false')auto=false; } catch {}
+  const state = {scenario:'completed',cycle:1,seen:new Set([1]),closed:false,visible:true,device:'book',auto,menu:false};
+  function node(tag,className,text) { const n=document.createElement(tag); if(className)n.className=className; if(text!==undefined)n.textContent=text; return n; }
+  function icon(name) { const n=node('span'); n.innerHTML=icons[name]||icons.clock; n.style.display='inline-flex'; return n; }
+  function badge(text,tone,shape) { const n=node('span','badge '+(tone||'')); if(shape)n.append(icon(shape)); n.append(document.createTextNode(text)); return n; }
+  function unionDuration(spans,limit) {
+    if(spans===null)return null;
+    const sorted=spans.map(s=>[Math.max(0,s[0]),Math.min(limit,s[1])]).filter(s=>s[1]>s[0]).sort((a,b)=>a[0]-b[0]);
+    let total=0,start=null,end=null;
+    for(const [a,b] of sorted){if(start===null){start=a;end=b;}else if(a<=end){end=Math.max(end,b);}else{total+=end-start;start=a;end=b;}}
+    return total+(start===null?0:end-start);
+  }
+  function duration(target,seconds) {
+    target.replaceChildren();
+    if(seconds===null){target.textContent='—';return;}
+    const minutes=Math.floor(seconds/60),remaining=seconds%60;
+    target.append(document.createTextNode(String(minutes)),node('span','', '分'));
+    if(remaining)target.append(document.createTextNode(String(remaining)),node('span','','秒'));
+  }
+  function setAuto(value) {
+    state.auto=value;
+    try {localStorage.setItem('superisland.recap.prototype.v1.auto',String(value));report(value?'自动显示已开启（仅演示偏好）。':'自动显示已关闭；下次可从杯子菜单查看。');}
+    catch {report('演示偏好无法保存；当前页面仍生效，重新打开后可能恢复默认。');}
+    sync();
+  }
+  function report(text) { $('review-status').textContent=text; }
+  function shouldAutoShow() { const d=scenarios[state.scenario];return state.device==='book'&&(d.tasks.length>0||(unionDuration(d.spans,d.closed)||0)>0||Boolean(d.notice)); }
+  function present(manual=false) {
+    if(state.device!=='book'||state.closed)return;
+    if(manual||(state.auto&&shouldAutoShow()&&!state.seen.has(state.cycle))) {
+      state.visible=true;state.seen.add(state.cycle);state.menu=false;
+      render();
+      if(manual)$('recap').focus({preventScroll:true});
+    } else {state.visible=false;sync();}
+  }
+  function dismiss() {state.visible=false;state.menu=false;state.seen.add(state.cycle);sync();$('manual-reopen').focus({preventScroll:true});}
+  function powerRow(label,value,tone,shape) {
+    const row=node('div','power-row');row.append(node('span','power-label',label));const right=node('span','power-value '+(tone||''));right.append(icon(shape),document.createTextNode(value));row.append(right);return row;
+  }
+  function render() {
+    const d=scenarios[state.scenario];
+    $('session-date').textContent='今天　10:00 — '+d.end;
+    duration($('closed-duration'),d.closed);duration($('held-duration'),unionDuration(d.spans,d.closed));
+    const counts={completed:0,failed:0,cancelled:0,running:0,waiting:0,unknown:0};d.tasks.forEach(t=>counts[t.state]++);
+    $('summary').replaceChildren();
+    for(const key of Object.keys(counts))if(counts[key])$('summary').append(badge(counts[key]+' 项'+({completed:'已完成',failed:'失败',cancelled:'已取消',running:'运行中',waiting:'等待确认',unknown:'状态未知'}[key]),labels[key][1],labels[key][2]));
+    $('summary').hidden=d.tasks.length===0;
+    $('power').replaceChildren(powerRow('保持状态',...d.hold),powerRow('系统休眠',...d.sleep));
+    $('notice').hidden=!d.notice;$('notice').textContent=d.notice||'';$('notice').className='notice '+(d.noticeTone||'');
+    $('task-count').textContent=d.tasks.length+' 项';$('task-section').hidden=d.tasks.length===0;$('tasks').replaceChildren();
+    for(const t of d.tasks) {
+      const row=node('div','task');row.dataset.taskId=t.id;const source=node('span','source-icon'+(t.source.startsWith('Qoder')?' q':''),t.source.startsWith('Qoder')?'Q':'C');source.setAttribute('aria-hidden','true');
+      const main=node('div','task-main');main.append(node('strong','',t.source),node('small','',t.detail));row.append(source,main,badge(...labels[t.state]));$('tasks').append(row);
+    }
+    $('empty-copy').hidden=d.tasks.length>0;$('empty-copy').replaceChildren(icon('cup'),node('strong','','本次没有用户任务'),node('span','','普通开盖不会自动弹出这张空回顾。'));
+    const extra=(d.background||0)+(d.unclassified||0);$('aux').hidden=!extra;$('aux').open=false;$('aux-content').replaceChildren();
+    if(d.unclassified){$('aux-summary').textContent='另有 '+d.unclassified+' 条类型待确认记录';$('aux-content').append(node('p','','来源没有提供可靠的任务分类，未计入用户任务汇总；该记录的结束不用于提前释放用户任务。'));}
+    else {$('aux-summary').textContent='后台检查 '+(d.background||0)+' 项 · 不计入任务数';const n=node('div','background-item');n.append(node('span','','SuperIsland 状态检查'),node('span','','已结束'));$('aux-content').append(n,node('p','','演示中的该记录有明确后台分类，不包含任务正文。'));}
+    $('timeline').replaceChildren();for(const [time,text] of d.timeline){const n=node('li');n.append(node('time','',time),node('span','',text));$('timeline').append(n);}
+    $('timeline-details').open=false;$('definition-details').open=false;
+    document.querySelectorAll('[data-scenario]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.scenario===state.scenario)));
+    sync();
+  }
+  function sync() {
+    $('recap').hidden=!state.visible||state.closed||state.device!=='book';
+    $('closed-screen').hidden=!state.closed||state.device!=='book';
+    $('placeholder').hidden=state.visible||state.closed;
+    if(state.device==='mini'){$('placeholder').hidden=false;$('placeholder-icon').innerHTML=icons.laptop;$('placeholder-title').textContent='这台 Mac 没有机盖';$('placeholder-text').textContent='保持唤醒照常管理任务，不触发开盖回顾。';}
+    else if(state.scenario==='empty'){$('placeholder-icon').innerHTML=icons.cup;$('placeholder-title').textContent='没有用户任务，不打扰';$('placeholder-text').textContent='此次不会自动弹出回顾；仍可从杯子菜单手动查看。';}
+    else {$('placeholder-icon').innerHTML=icons.moon;$('placeholder-title').textContent=state.auto?'回顾已收起':'自动回顾已关闭';$('placeholder-text').textContent='点击右上角的杯子图标，可重新查看最近一次合盖回顾。';}
+    $('auto-show').checked=state.auto;$('menu-auto').textContent=(state.auto?'✓ ':'')+'开盖后自动显示回顾';$('menu-auto').setAttribute('aria-checked',String(state.auto));
+    $('cup-menu').hidden=!state.menu;$('cup').setAttribute('aria-expanded',String(state.menu));
+    $('lid-action').textContent=state.closed?'模拟开盖并解锁':'模拟合盖';
+    $('lid-action').disabled=state.device!=='book';$('repeat-wake').disabled=state.closed||state.device!=='book';$('manual-reopen').disabled=state.closed||state.device!=='book';$('view-last').disabled=state.closed||state.device!=='book';
+  }
+  $('cup').innerHTML=icons.cup;$('dismiss').innerHTML=icons.x;$('closed-icon').innerHTML=icons.laptop;
+  document.querySelectorAll('[data-scenario]').forEach(b=>b.addEventListener('click',()=>{state.scenario=b.dataset.scenario;state.cycle++;state.seen.delete(state.cycle);state.closed=false;state.visible=false;report('已切换演示情景。');render();present();}));
+  $('dismiss').onclick=dismiss;
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(state.menu){state.menu=false;sync();$('cup').focus();}else if(state.visible)dismiss();}});
+  $('cup').onclick=()=>{state.menu=!state.menu;sync();};
+  $('view-last').onclick=()=>{report('手动查看最近一次合盖回顾，不改变任务状态。');present(true);};
+  $('manual-reopen').onclick=()=>{state.menu=true;sync();$('view-last').focus();report('杯子菜单已展开，点击“最近一次合盖回顾”。');};
+  $('menu-auto').onclick=()=>setAuto(!state.auto);
+  $('auto-show').onchange=e=>setAuto(e.target.checked);
+  $('appearance').onchange=e=>document.body.classList.toggle('light',e.target.value==='light');
+  $('device').onchange=e=>{state.device=e.target.value;state.closed=false;state.visible=false;state.menu=false;state.cycle++;render();if(state.device==='book')present();report(state.device==='mini'?'Mac mini 没有合盖事件，不触发回顾。':'已回到 MacBook 演示。');};
+  $('lid-action').onclick=()=>{if(state.closed){state.closed=false;present();report(state.auto&&shouldAutoShow()?'已模拟开盖并解锁，自动展示本次回顾。':'已模拟开盖；当前规则不自动弹出，可从杯子菜单查看。');}
+    else{state.closed=true;state.cycle++;state.visible=false;state.menu=false;sync();report('已模拟新一轮合盖；实际 Mac 状态未改变。');}};
+  $('repeat-wake').onclick=()=>{const before=state.visible;if(!state.seen.has(state.cycle))present();report(before?'本次回顾已显示，不叠加第二个窗口。':'同一次合盖已经展示过，不重复弹出；可手动重开。');};
+  // Pure demo metadata for preview QA. No bridge to the native application.
+  window.recapPreview={unionDuration,getState:()=>({scenario:state.scenario,cycle:state.cycle,visible:state.visible,closed:state.closed,auto:state.auto,device:state.device})};
+  if(!state.auto)state.visible=false;
+  render();
+})();
+</script>
+</body>
+</html>
