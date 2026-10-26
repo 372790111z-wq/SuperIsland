@@ -45,6 +45,9 @@ struct KeepAwakeEngine: Equatable {
         // idle snapshot by itself, however, must not invent work.
         var hasStarted = false
         var isUnfinished: Bool { hasStarted && !event.state.isTerminal }
+        func needsVerification(now: TimeInterval) -> Bool {
+            isUnfinished && (event.state == .idle || now >= lastSeen + KeepAwakeEngine.staleAfter)
+        }
     }
     struct Decision: Equatable {
         var hold: Bool
@@ -194,6 +197,18 @@ struct KeepAwakeEngine: Equatable {
         }
         guard let deadline = deadlines.max() else { return .inactive }
         return now < deadline ? .grace : .ready
+    }
+}
+
+/// Clock-derived UI state can change without a new task event or an overall
+/// decision change (e.g. one stale session while another remains running).
+struct KeepAwakeSourceFreshness {
+    private(set) var unverifiedSources: Set<String> = []
+    mutating func update(engine: KeepAwakeEngine, now: TimeInterval) -> Bool {
+        let current = Set(engine.sessions.values.lazy.filter { $0.needsVerification(now: now) }.map { $0.event.source })
+        guard current != unverifiedSources else { return false }
+        unverifiedSources = current
+        return true
     }
 }
 

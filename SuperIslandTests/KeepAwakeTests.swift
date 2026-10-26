@@ -152,6 +152,30 @@ final class KeepAwakeEngineTests: XCTestCase {
     func event(_ session: String = "a", sequence: UInt64 = 1, state: KeepAwakeEngine.TaskState = .running, source: String = "claude-code") -> KeepAwakeEngine.Event {
         .init(source: source, session: session, sequence: sequence, state: state)
     }
+    func testFreshnessRefreshesOneStaleSessionEvenWhenOverallDecisionIsUnchanged() {
+        var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+        engine.receive(event("a"), now: 0); engine.receive(event("b"), now: 10)
+        var freshness = KeepAwakeSourceFreshness()
+        let before = engine.evaluate(now: 44, environment: desktop)
+        XCTAssertFalse(freshness.update(engine: engine, now: 44))
+        XCTAssertEqual(engine.evaluate(now: 45, environment: desktop), before)
+        XCTAssertTrue(freshness.update(engine: engine, now: 45))
+        XCTAssertEqual(freshness.unverifiedSources, ["claude-code"])
+        XCTAssertFalse(freshness.update(engine: engine, now: 46))
+        engine.receive(event("a", sequence: 2), now: 47)
+        XCTAssertTrue(freshness.update(engine: engine, now: 47))
+        XCTAssertTrue(freshness.unverifiedSources.isEmpty)
+    }
+    func testWaitingFreshnessChangesPresentationWithoutReleasingTask() {
+        var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+        engine.receive(event(), now: 0); engine.receive(event(sequence: 2, state: .waiting), now: 1)
+        var freshness = KeepAwakeSourceFreshness()
+        let waiting = engine.evaluate(now: 45, environment: desktop)
+        XCTAssertFalse(freshness.update(engine: engine, now: 45))
+        XCTAssertTrue(freshness.update(engine: engine, now: 46))
+        XCTAssertEqual(engine.evaluate(now: 46, environment: desktop), waiting)
+        XCTAssertTrue(waiting.hold)
+    }
     func testDefaultOffDoesNotHoldWithValidTask() {
         var engine = KeepAwakeEngine(); engine.receive(event(), now: 0)
         XCTAssertFalse(engine.evaluate(now: 1, environment: desktop).hold)
