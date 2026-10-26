@@ -1,9 +1,39 @@
 import AppKit
 import CoreGraphics
 import XCTest
+import Combine
 @testable import SuperIsland
 
 final class KeepAwakeRecapTests: XCTestCase {
+    @MainActor func testUnchangedOpenLidFramesDoNotPublishUIOrQueryLockState() async throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let name = "KA2-Idle-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!; defer { defaults.removePersistentDomain(forName: name) }
+        var lockReads = 0
+        let controller = KeepAwakeRecapController(defaults: defaults, root: root,
+            isLocked: { lockReads += 1; return false })
+        controller.start(installUI: false); await controller.flush()
+        controller.observe(frame(0, closed: false, enabled: false, hold: false)); await controller.flush()
+        var notifications = 0
+        let subscription = controller.objectWillChange.sink { notifications += 1 }
+        let previousReads = lockReads
+        for tick in 1...1_000 { controller.observe(frame(Double(tick), closed: false, enabled: false, hold: false)) }
+        XCTAssertEqual(notifications, 0)
+        XCTAssertEqual(lockReads, previousReads)
+        controller.observe(frame(1_001, closed: false, enabled: true, hold: false))
+        XCTAssertGreaterThan(notifications, 0, "Real changes must still reach menus and settings")
+        subscription.cancel(); await controller.prepareForTermination()
+    }
+    @MainActor func testUnchangedPanelPreferenceDoesNotInvalidateRenderedContent() throws {
+        let panel = KeepAwakeRecapPanel(summary: try XCTUnwrap(completed().latest), autoShow: true, editable: true, toggle: { _ in true })
+        var notifications = 0
+        let subscription = panel.presentation.objectWillChange.sink { notifications += 1 }
+        for _ in 0..<1_000 { panel.updatePreference(true, editable: true) }
+        XCTAssertEqual(notifications, 0)
+        panel.updatePreference(false, editable: false)
+        XCTAssertEqual(notifications, 2)
+        subscription.cancel(); panel.dismiss()
+    }
     @MainActor func testRecapUsesUpperScreenAreaAndRespectsExternalScreenOrigin() {
         let size = NSSize(width: 300, height: 350)
         for frame in [NSRect(x: 0, y: 30, width: 1440, height: 850),

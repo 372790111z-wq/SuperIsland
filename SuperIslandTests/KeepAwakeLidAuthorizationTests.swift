@@ -1,8 +1,42 @@
 import XCTest
 import ServiceManagement
+import Combine
 @testable import SuperIsland
 
 final class KeepAwakeLidAuthorizationTests: XCTestCase {
+    @MainActor func testStableDisabledServiceTicksDoNotInvalidateSettingsOrMenus() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("KA-Idle-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let name = "KA-Idle-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!; defer { defaults.removePersistentDomain(forName: name) }
+        var statusReads = 0
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in },
+            serviceStatus: { statusReads += 1; return .notRegistered }, signingRequirement: { _ in nil })
+        let service = KeepAwakeService(defaults: defaults, root: root, codexAvailability: { false }, lidClient: client)
+        service.start(); await service.recap.flush(); service.tick(); await service.recap.flush()
+        var notifications = 0
+        let subscription = service.objectWillChange.sink { notifications += 1 }
+        let previousReads = statusReads
+        for _ in 0..<10 { service.tick() }
+        XCTAssertEqual(notifications, 0)
+        XCTAssertEqual(statusReads - previousReads, 10, "One live registration check per tick; UI reads must not multiply it")
+        subscription.cancel(); service.shutdown(); await service.recap.flush()
+    }
+    @MainActor func testRegistrationUIReadsAreCachedButRefreshObservesRevocation() {
+        var status = SMAppService.Status.enabled
+        var queries = 0
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in },
+            serviceStatus: { queries += 1; return status }, signingRequirement: { _ in nil })
+        XCTAssertEqual(queries, 1)
+        for _ in 0..<1_000 { XCTAssertTrue(client.registered); XCTAssertFalse(client.requiresApproval) }
+        XCTAssertEqual(queries, 1)
+        status = .requiresApproval; client.refreshRegistrationStatus()
+        XCTAssertTrue(client.registered); XCTAssertTrue(client.requiresApproval)
+        XCTAssertEqual(queries, 2)
+        status = .notRegistered; client.refreshRegistrationStatus()
+        XCTAssertFalse(client.registered); XCTAssertFalse(client.requiresApproval)
+    }
     @MainActor
     func testSuccessfulAuthorizationPersistsOnlyAfterSignedStatusReply() async {
         var saved = false

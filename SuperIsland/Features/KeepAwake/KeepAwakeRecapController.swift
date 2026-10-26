@@ -85,8 +85,10 @@ import CoreGraphics
     }
     func observe(_ frame: KeepAwakeRecap.Frame) {
         guard !stopped else { return }
-        notebook = frame.notebook; engineEnabled = frame.enabled; lidIsClosed = frame.closed
-        if frame.closed != false || locked() { panel?.dismiss() }
+        if notebook != frame.notebook { notebook = frame.notebook }
+        if engineEnabled != frame.enabled { engineEnabled = frame.enabled }
+        lidIsClosed = frame.closed
+        if panel != nil && (frame.closed != false || locked()) { panel?.dismiss() }
         if loading {
             if buffered.count < 32 { buffered.append(frame) }
             else { buffered.removeFirst(); buffered.append(frame); storageError = "回顾启动期间部分记录未能保留" }
@@ -125,8 +127,9 @@ import CoreGraphics
         if locked() { panel?.dismiss() } else { attemptAutomatic() }
     }
     private func attemptAutomatic() {
-        guard uiEnabled, autoShow, engineEnabled, canOpen,
-              let summary = latest, summary.autoEligible, !summary.shown, summary.hasReasonToShow else { return }
+        guard uiEnabled, autoShow, engineEnabled,
+              let summary = latest, summary.autoEligible, !summary.shown, summary.hasReasonToShow,
+              canOpen else { return }
         show(summary, manual: false)
     }
     func openLatest() {

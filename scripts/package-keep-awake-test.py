@@ -267,6 +267,7 @@ def main():
     require(app_digest(candidate) == receipt["sourceAppSHA256"], "Copied App differs from the verified source")
     info = package_metadata(info, receipt, args.build_number)
     (candidate / "Contents/Info.plist").write_bytes(plistlib.dumps(info, sort_keys=False))
+    symbol_stripping = _local.strip_release_symbols(candidate)
     with tempfile.TemporaryDirectory(prefix="superisland-test-signing-") as directory:
         permission_file = Path(directory) / "app.entitlements"
         permission_file.write_bytes(plistlib.dumps(main_permissions))
@@ -297,7 +298,8 @@ def main():
                     signed=True, test_only=True, notarized=False, installed=False,
                     scope="native-keep-awake-test", bundled_node=NODE in packaged_inventory,
                     extension_runtime_portability_verified=False,
-                    runtime_validation="not_performed", gatekeeper_bypass=False)
+                    runtime_validation="not_performed", gatekeeper_bypass=False,
+                    symbol_stripping=symbol_stripping)
     (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     (output / "SHA256SUMS.txt").write_text(sha(archive) + "  " + archive.name + "\n")
     (output / "说明.txt").write_text(

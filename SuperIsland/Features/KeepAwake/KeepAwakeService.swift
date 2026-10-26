@@ -471,7 +471,9 @@ final class KeepAwakeService: ObservableObject {
     }
     func tick() {
         acceptance.poll()
-        environment = KeepAwakePower.environment()
+        let currentEnvironment = KeepAwakePower.environment()
+        if environment != currentEnvironment { environment = currentEnvironment }
+        lid.refreshRegistrationStatus()
         let now = KeepAwakeClock.now()
         recapPhysical = KeepAwakeSystemSleep.snapshot()
         defer { recapPhysical = nil }
@@ -493,26 +495,33 @@ final class KeepAwakeService: ObservableObject {
                 }
             }
         }
-        let next = engine.evaluate(now: now, environment: environment)
+        // Evaluating an unchanged value through @Published's modifying accessor
+        // used to invalidate settings and menus on every timer tick.
+        var evaluatedEngine = engine
+        let next = evaluatedEngine.evaluate(now: now, environment: environment)
+        if evaluatedEngine != engine { engine = evaluatedEngine }
         power.apply(hold: next.hold, policy: preferences.screen, notebook: isNotebook)
-        actualHold = power.isHolding; runtimeError = power.error ?? completionSleepError
+        if actualHold != power.isHolding { actualHold = power.isHolding }
+        let currentError = power.error ?? completionSleepError
+        if runtimeError != currentError { runtimeError = currentError }
         lid.apply(hold: next.hold && actualHold && isNotebook, preferences: preferences)
-        decision = next
+        var currentDecision = next
         if next.hold && !actualHold {
-            decision.title = "保持请求未生效"
-            decision.detail = power.error ?? "系统尚未确认保持断言。"
+            currentDecision.title = "保持请求未生效"
+            currentDecision.detail = power.error ?? "系统尚未确认保持断言。"
         } else if !next.hold && actualHold {
-            decision.title = "正在重试释放"
-            decision.detail = "系统尚未确认释放，不能显示已恢复。"
+            currentDecision.title = "正在重试释放"
+            currentDecision.detail = "系统尚未确认释放，不能显示已恢复。"
         }
         if !engine.enabled && power.hasPendingAssertions {
-            decision.title = "功能已关闭 · 系统保持释放未确认"
-            decision.detail = power.error ?? "正在重试释放本功能的保持断言。"
+            currentDecision.title = "功能已关闭 · 系统保持释放未确认"
+            currentDecision.detail = power.error ?? "正在重试释放本功能的保持断言。"
         }
         if !engine.enabled && lid.hasPendingRelease {
-            decision.title = lid.releaseFailed ? "功能已关闭 · 系统设置恢复失败" : "功能已关闭 · 正在恢复系统设置"
-            decision.detail = lid.message
+            currentDecision.title = lid.releaseFailed ? "功能已关闭 · 系统设置恢复失败" : "功能已关闭 · 正在恢复系统设置"
+            currentDecision.detail = lid.message
         }
+        if decision != currentDecision { decision = currentDecision }
         updateRecap() // Capture release acknowledgement before a system sleep can suspend the app.
         finishCompletedLidTasks(now: now)
         updateRecap()
@@ -561,10 +570,19 @@ final class KeepAwakeService: ObservableObject {
     private func finishCompletedLidTasks(now: TimeInterval) {
         let phase = engine.completionSleepPhase(now: now, environment: environment)
         if phase == .inactive || phase == .unfinished { completionSleepError = nil }
+        if phase == .inactive { completionSleep.cancel(); return }
         // A failed/disabled helper must never be interpreted as a release ack.
         guard lid.enabled, !recoveryInProgress, power.error == nil else {
             completionSleep.cancel(); return
         }
+        if phase == .unfinished {
+            // Arming only needs ownership. Physical/release checks are relevant
+            // at ready, and are still re-read immediately before requesting sleep.
+            _ = completionSleep.update(phase: phase, ownsLidHold: actualHold && lid.applied,
+                                       releasesConfirmed: false, snapshot: .init())
+            return
+        }
+        if phase == .grace { return }
         // Let an in-flight source snapshot publish any new task before deciding
         // that a previously completed batch is still the last work.
         if phase == .ready && (codexTask != nil || localSourceTask != nil) { return }

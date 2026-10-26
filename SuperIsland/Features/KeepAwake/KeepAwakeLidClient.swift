@@ -12,6 +12,10 @@ final class KeepAwakeLidClient: ObservableObject {
     @Published private(set) var applied = false
     @Published private(set) var message = "合盖运行未授权；普通防休眠独立可用"
     @Published private(set) var busy = false
+    // UI projections are refreshed by the existing service tick. Operational
+    // authorization/renewal/release checks still read the live service below.
+    @Published private(set) var registered = false
+    @Published private(set) var requiresApproval = false
     private let owner = UUID().uuidString
     private var connection: NSXPCConnection?
     private var connectionID: UUID?
@@ -34,8 +38,15 @@ final class KeepAwakeLidClient: ObservableObject {
     private let openSystemSettings: () -> Void
     private let readEnabledIntent: () -> Bool
     private let saveEnabledIntent: (Bool) -> Void
-    var registered: Bool { serviceStatus() == .enabled || serviceStatus() == .requiresApproval }
-    var requiresApproval: Bool { serviceStatus() == .requiresApproval }
+    func refreshRegistrationStatus() { _ = readServiceStatus() }
+    private func readServiceStatus() -> SMAppService.Status {
+        let status = serviceStatus()
+        let isRegistered = status == .enabled || status == .requiresApproval
+        let needsApproval = status == .requiresApproval
+        if registered != isRegistered { registered = isRegistered }
+        if requiresApproval != needsApproval { requiresApproval = needsApproval }
+        return status
+    }
     var shouldPrepareForTermination: Bool { enabled || applied || busy || releaseNeeded }
     /// Ownership, independent of whether the user enabled the module or helper.
     var hasPendingRelease: Bool { releaseNeeded }
@@ -45,7 +56,7 @@ final class KeepAwakeLidClient: ObservableObject {
         retryRelease()
     }
     var releasedForCompletionSleep: Bool {
-        enabled && !blocked && !busy && !applied && !releaseNeeded && serviceStatus() == .enabled
+        enabled && !blocked && !busy && !applied && !releaseNeeded && readServiceStatus() == .enabled
     }
 
     init(readEnabledIntent: @escaping () -> Bool = { UserDefaults.standard.bool(forKey: KeepAwakeLidClient.enabledIntentKey) },
@@ -65,13 +76,14 @@ final class KeepAwakeLidClient: ObservableObject {
         self.openSystemSettings = openSystemSettings
         self.readEnabledIntent = readEnabledIntent
         self.saveEnabledIntent = saveEnabledIntent
+        refreshRegistrationStatus()
     }
 
     /// Restore only a previously confirmed choice. Starting the App must never
     /// register a daemon, prompt for approval, or treat registration as readiness.
     func restoreAuthorizedIntent() {
         guard readEnabledIntent(), !enabled, !busy, !recovering else { return }
-        guard serviceStatus() == .enabled else {
+        guard readServiceStatus() == .enabled else {
             message = "先前启用的合盖辅助程序尚未获得系统授权，请在设置中检查后重新启用。"
             return
         }
@@ -96,13 +108,13 @@ final class KeepAwakeLidClient: ObservableObject {
             // An explicit authorization click must reach register() even when
             // status cannot yet resolve a backing service record. Registration
             // supplies the authoritative packaging/signature error, if any.
-            switch serviceStatus() {
+            switch readServiceStatus() {
             case .notRegistered, .notFound: try registerService()
             case .enabled, .requiresApproval: break
             @unknown default:
                 enabled = false; message = "系统返回了未知辅助程序状态，未启用合盖运行。"; return
             }
-            let status = serviceStatus()
+            let status = readServiceStatus()
             if status == .requiresApproval {
                 enabled = false
                 message = "请在系统登录项中允许 SuperIsland 辅助程序，再点击启用。"
@@ -142,7 +154,7 @@ final class KeepAwakeLidClient: ObservableObject {
         if !applied || KeepAwakeClock.now() - lastRenewal >= 30 { perform(.renew) }
     }
     private func proxy(id: UUID) throws -> KeepAwakeHelperProtocol {
-        guard serviceStatus() == .enabled,
+        guard readServiceStatus() == .enabled,
               let requirement = signingRequirement([KeepAwakeHelperIdentity.label]) else {
             throw CocoaError(.featureUnsupported)
         }
@@ -222,7 +234,7 @@ final class KeepAwakeLidClient: ObservableObject {
         busy = false; requestID = nil; requestKind = nil
         if case .status(let generation) = kind {
             guard generation == intentGeneration, enableIntent else { return }
-            guard success, serviceStatus() == .enabled,
+            guard success, readServiceStatus() == .enabled,
                   signingRequirement([KeepAwakeHelperIdentity.label]) != nil else {
                 applied = false; blocked = true; enabled = false
                 self.message = success ? "检查期间系统授权已变化；合盖保持未开启，请重新检查授权。" : message
@@ -266,7 +278,7 @@ final class KeepAwakeLidClient: ObservableObject {
         enabled = false; desiredHold = false
         await waitForRequest()
         guard !Task.isCancelled, !busy, generation == intentGeneration, enableIntent else { return false }
-        guard serviceStatus() == .enabled,
+        guard readServiceStatus() == .enabled,
               signingRequirement([KeepAwakeHelperIdentity.label]) != nil else {
             applied = false; blocked = true
             message = "合盖辅助程序尚未授权或身份无法确认；请先检查系统授权。"
@@ -281,7 +293,7 @@ final class KeepAwakeLidClient: ObservableObject {
         await waitForRequest()
         guard !Task.isCancelled, !busy, !releaseNeeded, !blocked,
               generation == intentGeneration, enableIntent else { return false }
-        guard serviceStatus() == .enabled,
+        guard readServiceStatus() == .enabled,
               signingRequirement([KeepAwakeHelperIdentity.label]) != nil else {
             applied = false; blocked = true
             message = "恢复期间系统授权已变化；合盖保持未开启，请重新检查授权。"
