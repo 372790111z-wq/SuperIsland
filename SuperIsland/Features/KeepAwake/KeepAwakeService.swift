@@ -134,6 +134,7 @@ final class KeepAwakeService: ObservableObject {
     private let acceptance: KeepAwakeAcceptanceRecorder
     let recap: KeepAwakeRecapController
     private var recapPhysical: KeepAwakeCompletionSleep.Snapshot?
+    private var sourceFreshness = KeepAwakeSourceFreshness()
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var started = false
@@ -464,7 +465,7 @@ final class KeepAwakeService: ObservableObject {
         }
         let sessions = engine.sessions.values.filter { $0.event.source == source.id }
         let now = KeepAwakeClock.now()
-        if sessions.contains(where: { $0.isUnfinished && ($0.event.state == .idle || now >= $0.lastSeen + KeepAwakeEngine.staleAfter) }) { return "状态待核实 · 任务未结束，继续保持" }
+        if sessions.contains(where: { $0.needsVerification(now: now) }) { return "状态待核实 · 任务未结束，继续保持" }
         if sessions.contains(where: { $0.event.state == .running }) { return "已收到运行事件 · 适配待验收" }
         if sessions.contains(where: { $0.isUnfinished && $0.event.state == .waiting }) { return "等待确认 · 继续保持" }
         return "最近事件：未开始或已明确结束"
@@ -500,6 +501,7 @@ final class KeepAwakeService: ObservableObject {
         var evaluatedEngine = engine
         let next = evaluatedEngine.evaluate(now: now, environment: environment)
         if evaluatedEngine != engine { engine = evaluatedEngine }
+        if sourceFreshness.update(engine: engine, now: now) { objectWillChange.send() }
         power.apply(hold: next.hold, policy: preferences.screen, notebook: isNotebook)
         if actualHold != power.isHolding { actualHold = power.isHolding }
         let currentError = power.error ?? completionSleepError
