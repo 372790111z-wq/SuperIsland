@@ -39,7 +39,8 @@ actor KeepAwakeRecapStore {
         return ledger
     }
     @discardableResult func save(_ ledger: KeepAwakeRecap, revision: UInt64) throws -> Bool {
-        guard prepared, revision > savedRevision else { return false }
+        guard prepared else { throw CocoaError(.fileWriteNoPermission) }
+        guard revision > savedRevision else { return false }
         guard ledger.validate() else { throw CocoaError(.fileWriteUnknown) }
         let data = try JSONEncoder().encode(ledger)
         guard data.count <= Self.byteLimit else { throw CocoaError(.fileWriteOutOfSpace) }
