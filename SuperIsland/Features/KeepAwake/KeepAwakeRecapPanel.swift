@@ -44,10 +44,10 @@ import SwiftUI
         let available = NSScreen.main?.visibleFrame.height ?? 800
         let rows = min(3, max(1, summary.userTasks.count))
         let states = Set(summary.userTasks.map(\.state)).count
-        let preferred = 360 + Double(rows * 44 + max(0, states - 1) * 14)
-            + (summary.incomplete ? 42 : 0) + (summary.auxiliary.isEmpty ? 0 : 22)
-        let height = max(260, min(470, preferred, available - 70))
-        panel = Panel(contentRect: NSRect(x: 0, y: 0, width: 360, height: height),
+        let preferred = 240 + Double(rows * 34 + max(0, states - 1) * 12)
+            + (summary.incomplete ? 36 : 0) + (summary.auxiliary.isEmpty ? 0 : 18)
+        let height = max(240, min(360, preferred, available - 70))
+        panel = Panel(contentRect: NSRect(x: 0, y: 0, width: 300, height: height),
             styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false; panel.animationBehavior = .none
         panel.isFloatingPanel = true; panel.hidesOnDeactivate = false; panel.level = .floating
@@ -57,7 +57,8 @@ import SwiftUI
         panel.isMovableByWindowBackground = true
         panel.sharingType = UserDefaults.standard.bool(forKey: "general.showInScreenRecordings") ? .readOnly : .none
         for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { panel.standardWindowButton(kind)?.isHidden = true }
-        let host = NSHostingView(rootView: KeepAwakeRecapView(model: presentation).frame(width: 360, height: height))
+        let host = NSHostingView(rootView: KeepAwakeRecapView(model: presentation)
+            .ignoresSafeArea(.container, edges: .top).frame(width: 300, height: height))
         panel.contentView = host
         panel.setAccessibilityIdentifier("data-annotation-id=si.ka.recap")
         panel.setAccessibilityRole(.window)
@@ -108,24 +109,24 @@ private struct KeepAwakeRecapView: View {
     }
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 32, height: 32).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) { Text("SuperIsland").font(.headline); Text("本次合盖回顾").font(.caption).foregroundStyle(.secondary) }
+            HStack(spacing: 8) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 24, height: 24).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) { Text("SuperIsland").font(.system(size: 12, weight: .semibold)); Text("本次合盖回顾").font(.caption2).foregroundStyle(.secondary) }
                 Spacer()
-                Button { model.close?() } label: { Image(systemName: "xmark").frame(width: 26, height: 26) }
+                Button { model.close?() } label: { Image(systemName: "xmark").frame(width: 22, height: 22) }
                     .buttonStyle(.plain).background(Color.primary.opacity(0.07), in: Circle())
                     .accessibilityLabel("关闭合盖回顾").dataAnnotationID("si.ka.recap.close")
-            }.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 12)
+            }.padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(time(summary.start?.wall) + " — " + time(summary.end?.wall) + " · 截至本次开盖")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption2).foregroundStyle(.secondary)
                     HStack(alignment: .top) {
                         metric("合盖时长", KeepAwakeRecap.durationText(summary.duration), accent: false)
                         Spacer()
                         metric("保持运行时长", KeepAwakeRecap.durationText(summary.holdDuration), accent: true)
                     }.accessibilityElement(children: .contain).dataAnnotationID("si.ka.recap.metrics")
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 4) {
                         ForEach(KeepAwakeRecap.State.allCases, id: \.self) { state in
                             let count = summary.userTasks.filter { $0.state == state }.count
                             if count > 0 { Text("\(count) 项" + state.title).font(.caption.weight(.semibold)).foregroundStyle(color(state)) }
@@ -134,17 +135,17 @@ private struct KeepAwakeRecapView: View {
                             Text("部分任务类型待确认，不计入用户任务汇总").font(.caption).foregroundStyle(.orange)
                         }
                     }.accessibilityElement(children: .contain).dataAnnotationID("si.ka.recap.summary")
-                    VStack(spacing: 8) {
+                    VStack(spacing: 5) {
                         fact("保持状态", powerText + (summary.power == .released ? " · " + time(summary.releasedAt) : ""))
                         Divider(); fact("系统休眠", sleepText)
-                    }.padding(10).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+                    }.padding(7).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
                         .accessibilityElement(children: .contain).dataAnnotationID("si.ka.recap.power")
                     if summary.incomplete {
                         Text((summary.issues.sorted() + (summary.tasks.contains(where: { $0.kind == .unclassified }) ? ["来源未提供可靠的用户/后台分类；未读取正文猜测。"] : [])).joined(separator: " "))
                             .font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
                             .dataAnnotationID("si.ka.recap.notice")
                     }
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 4) {
                         HStack { Text("本次任务").font(.caption.weight(.semibold)); Spacer(); Text("\(summary.userTasks.count) 项").font(.caption).foregroundStyle(.secondary) }
                         if summary.userTasks.isEmpty { Text(summary.auxiliary.isEmpty ? "本次没有用户任务" : "尚无分类明确的用户任务，其他记录见下方。").font(.caption).foregroundStyle(.secondary) }
                         LazyVStack(spacing: 0) { ForEach(summary.userTasks) { task in taskRow(task) } }
@@ -163,35 +164,35 @@ private struct KeepAwakeRecapView: View {
                     DisclosureGroup("统计说明") {
                         Text("合盖时长是本次关盖到开盖的时间。保持运行时长只计本功能实际生效的时段，并发只计一次，也包含释放前等待，不代表 CPU 工作时间。\n\n任务按来源和身份去重；后台检查只在有明确分类时分列，其余保留待确认。仅受理休眠请求不算真正睡眠，需睡眠/唤醒和时钟证据。时间点来自本机观察记录，无法确认时不补零。").font(.caption).foregroundStyle(.secondary).padding(.top, 6)
                     }.font(.caption).dataAnnotationID("si.ka.recap.explanation")
-                }.padding(.horizontal, 16).padding(.bottom, 12)
+                }.padding(.horizontal, 12).padding(.bottom, 6)
             }
-            Divider().padding(.horizontal, 16)
-            if let error = model.preferenceError ?? model.persistenceError { Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal, 16).padding(.top, 6) }
+            Divider().padding(.horizontal, 12)
+            if let error = model.preferenceError ?? model.persistenceError { Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal, 12).padding(.top, 6) }
             HStack {
                 Toggle("开盖后自动显示", isOn: Binding(get: { model.autoShow }, set: model.change))
                     .toggleStyle(.switch).controlSize(.mini).disabled(!model.editable).dataAnnotationID("si.ka.recap.auto")
                 Spacer(); Text("关闭窗口不会停止任务").foregroundStyle(.secondary)
-            }.font(.caption).padding(.horizontal, 16).padding(.vertical, 12)
+            }.font(.caption2).padding(.horizontal, 12).padding(.vertical, 7)
         }.background(Color(nsColor: .windowBackgroundColor)).accessibilityElement(children: .contain)
     }
     private func metric(_ title: String, _ value: String, accent: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(value).font(.system(size: value.count > 7 ? 20 : 26, weight: .semibold)).monospacedDigit()
+        VStack(alignment: .leading, spacing: 3) {
+            Text(value).font(.system(size: value.count > 7 ? 18 : 22, weight: .semibold)).monospacedDigit()
                 .lineLimit(1).minimumScaleFactor(0.8).foregroundStyle(accent ? Color.green : Color.primary)
-            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(title).font(.caption2).foregroundStyle(.secondary)
         }
     }
     private func fact(_ label: String, _ value: String) -> some View {
         HStack(alignment: .top) { Text(label).foregroundStyle(.secondary); Spacer(); Text(value).multilineTextAlignment(.trailing) }.font(.caption)
     }
     private func taskRow(_ task: KeepAwakeRecap.Task) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: task.kind == .background ? "gearshape" : "terminal").frame(width: 26, height: 26).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(KeepAwakeSource.all.first { $0.id == task.source }?.name ?? "未知来源").font(.callout.weight(.medium))
-                Text("任务 \(task.ordinal) · " + time(task.changedAt)).font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            Image(systemName: task.kind == .background ? "gearshape" : "terminal").frame(width: 22, height: 22).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(KeepAwakeSource.all.first { $0.id == task.source }?.name ?? "未知来源").font(.system(size: 11, weight: .medium))
+                Text("任务 \(task.ordinal) · " + time(task.changedAt)).font(.caption2).foregroundStyle(.secondary)
             }
             Spacer(); Text(task.state.title).font(.caption.weight(.medium)).foregroundStyle(color(task.state))
-        }.padding(.vertical, 6)
+        }.padding(.vertical, 4)
     }
 }
