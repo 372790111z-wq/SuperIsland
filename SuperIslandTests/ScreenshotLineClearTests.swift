@@ -344,7 +344,7 @@ final class ScreenshotLineClearTests: XCTestCase {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(80))
             heartbeatRan = true
-            alert.buttons[1].performClick(nil)
+            line.clearConfirmation?.clearButton.performClick(nil)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             line.clearConfirmation?.cancel()
@@ -380,7 +380,7 @@ final class ScreenshotLineClearTests: XCTestCase {
             XCTAssertEqual(confirmation.panel.accessibilitySubrole(), alert.window.accessibilitySubrole())
             XCTAssertTrue(confirmation.panel.isVisible)
             let content = confirmation.panel.contentView!
-            for control in [alert.buttons[0], alert.buttons[1], alert.suppressionButton!] {
+            for control in [confirmation.cancelButton, confirmation.clearButton, confirmation.suppressionButton] {
                 XCTAssertTrue(content.bounds.contains(control.convert(control.bounds, to: content)), "Native control \(control.title) frame \(control.convert(control.bounds, to: content)) must fit content \(content.bounds)")
             }
             XCTAssertFalse(settings.isVisible)
@@ -389,10 +389,10 @@ final class ScreenshotLineClearTests: XCTestCase {
             // bookkeeping. Check the real system foreground app, not that flag.
             XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, frontmostBefore)
             XCTAssertEqual(confirmation.panel.animationBehavior, .none)
-            alert.suppressionButton?.state = .on
+            confirmation.suppressionButton.state = .on
             actionRan = true
             let began = ContinuousClock.now
-            NSApp.sendAction(alert.buttons[0].action!, to: alert.buttons[0].target, from: alert.buttons[0])
+            NSApp.sendAction(confirmation.cancelButton.action!, to: confirmation.cancelButton.target, from: confirmation.cancelButton)
             let elapsed = began.duration(to: .now).components
             let milliseconds = Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15
             let output = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/SC2DialogFixValidation")
@@ -403,7 +403,7 @@ final class ScreenshotLineClearTests: XCTestCase {
             try? JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("native-presentation.json"))
             XCTAssertFalse(confirmation.panel.isVisible, "Cancel must hide synchronously in its action, without another task/runloop pass")
             // A second late button event cannot change the cancellation result.
-            NSApp.sendAction(alert.buttons[1].action!, to: alert.buttons[1].target, from: alert.buttons[1])
+            NSApp.sendAction(confirmation.clearButton.action!, to: confirmation.clearButton.target, from: confirmation.clearButton)
         }
         let response = await line.presentClearAlert(alert)
         XCTAssertTrue(actionRan); XCTAssertEqual(response, .alertFirstButtonReturn)
@@ -445,8 +445,8 @@ final class ScreenshotLineClearTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         let confirmation = try XCTUnwrap(line.clearConfirmation)
-        confirmation.alert.suppressionButton?.state = .on
-        let clear = confirmation.alert.buttons[1]
+        confirmation.suppressionButton.state = .on
+        let clear = confirmation.clearButton
         NSApp.sendAction(clear.action!, to: clear.target, from: clear)
         XCTAssertFalse(confirmation.panel.isVisible)
         await wait(line)
@@ -494,6 +494,57 @@ final class ScreenshotLineClearTests: XCTestCase {
         XCTAssertEqual(Set(line.items.map(\.id)), [a.id, b.id]); XCTAssertTrue(f.exists(a)); XCTAssertTrue(f.exists(b))
         XCTAssertFalse(line.clearRecoveryPending); XCTAssertTrue(f.io.names.isEmpty)
     }
+    @MainActor func testOwnedPanelHasOpaqueReadableSurfaceInBothAppearancesWhileInactive() async throws {
+        let f = try Fixture(); defer { f.dispose() }
+        let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+        let confirmation = ScreenshotLineClearConfirmation(alert: line.makeClearAlert(count: 12345))
+        let surface = try XCTUnwrap(confirmation.panel.contentView)
+        let output = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/SC2OpaqueDialogValidation/NativeViews")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        XCTAssertTrue(confirmation.panel.isOpaque); XCTAssertTrue(surface.isOpaque)
+        XCTAssertNotNil(surface as? ScreenshotLineClearConfirmation.Surface)
+        XCTAssertFalse(confirmation.cancelButton === confirmation.alert.buttons[0])
+        XCTAssertTrue(confirmation.panel.defaultButtonCell === confirmation.cancelButton.cell)
+        XCTAssertEqual(confirmation.cancelButton.keyEquivalent, "\r")
+        XCTAssertEqual(confirmation.clearButton.keyEquivalent, "")
+        confirmation.panel.orderFrontRegardless(); confirmation.panel.makeKey()
+        defer { confirmation.cancel() }
+        NSApp.deactivate()
+        for (name, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
+            confirmation.panel.appearance = NSAppearance(named: appearance)
+            surface.needsDisplay = true
+            surface.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(250))
+            let bitmap = try XCTUnwrap(surface.bitmapImageRepForCachingDisplay(in: surface.bounds))
+            surface.cacheDisplay(in: surface.bounds, to: bitmap)
+            let background = try XCTUnwrap(bitmap.colorAt(x: 4, y: 4)?.usingColorSpace(.sRGB))
+            XCTAssertGreaterThan(background.alphaComponent, 0.99, "Visible content must not let the desktop show through")
+            if name == "dark" { XCTAssertLessThan(background.redComponent, 0.35) }
+            else { XCTAssertGreaterThan(background.redComponent, 0.8) }
+            // Check the resolved semantic text against the actual painted surface,
+            // including the secondary explanatory copy (WCAG contrast >= 4.5).
+            func luminance(_ c: NSColor) -> Double {
+                let c = c.usingColorSpace(.sRGB)!
+                func linear(_ n: CGFloat) -> Double { let v = Double(n); return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+                return 0.2126 * linear(c.redComponent) + 0.7152 * linear(c.greenComponent) + 0.0722 * linear(c.blueComponent)
+            }
+            for label in [confirmation.titleLabel, confirmation.messageLabel] {
+                var text: NSColor!
+                surface.effectiveAppearance.performAsCurrentDrawingAppearance { text = label.textColor?.usingColorSpace(.sRGB) }
+                let resolved = try XCTUnwrap(text)
+                let a = resolved.alphaComponent
+                let composite = NSColor(srgbRed: resolved.redComponent * a + background.redComponent * (1-a), green: resolved.greenComponent * a + background.greenComponent * (1-a), blue: resolved.blueComponent * a + background.blueComponent * (1-a), alpha: 1)
+                let l1 = luminance(composite), l2 = luminance(background)
+                XCTAssertGreaterThanOrEqual((max(l1, l2) + 0.05) / (min(l1, l2) + 0.05), 4.5, "\(name) \(label.stringValue)")
+                XCTAssertTrue(surface.bounds.contains(label.convert(label.bounds, to: surface)))
+            }
+            for button in [confirmation.cancelButton, confirmation.clearButton, confirmation.suppressionButton] {
+                XCTAssertTrue(surface.bounds.contains(button.convert(button.bounds, to: surface)))
+                XCTAssertTrue(button.isEnabled)
+            }
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent("clear-\(name)-inactive.png"))
+        }
+    }
     @MainActor func testNativeMenuAlertAndSettingsRenderAtTwoWidths() async throws {
         let f = try Fixture(); defer { f.dispose() }; _ = try f.file("sample.png"); try f.index()
         let line = f.line(); line.start(appName: "SuperIsland", installUI: false); defer { line.stop() }
@@ -513,7 +564,8 @@ final class ScreenshotLineClearTests: XCTestCase {
             view.cacheDisplay(in: view.bounds, to: bitmap)
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent(name + ".png"))
         }
-        alert.layout(); try capture(try XCTUnwrap(alert.window.contentView), name: "clear-alert")
+        let confirmation = ScreenshotLineClearConfirmation(alert: alert)
+        try capture(try XCTUnwrap(confirmation.panel.contentView), name: "clear-panel")
         XCTAssertEqual(alert.window.accessibilityIdentifier(), "data-annotation-id=si.sc.clear-confirm")
         XCTAssertEqual(alert.suppressionButton?.accessibilityIdentifier(), "data-annotation-id=si.sc.clear-confirm-suppress")
         func identifiers(_ root: NSObject) -> Set<String> {
