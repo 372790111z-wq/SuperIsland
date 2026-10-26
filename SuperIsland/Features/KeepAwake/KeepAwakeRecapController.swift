@@ -97,7 +97,7 @@ import CoreGraphics
         ledger.observe(frame)
         if storageError != nil { ledger.markStorageFailure() }
         if !autoShow || !frame.enabled { ledger.suppressAutomatic() }
-        if latest != ledger.latest { latest = ledger.latest }
+        if latest != ledger.latest { latest = ledger.latest; panel?.updateSummary(latest) }
         if ledger != previousLedger && (oldCurrent != ledger.current?.id || oldLatest != ledger.latest?.id || frame.stamp.continuous >= nextCheckpoint) {
             nextCheckpoint = frame.stamp.continuous + 15; persist()
         }
@@ -108,7 +108,7 @@ import CoreGraphics
         guard !loading, !stopped else { return }; ledger.willSleep(supplied ?? Self.stamp()); persist()
     }
     func didWake(_ supplied: KeepAwakeRecap.Stamp? = nil) {
-        guard !loading, !stopped else { return }; ledger.didWake(supplied ?? Self.stamp()); latest = ledger.latest; persist()
+        guard !loading, !stopped else { return }; ledger.didWake(supplied ?? Self.stamp()); latest = ledger.latest; panel?.updateSummary(latest); persist()
     }
     func sleepAccepted(_ supplied: KeepAwakeRecap.Stamp? = nil) {
         guard !loading, !stopped else { return }; ledger.sleepRequestAccepted(supplied ?? Self.stamp()); persist()
