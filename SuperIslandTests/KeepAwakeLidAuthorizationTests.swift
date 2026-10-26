@@ -20,7 +20,8 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         let previousReads = statusReads
         for _ in 0..<10 { service.tick() }
         XCTAssertEqual(notifications, 0)
-        XCTAssertEqual(statusReads - previousReads, 10, "One live registration check per tick; UI reads must not multiply it")
+        XCTAssertEqual(statusReads - previousReads, service.isNotebook ? 10 : 0,
+                       "At most one registration check per notebook tick; desktop Macs need no lid polling")
         subscription.cancel(); service.shutdown(); await service.recap.flush()
     }
     @MainActor func testRegistrationUIReadsAreCachedButRefreshObservesRevocation() {
