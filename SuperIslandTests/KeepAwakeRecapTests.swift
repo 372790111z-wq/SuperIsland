@@ -4,6 +4,20 @@ import XCTest
 @testable import SuperIsland
 
 final class KeepAwakeRecapTests: XCTestCase {
+    @MainActor func testRecapUsesUpperScreenAreaAndRespectsExternalScreenOrigin() {
+        let size = NSSize(width: 300, height: 350)
+        for frame in [NSRect(x: 0, y: 30, width: 1440, height: 850),
+                      NSRect(x: -1920, y: -200, width: 1920, height: 1080)] {
+            let point = KeepAwakeRecapPanel.frameOrigin(size: size, visibleFrame: frame)
+            XCTAssertEqual(point.x + size.width / 2, frame.midX)
+            XCTAssertEqual(point.y + size.height, frame.maxY - 64)
+            XCTAssertTrue(frame.contains(NSRect(origin: point, size: size)))
+        }
+        let small = NSRect(x: 100, y: 40, width: 320, height: 370)
+        let point = KeepAwakeRecapPanel.frameOrigin(size: size, visibleFrame: small)
+        XCTAssertTrue(small.contains(NSRect(origin: point, size: size)))
+        XCTAssertEqual(point.y, small.minY)
+    }
     func testConsoleSessionUsesPublicKeyAndFailsClosed() {
         XCTAssertFalse(KeepAwakeRecapController.sessionLocked([kCGSessionOnConsoleKey as String: true]))
         XCTAssertTrue(KeepAwakeRecapController.sessionLocked([kCGSessionOnConsoleKey as String: true, "CGSSessionScreenIsLocked": true]))
@@ -229,7 +243,6 @@ final class KeepAwakeRecapTests: XCTestCase {
             // tree. Production automatic presentation remains nonactivating.
             NSApp.activate(ignoringOtherApps: true)
             defer { p.dismiss() }
-            try await Task.sleep(for: .milliseconds(100))
             let view = try XCTUnwrap(p.panel.contentView)
             view.layoutSubtreeIfNeeded()
             var seen = Set<ObjectIdentifier>(), ids = Set<String>()
@@ -243,8 +256,18 @@ final class KeepAwakeRecapTests: XCTestCase {
             }
             // NSPanel can omit its host from in-process window children while
             // inactive. Inspect the rendered content as well as the window.
-            visit(p.panel); visit(view)
-            for suffix in ["metrics", "summary", "power", "tasks", "timeline", "explanation", "close", "auto"] {
+            let suffixes = ["metrics", "summary", "power", "tasks", "timeline", "explanation", "close", "auto"]
+            let required = Set(suffixes.map { "data-annotation-id=si.ka.recap." + $0 })
+            // SwiftUI may render before AppKit publishes its AX children.
+            // Await that observable readiness, retaining the same assertions
+            // and a bounded timeout instead of assuming a fixed 100ms delay.
+            for attempt in 0..<40 {
+                seen.removeAll(); ids.removeAll()
+                view.layoutSubtreeIfNeeded(); visit(p.panel); visit(view)
+                if required.isSubset(of: ids) { break }
+                if attempt < 39 { try await Task.sleep(for: .milliseconds(50)) }
+            }
+            for suffix in suffixes {
                 XCTAssertTrue(ids.contains("data-annotation-id=si.ka.recap." + suffix), "Missing native group: \(suffix)")
             }
             XCTAssertTrue(p.panel.isOpaque)
