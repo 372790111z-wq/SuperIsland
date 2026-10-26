@@ -48,7 +48,7 @@ struct IslandContainerView: View {
     @State private var isShelfDropTargeted = false
     @State private var windowEnhancementFeedback: WindowEnhancementFeedbackEvent?
     @State private var windowEnhancementFeedbackDismissWorkItem: DispatchWorkItem?
-    private let hoverValidationTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+    private static let hoverValidationTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     let contentMode: IslandContentMode
 
     init(contentMode: IslandContentMode = .production) {
@@ -79,8 +79,9 @@ struct IslandContainerView: View {
             setCycleButtonHover(false, forward: false)
             setCycleButtonHover(false, forward: true)
         }
-        .onReceive(hoverValidationTimer) { _ in
+        .onReceive(Self.hoverValidationTimer) { _ in
             guard contentMode == .production else { return }
+            guard appState.isHovering || appState.currentState != .compact else { return }
             validateHoverState()
         }
         .onReceive(windowEnhancementPreferences.$feedbackEvent.compactMap { $0 }) { event in
