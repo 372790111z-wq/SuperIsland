@@ -96,10 +96,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isWE1DebugBundle && ProcessInfo.processInfo.environment["SCREENSHOT_LINE_QA_MODE"] == "1"
     }
 
-    static var isFullScreenProbe: Bool {
-        Bundle.main.object(forInfoDictionaryKey: "WE1FullscreenProbe") as? Bool == true
-    }
-
     static var isRunningUnitTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
             NSClassFromString("XCTestCase") != nil
