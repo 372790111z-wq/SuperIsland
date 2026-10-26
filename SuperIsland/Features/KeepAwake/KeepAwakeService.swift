@@ -473,7 +473,7 @@ final class KeepAwakeService: ObservableObject {
         acceptance.poll()
         let currentEnvironment = KeepAwakePower.environment()
         if environment != currentEnvironment { environment = currentEnvironment }
-        lid.refreshRegistrationStatus()
+        if isNotebook { lid.refreshRegistrationStatus() }
         let now = KeepAwakeClock.now()
         recapPhysical = KeepAwakeSystemSleep.snapshot()
         defer { recapPhysical = nil }
@@ -546,7 +546,11 @@ final class KeepAwakeService: ObservableObject {
     private func updateRecap(sessions: [KeepAwakeEngine.Session]? = nil, complete: Bool = true) {
         let physical = recapPhysical ?? KeepAwakeSystemSleep.snapshot()
         let now = KeepAwakeClock.now()
-        let values = (sessions ?? Array(engine.sessions.values)).sorted { $0.event.storageKey < $1.event.storageKey }
+        // Open/unknown lid frames return before task admission in the recap
+        // model. Keep consuming source events in the engine, but avoid sorting
+        // and hashing its retained history three times per open-lid tick.
+        let values: [KeepAwakeEngine.Session] = physical.lidClosed == true
+            ? (sessions ?? Array(engine.sessions.values)).sorted { $0.event.storageKey < $1.event.storageKey } : []
         let inputs = values.map { session -> KeepAwakeRecap.TaskInput in
             let event = session.event
             let state: KeepAwakeRecap.State
