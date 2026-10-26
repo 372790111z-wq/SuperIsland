@@ -120,7 +120,7 @@ private struct KeepAwakeRecapView: View {
                         metric("合盖时长", KeepAwakeRecap.durationText(summary.duration), accent: false)
                         Spacer()
                         metric("保持运行时长", KeepAwakeRecap.durationText(summary.holdDuration), accent: true)
-                    }.dataAnnotationID("si.ka.recap.metrics")
+                    }.accessibilityElement(children: .contain).dataAnnotationID("si.ka.recap.metrics")
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(KeepAwakeRecap.State.allCases, id: \.self) { state in
                             let count = summary.userTasks.filter { $0.state == state }.count
@@ -129,11 +129,12 @@ private struct KeepAwakeRecapView: View {
                         if summary.tasks.contains(where: { $0.kind == .unclassified }) {
                             Text("部分任务类型待确认，不计入用户任务汇总").font(.caption).foregroundStyle(.orange)
                         }
-                    }.dataAnnotationID("si.ka.recap.summary")
+                    }.accessibilityElement(children: .contain).dataAnnotationID("si.ka.recap.summary")
                     VStack(spacing: 10) {
                         fact("保持状态", powerText + (summary.power == .released ? " · " + time(summary.releasedAt) : ""))
                         Divider(); fact("系统休眠", sleepText)
-                    }.padding(12).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10)).dataAnnotationID("si.ka.recap.power")
+                    }.padding(12).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+                        .accessibilityElement(children: .contain).dataAnnotationID("si.ka.recap.power")
                     if summary.incomplete {
                         Text((summary.issues.sorted() + (summary.tasks.contains(where: { $0.kind == .unclassified }) ? ["来源未提供可靠的用户/后台分类；未读取正文猜测。"] : [])).joined(separator: " "))
                             .font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)

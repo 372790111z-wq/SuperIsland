@@ -215,4 +215,50 @@ final class KeepAwakeRecapTests: XCTestCase {
         XCTAssertEqual(p.presentation.summary.id, snapshot.id)
         p.dismiss()
     }
+    @MainActor func testNativeRecapCardsExposeIDsAndRenderOpaqueInBothAppearances() async throws {
+        let summary = try XCTUnwrap(completed().latest)
+        let output = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("build/KA2NativeValidation/NativeViews")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        var evidence: [String: [String]] = [:]
+        for appearance in [NSAppearance.Name.darkAqua, .aqua] {
+            let p = KeepAwakeRecapPanel(summary: summary, autoShow: true, editable: true, toggle: { _ in true })
+            p.panel.appearance = NSAppearance(named: appearance)
+            _ = p.present(manual: true)
+            // Activate only the XCTest fixture to let AppKit publish its AX
+            // tree. Production automatic presentation remains nonactivating.
+            NSApp.activate(ignoringOtherApps: true)
+            defer { p.dismiss() }
+            try await Task.sleep(for: .milliseconds(100))
+            let view = try XCTUnwrap(p.panel.contentView)
+            view.layoutSubtreeIfNeeded()
+            var seen = Set<ObjectIdentifier>(), ids = Set<String>()
+            func visit(_ object: NSObject) {
+                guard seen.insert(ObjectIdentifier(object)).inserted else { return }
+                let id = NSSelectorFromString("accessibilityIdentifier")
+                if object.responds(to: id), let value = object.perform(id)?.takeUnretainedValue() as? String { ids.insert(value) }
+                let children = NSSelectorFromString("accessibilityChildren")
+                if object.responds(to: children), let values = object.perform(children)?.takeUnretainedValue() as? [NSObject] { values.forEach(visit) }
+                if let view = object as? NSView { view.subviews.forEach(visit) }
+            }
+            // NSPanel can omit its host from in-process window children while
+            // inactive. Inspect the rendered content as well as the window.
+            visit(p.panel); visit(view)
+            for suffix in ["metrics", "summary", "power", "tasks", "timeline", "explanation", "close", "auto"] {
+                XCTAssertTrue(ids.contains("data-annotation-id=si.ka.recap." + suffix), "Missing native group: \(suffix)")
+            }
+            XCTAssertTrue(p.panel.isOpaque)
+            let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent(appearance.rawValue + ".png"))
+            evidence[appearance.rawValue] = ids.sorted()
+        }
+        try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("recap-accessibility.json"))
+        // Return this XCTest host to the background after the explicit AX
+        // inspection. Otherwise later nonactivation tests inherit our focus.
+        NSApp.hide(nil)
+        try await Task.sleep(for: .milliseconds(150))
+        NSApp.unhideWithoutActivation()
+    }
 }
