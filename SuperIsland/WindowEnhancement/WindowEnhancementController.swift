@@ -1102,7 +1102,7 @@ final class WindowEnhancementController {
     }
 
     private enum WindowMutationKind: String {
-        case fullScreenLayout, windowedLayout, fullScreenCenter, fullScreenDisplayMove
+        case fullScreenLayout, windowedLayout, fullScreenCenter, fullScreenDisplayMove, ownSettings
     }
 
     private func isWindowMutationCurrent(_ generation: UInt64) -> Bool {
@@ -3136,7 +3136,7 @@ final class WindowEnhancementController {
             feedback("请先选择设置窗口")
             return true
         }
-        beginWindowMutation { [weak self, weak window] generation in
+        beginWindowMutation(kind: .ownSettings) { [weak self, weak window] generation in
             guard let self, let window else { return .safeWindowed }
             return await self.performOwnSettingsAction(action, window: window, generation: generation)
         }
