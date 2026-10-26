@@ -16,6 +16,88 @@ import CoreGraphics
 @MainActor private func SL(_ text: String) -> String { ScreenshotLineText.translate(text) }
 
 
+/// Keep the native NSAlert layout, but present it in a panel constructed as
+/// nonactivating from the outset. App-wide activation can bring an existing
+/// settings window forward along with a menu-bar confirmation.
+@MainActor final class ScreenshotLineClearConfirmation: NSObject, NSWindowDelegate {
+    final class Panel: NSPanel {
+        var cancelHandler: (() -> Void)?
+        override var canBecomeKey: Bool { true }
+        override var canBecomeMain: Bool { false }
+        override func cancelOperation(_ sender: Any?) { cancelHandler?() }
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            if event.keyCode == 53 { cancelHandler?(); return true }
+            return super.performKeyEquivalent(with: event)
+        }
+    }
+    let alert: NSAlert
+    let panel: Panel
+    private var continuation: CheckedContinuation<NSApplication.ModalResponse, Never>?
+    private var result: NSApplication.ModalResponse?
+
+    init(alert: NSAlert) {
+        self.alert = alert
+        alert.layout()
+        let source = alert.window
+        let contentSize = source.contentView?.bounds.size ?? source.contentLayoutRect.size
+        // Construct with public flags rather than inheriting NSAlert's
+        // private style bits or changing nonactivation after initialization.
+        let style: NSWindow.StyleMask = [.titled, .fullSizeContentView, .nonactivatingPanel]
+        panel = Panel(contentRect: source.contentRect(forFrameRect: source.frame),
+                      styleMask: style, backing: .buffered, defer: false)
+        super.init()
+        panel.isReleasedWhenClosed = false
+        panel.animationBehavior = .none
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.hidesOnDeactivate = false
+        panel.level = .modalPanel
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.titleVisibility = source.titleVisibility
+        panel.titlebarAppearsTransparent = source.titlebarAppearsTransparent
+        panel.backgroundColor = source.backgroundColor
+        panel.isOpaque = source.isOpaque
+        panel.hasShadow = source.hasShadow
+        let contents = source.contentView
+        source.contentView = nil
+        panel.contentView = contents
+        panel.setContentSize(contentSize)
+        panel.center()
+        panel.setAccessibilityIdentifier(source.accessibilityIdentifier())
+        panel.setAccessibilitySubrole(source.accessibilitySubrole())
+        panel.delegate = self
+        panel.cancelHandler = { [weak self] in self?.cancel() }
+        alert.buttons[0].target = self
+        alert.buttons[0].action = #selector(cancelClicked(_:))
+        alert.buttons[1].target = self
+        alert.buttons[1].action = #selector(clearClicked(_:))
+        panel.defaultButtonCell = alert.buttons[0].cell as? NSButtonCell
+        panel.initialFirstResponder = alert.buttons[0]
+    }
+    func present() async -> NSApplication.ModalResponse {
+        if let result { return result }
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            panel.orderFrontRegardless()
+            panel.makeKey()
+        }
+    }
+    func cancel() { finish(.alertFirstButtonReturn) }
+    @objc private func cancelClicked(_ sender: Any?) { cancel() }
+    @objc private func clearClicked(_ sender: Any?) { finish(.alertSecondButtonReturn) }
+    private func finish(_ response: NSApplication.ModalResponse) {
+        guard result == nil else { return }
+        result = response
+        // Hide in the button action itself, before resuming any async cleanup.
+        // No modal-loop polling, animation delay or status message on cancel.
+        panel.orderOut(nil)
+        let pending = continuation
+        continuation = nil
+        pending?.resume(returning: response)
+    }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { cancel(); return false }
+}
+
 enum ScreenshotLinePrefs {
     static var domain: CFString {
         (ProcessInfo.processInfo.environment["SCREENSHOT_LINE_CAPTURE_DOMAIN"] ?? "com.apple.screencapture") as CFString
@@ -120,9 +202,10 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     @Published private(set) var askBeforeClearAll: Bool
     private(set) var clearTask: Task<Void, Never>?
     private var clearStore: ScreenshotLineClearTransaction?
-    private var clearAlert: NSAlert?
+    private(set) var clearConfirmation: ScreenshotLineClearConfirmation?
     private var clearCancelled = false
     private var clearIndexDirty = false
+    private var clearCommitsInProgress = false
     private var editingItemIDs = Set<UUID>()
     private let clearTrash: @Sendable (URL) throws -> Void
     private let clearSave: @Sendable (Data, URL) throws -> Void
@@ -333,7 +416,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     private func setStatus(_ message: String) { status = message }
 
     @discardableResult private func persistIndex() -> Bool {
-        if clearInProgress { clearIndexDirty = true; return true }
+        if clearCommitsInProgress { clearIndexDirty = true; return true }
         do {
             let data = try JSONEncoder().encode(items)
             let url = support.appendingPathComponent("index.json")
@@ -442,29 +525,14 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         return alert
     }
 
-    /// Pump a native modal session asynchronously. A synchronous runModal()
-    /// inside a main-actor task can starve other main-actor tasks (including
-    /// KeepAwake renewal); yielding between event passes preserves their work.
+    /// An independent nonactivating panel leaves other windows alone and
+    /// suspends only this operation, allowing KeepAwake work to keep running.
     func presentClearAlert(_ alert: NSAlert) async -> NSApplication.ModalResponse {
-        alert.layout()
-        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard event.keyCode == 53, event.window === alert.window || NSApp.modalWindow === alert.window else { return event }
-            NSApp.stopModal(withCode: .alertFirstButtonReturn)
-            return nil
-        }
-        let session = NSApp.beginModalSession(for: alert.window)
-        defer {
-            NSApp.endModalSession(session)
-            alert.window.orderOut(nil)
-            if let monitor { NSEvent.removeMonitor(monitor) }
-        }
-        alert.window.makeKeyAndOrderFront(nil)
-        while !clearCancelled {
-            let response = NSApp.runModalSession(session)
-            if response != .continue { return response }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
-        return .alertFirstButtonReturn
+        guard clearConfirmation == nil, !clearCancelled else { return .alertFirstButtonReturn }
+        let confirmation = ScreenshotLineClearConfirmation(alert: alert)
+        clearConfirmation = confirmation
+        defer { clearConfirmation = nil }
+        return await confirmation.present()
     }
 
     /// Optional confirmation injection is restricted to this same facade in tests;
@@ -478,6 +546,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         clearTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
+                self.clearCommitsInProgress = false
                 self.clearInProgress = false; self.clearTask = nil
                 if self.clearIndexDirty { self.clearIndexDirty = false; _ = self.persistIndex() }
                 self.refreshMenuState()
@@ -488,18 +557,17 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
             var preferenceFailed = false
             if self.askBeforeClearAll {
                 let alert = self.makeClearAlert(count: plan.count)
-                self.clearAlert = alert
                 let response: NSApplication.ModalResponse
                 if let confirm { response = confirm(alert) }
-                else { NSApp.activate(ignoringOtherApps: true); response = await self.presentClearAlert(alert) }
-                self.clearAlert = nil
+                else { response = await self.presentClearAlert(alert) }
                 guard response == .alertSecondButtonReturn, self.isEnabled, !self.clearCancelled else {
-                    self.setStatus(SL("已取消，未执行清空，也未更改询问偏好。")); return
+                    return
                 }
                 if alert.suppressionButton?.state == .on {
                     preferenceFailed = !self.saveAskBeforeClearAll(false)
                 }
             }
+            self.clearCommitsInProgress = true
             self.setStatus(SL("正在清空挂绳…"))
             var removed = 0, moved = 0, missing = 0, failed = 0
             var warnings = Set<String>()
@@ -546,7 +614,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
 
     private func cancelClear() {
         clearCancelled = true
-        if let alert = clearAlert, NSApp.modalWindow === alert.window { NSApp.abortModal() }
+        clearConfirmation?.cancel()
     }
     func prepareClearForTermination() async {
         cancelClear()
@@ -554,10 +622,11 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     }
     func retryClearRecovery() {
         guard !clearInProgress, let store = clearStore else { return }
-        clearInProgress = true; clearRecoveryPending = true
+        clearInProgress = true; clearRecoveryPending = true; clearCommitsInProgress = true
         clearTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
+                self.clearCommitsInProgress = false
                 self.clearInProgress = false; self.clearTask = nil
                 if self.clearIndexDirty { self.clearIndexDirty = false; _ = self.persistIndex() }
                 self.refreshMenuState()

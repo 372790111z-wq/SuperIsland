@@ -323,17 +323,18 @@ final class ScreenshotLineClearTests: XCTestCase {
         let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
         let alert = line.makeClearAlert(count: 2)
         var delivered = false
+        var timedOut = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: alert.window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+                windowNumber: line.clearConfirmation!.panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
             delivered = true
             NSApp.postEvent(event, atStart: true)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            if NSApp.modalWindow === alert.window { NSApp.abortModal() }
+            if let confirmation = line.clearConfirmation { timedOut = true; confirmation.cancel() }
         }
         let response = await line.presentClearAlert(alert)
-        XCTAssertTrue(delivered); XCTAssertEqual(response, .alertFirstButtonReturn)
+        XCTAssertTrue(delivered); XCTAssertFalse(timedOut); XCTAssertEqual(response, .alertFirstButtonReturn)
     }
     @MainActor func testNativeConfirmationYieldsToOtherMainActorTasksAndSubmitsOnlyExplicitClear() async throws {
         let f = try Fixture(); defer { f.dispose() }
@@ -346,10 +347,135 @@ final class ScreenshotLineClearTests: XCTestCase {
             alert.buttons[1].performClick(nil)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            if NSApp.modalWindow === alert.window { NSApp.abortModal() }
+            line.clearConfirmation?.cancel()
         }
         let result = await line.presentClearAlert(alert)
         XCTAssertTrue(heartbeatRan); XCTAssertEqual(result, .alertSecondButtonReturn)
+    }
+    @MainActor func testCancelHidesPanelSynchronouslyWithoutActivatingOrOpeningSettings() async throws {
+        let f = try Fixture(); defer { f.dispose() }
+        let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+        let settings = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+        settings.isReleasedWhenClosed = false; settings.title = "SC2 unrelated settings fixture"
+        defer { settings.close() }
+        // Let the XCTest host's initial launch activation settle, then model
+        // an already-running menu-bar app behind another foreground app.
+        try await Task.sleep(for: .milliseconds(150))
+        NSApp.deactivate()
+        try await Task.sleep(for: .milliseconds(150))
+        let frontmostBefore = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        XCTAssertNotEqual(frontmostBefore, ProcessInfo.processInfo.processIdentifier, "Background-app test precondition")
+        let existingMain = NSApp.mainWindow
+        let alert = line.makeClearAlert(count: 2)
+        let probe = ScreenshotLineClearConfirmation(alert: line.makeClearAlert(count: 1))
+        XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, frontmostBefore, "Constructing the dialog must not switch foreground app")
+        XCTAssertFalse(probe.panel.isVisible)
+        var actionRan = false
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(50))
+            guard let confirmation = line.clearConfirmation else { XCTFail("No independent confirmation"); return }
+            XCTAssertTrue(confirmation.panel.styleMask.contains(.nonactivatingPanel))
+            XCTAssertFalse(confirmation.panel.canBecomeMain)
+            XCTAssertEqual(confirmation.panel.accessibilityIdentifier(), "data-annotation-id=si.sc.clear-confirm")
+            XCTAssertEqual(confirmation.panel.accessibilitySubrole(), alert.window.accessibilitySubrole())
+            XCTAssertTrue(confirmation.panel.isVisible)
+            let content = confirmation.panel.contentView!
+            for control in [alert.buttons[0], alert.buttons[1], alert.suppressionButton!] {
+                XCTAssertTrue(content.bounds.contains(control.convert(control.bounds, to: content)), "Native control \(control.title) frame \(control.convert(control.bounds, to: content)) must fit content \(content.bounds)")
+            }
+            XCTAssertFalse(settings.isVisible)
+            XCTAssertTrue(NSApp.mainWindow === existingMain)
+            // A nonactivating key panel can change NSApp.isActive's local
+            // bookkeeping. Check the real system foreground app, not that flag.
+            XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, frontmostBefore)
+            XCTAssertEqual(confirmation.panel.animationBehavior, .none)
+            alert.suppressionButton?.state = .on
+            actionRan = true
+            let began = ContinuousClock.now
+            NSApp.sendAction(alert.buttons[0].action!, to: alert.buttons[0].target, from: alert.buttons[0])
+            let elapsed = began.duration(to: .now).components
+            let milliseconds = Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15
+            let output = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/SC2DialogFixValidation")
+            try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+            let receipt: [String: Any] = ["foregroundAppUnchanged": NSWorkspace.shared.frontmostApplication?.processIdentifier == frontmostBefore,
+                "settingsStayedHidden": !settings.isVisible, "hiddenBeforeNextTaskPass": !confirmation.panel.isVisible,
+                "cancelActionMilliseconds": milliseconds, "metricScope": "native target action, not physical input latency", "animationDisabled": true]
+            try? JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("native-presentation.json"))
+            XCTAssertFalse(confirmation.panel.isVisible, "Cancel must hide synchronously in its action, without another task/runloop pass")
+            // A second late button event cannot change the cancellation result.
+            NSApp.sendAction(alert.buttons[1].action!, to: alert.buttons[1].target, from: alert.buttons[1])
+        }
+        let response = await line.presentClearAlert(alert)
+        XCTAssertTrue(actionRan); XCTAssertEqual(response, .alertFirstButtonReturn)
+        XCTAssertTrue(line.askBeforeClearAll); XCTAssertTrue(line.status.isEmpty)
+        XCTAssertFalse(settings.isVisible); XCTAssertNil(line.clearConfirmation)
+    }
+    @MainActor func testCancelReturnsToPriorStateWithoutWritingReminderOrDiscardingAnError() async throws {
+        let f = try Fixture(); defer { f.dispose() }; let item = try f.file("cancel.png"); try f.index()
+        let line = f.line(preferenceFailure: true); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+        _ = line.setAskBeforeClearAll(false)
+        let previous = line.status
+        XCTAssertFalse(previous.isEmpty)
+        line.requestClearAll { alert in alert.suppressionButton?.state = .on; return .alertFirstButtonReturn }; await wait(line)
+        XCTAssertEqual(line.status, previous)
+        XCTAssertEqual(line.items, [item]); XCTAssertTrue(f.exists(item)); XCTAssertTrue(line.askBeforeClearAll)
+        XCTAssertTrue(f.io.names.isEmpty)
+    }
+    @MainActor func testDisableClosesIndependentConfirmationImmediatelyAndLeavesContent() async throws {
+        let f = try Fixture(); defer { f.dispose() }; let item = try f.file("cancel.png"); try f.index()
+        let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+        line.requestClearAll()
+        for _ in 0..<100 {
+            if line.clearConfirmation != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let confirmation = try XCTUnwrap(line.clearConfirmation)
+        line.setEnabled(false)
+        XCTAssertFalse(confirmation.panel.isVisible)
+        await wait(line)
+        XCTAssertEqual(line.items, [item]); XCTAssertTrue(f.exists(item)); XCTAssertTrue(line.status.isEmpty)
+        XCTAssertFalse(line.isEnabled)
+    }
+    @MainActor func testIndependentPanelExplicitSubmitRetainsSuppressionAndClearsOnlyFixture() async throws {
+        let f = try Fixture(); defer { f.dispose() }; _ = try f.file("submit-fixture.png"); try f.index()
+        let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+        line.requestClearAll()
+        for _ in 0..<100 {
+            if line.clearConfirmation != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let confirmation = try XCTUnwrap(line.clearConfirmation)
+        confirmation.alert.suppressionButton?.state = .on
+        let clear = confirmation.alert.buttons[1]
+        NSApp.sendAction(clear.action!, to: clear.target, from: clear)
+        XCTAssertFalse(confirmation.panel.isVisible)
+        await wait(line)
+        XCTAssertTrue(line.items.isEmpty); XCTAssertFalse(line.askBeforeClearAll)
+        XCTAssertEqual(f.io.names, ["submit-fixture.png"])
+        XCTAssertFalse(line.clearRecoveryPending)
+    }
+    @MainActor func testNewClipboardContentPersistsWhileIndependentConfirmationWaits() async throws {
+        let f = try Fixture(); defer { f.dispose() }; _ = try f.file("old.png"); try f.index()
+        f.defaults.set(true, forKey: "screenshotLine.clipboard")
+        let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+        line.requestClearAll()
+        for _ in 0..<100 {
+            if line.clearConfirmation != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let confirmation = try XCTUnwrap(line.clearConfirmation)
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let entry = NSPasteboardItem(); entry.setData(bitmap.representation(using: .png, properties: [:])!, forType: .png)
+        f.pasteboard.clearContents(); f.pasteboard.writeObjects([entry])
+        for _ in 0..<150 {
+            if line.items.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(line.items.count, 2)
+        let durable = try JSONDecoder().decode([ScreenshotLineItem].self, from: Data(contentsOf: f.root.appendingPathComponent("index.json")))
+        XCTAssertEqual(durable, line.items, "Waiting for a user's decision must not defer new content persistence indefinitely")
+        confirmation.cancel(); await wait(line)
+        XCTAssertEqual(line.items.count, 2); XCTAssertTrue(f.io.names.isEmpty); XCTAssertTrue(line.status.isEmpty)
     }
     @MainActor func testRootSwapAfterPlanningDoesNotTouchReplacement() throws {
         let f = try Fixture(); defer { f.dispose() }; let item = try f.file("one.png")
