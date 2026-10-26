@@ -16,10 +16,16 @@ import CoreGraphics
 @MainActor private func SL(_ text: String) -> String { ScreenshotLineText.translate(text) }
 
 
-/// Keep the native NSAlert layout, but present it in a panel constructed as
-/// nonactivating from the outset. App-wide activation can bring an existing
-/// settings window forward along with a menu-bar confirmation.
+/// Own the panel's public AppKit controls and opaque surface. NSAlert's private
+/// content view depends on its original window and must not be transplanted.
 @MainActor final class ScreenshotLineClearConfirmation: NSObject, NSWindowDelegate {
+    final class Surface: NSView {
+        override var isOpaque: Bool { true }
+        override func draw(_ dirtyRect: NSRect) {
+            NSColor.windowBackgroundColor.setFill()
+            bounds.fill()
+        }
+    }
     final class Panel: NSPanel {
         var cancelHandler: (() -> Void)?
         override var canBecomeKey: Bool { true }
@@ -32,19 +38,23 @@ import CoreGraphics
     }
     let alert: NSAlert
     let panel: Panel
+    let cancelButton: NSButton
+    let clearButton: NSButton
+    let suppressionButton: NSButton
+    let titleLabel: NSTextField
+    let messageLabel: NSTextField
     private var continuation: CheckedContinuation<NSApplication.ModalResponse, Never>?
     private var result: NSApplication.ModalResponse?
 
     init(alert: NSAlert) {
         self.alert = alert
-        alert.layout()
-        let source = alert.window
-        let contentSize = source.contentView?.bounds.size ?? source.contentLayoutRect.size
-        // Construct with public flags rather than inheriting NSAlert's
-        // private style bits or changing nonactivation after initialization.
-        let style: NSWindow.StyleMask = [.titled, .fullSizeContentView, .nonactivatingPanel]
-        panel = Panel(contentRect: source.contentRect(forFrameRect: source.frame),
-                      styleMask: style, backing: .buffered, defer: false)
+        cancelButton = NSButton(title: alert.buttons[0].title, target: nil, action: nil)
+        clearButton = NSButton(title: alert.buttons[1].title, target: nil, action: nil)
+        suppressionButton = NSButton(checkboxWithTitle: alert.suppressionButton?.title ?? "", target: nil, action: nil)
+        titleLabel = NSTextField(wrappingLabelWithString: alert.messageText)
+        messageLabel = NSTextField(wrappingLabelWithString: alert.informativeText)
+        panel = Panel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 320),
+                      styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         panel.isReleasedWhenClosed = false
         panel.animationBehavior = .none
@@ -53,26 +63,71 @@ import CoreGraphics
         panel.hidesOnDeactivate = false
         panel.level = .modalPanel
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        panel.titleVisibility = source.titleVisibility
-        panel.titlebarAppearsTransparent = source.titlebarAppearsTransparent
-        panel.backgroundColor = source.backgroundColor
-        panel.isOpaque = source.isOpaque
-        panel.hasShadow = source.hasShadow
-        let contents = source.contentView
-        source.contentView = nil
-        panel.contentView = contents
-        panel.setContentSize(contentSize)
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.backgroundColor = .windowBackgroundColor
+        panel.isOpaque = true
+        panel.hasShadow = true
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(kind)?.isHidden = true
+        }
+        let surface = Surface(frame: NSRect(x: 0, y: 0, width: 360, height: 320))
+        panel.contentView = surface
+        let icon = NSImageView(image: alert.icon ?? NSApp.applicationIconImage)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.setAccessibilityElement(false)
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        messageLabel.font = .systemFont(ofSize: 13)
+        messageLabel.textColor = .labelColor
+        for label in [titleLabel, messageLabel] {
+            label.alignment = .center
+            label.preferredMaxLayoutWidth = 312
+            label.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
+        suppressionButton.state = alert.suppressionButton?.state ?? .off
+        suppressionButton.setAccessibilityIdentifier(alert.suppressionButton?.accessibilityIdentifier())
+        let buttons = NSStackView(views: [cancelButton, clearButton])
+        buttons.orientation = .horizontal
+        buttons.distribution = .fillEqually
+        buttons.spacing = 12
+        for button in [cancelButton, clearButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .large
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.heightAnchor.constraint(equalToConstant: 32).isActive = true
+            button.target = self
+        }
+        cancelButton.action = #selector(cancelClicked(_:))
+        cancelButton.keyEquivalent = "\r"
+        clearButton.action = #selector(clearClicked(_:))
+        clearButton.keyEquivalent = ""
+        let stack = NSStackView(views: [icon, titleLabel, messageLabel, suppressionButton, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        surface.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: surface.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -24),
+            stack.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -24),
+            icon.widthAnchor.constraint(equalToConstant: 64), icon.heightAnchor.constraint(equalToConstant: 64),
+            titleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            messageLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+        panel.setContentSize(NSSize(width: 360, height: surface.fittingSize.height))
+        surface.layoutSubtreeIfNeeded()
         panel.center()
-        panel.setAccessibilityIdentifier(source.accessibilityIdentifier())
-        panel.setAccessibilitySubrole(source.accessibilitySubrole())
+        panel.setAccessibilityIdentifier(alert.window.accessibilityIdentifier())
+        panel.setAccessibilitySubrole(alert.window.accessibilitySubrole())
         panel.delegate = self
         panel.cancelHandler = { [weak self] in self?.cancel() }
-        alert.buttons[0].target = self
-        alert.buttons[0].action = #selector(cancelClicked(_:))
-        alert.buttons[1].target = self
-        alert.buttons[1].action = #selector(clearClicked(_:))
-        panel.defaultButtonCell = alert.buttons[0].cell as? NSButtonCell
-        panel.initialFirstResponder = alert.buttons[0]
+        panel.defaultButtonCell = cancelButton.cell as? NSButtonCell
+        panel.initialFirstResponder = cancelButton
     }
     func present() async -> NSApplication.ModalResponse {
         if let result { return result }
@@ -88,6 +143,9 @@ import CoreGraphics
     private func finish(_ response: NSApplication.ModalResponse) {
         guard result == nil else { return }
         result = response
+        // Only the visible checkbox supplies the decision; requestClearAll saves
+        // it only after an explicit clear, never after cancellation.
+        alert.suppressionButton?.state = suppressionButton.state
         // Hide in the button action itself, before resuming any async cleanup.
         // No modal-loop polling, animation delay or status message on cancel.
         panel.orderOut(nil)
