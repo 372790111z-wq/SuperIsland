@@ -415,6 +415,162 @@ final class WindowMinimizationSessionControllerTests: XCTestCase {
         XCTAssertFalse(controller.hasActiveSession)
     }
 
+    func testDiagnosticSnapshotUsesStoredStateWithoutEnvironmentCalls() {
+        let fixture = Fixture()
+        fixture.addWindow(1)
+        let anonymous = fixture.addWindow(2)
+        anonymous.windowNumber = nil
+        anonymous.identifier = nil
+        fixture.onWrite = { window, value in
+            if window.id == 1 { window.minimized = value }
+            return .success
+        }
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1, pending: 1)
+        let callsBeforeSnapshot = fixture.environmentCalls
+
+        for _ in 0..<3 {
+            XCTAssertEqual(controller.diagnosticSnapshot, .init(
+                retainedCount: 2, minimizeRequestedCount: 1, minimizedCount: 1,
+                restoreRequestedCount: 0, unidentifiedCount: 1, missingObservationCount: 0
+            ))
+            XCTAssertEqual(controller.lastRestoreDiagnostics, .init())
+        }
+
+        XCTAssertEqual(fixture.environmentCalls, callsBeforeSnapshot)
+        XCTAssertEqual(fixture.writes, [.init(1, true), .init(2, true)])
+        XCTAssertTrue(fixture.raised.isEmpty)
+        XCTAssertTrue(fixture.activated.isEmpty)
+    }
+
+    func testRestoreDiagnosticsDistinguishAnonymousUnavailableWithoutRetiringIt() {
+        let fixture = Fixture()
+        let window = fixture.addWindow(1)
+        window.windowNumber = nil
+        window.identifier = nil
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1)
+        window.ordinary = false
+        window.inSnapshot = false
+
+        for _ in 0..<2 {
+            assertRestored(controller.restoreActiveSession()!, confirmed: 0, failed: 1)
+            XCTAssertEqual(controller.lastRestoreDiagnostics, .init(unidentifiedUnavailable: 1))
+            XCTAssertEqual(controller.diagnosticSnapshot.retainedCount, 1)
+            XCTAssertEqual(controller.diagnosticSnapshot.unidentifiedCount, 1)
+        }
+        XCTAssertEqual(fixture.writes, [.init(1, true)])
+    }
+
+    func testRestoreDiagnosticsDistinguishFailedSnapshotFromAmbiguousIdentity() {
+        let fixture = Fixture()
+        let window = fixture.addWindow(1)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1)
+        window.ordinary = false
+        window.inSnapshot = false
+        fixture.snapshotAvailable = false
+
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, failed: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(snapshotUnavailable: 1))
+
+        fixture.snapshotAvailable = true
+        fixture.addWindow(2).windowNumber = 1
+        fixture.addWindow(3).windowNumber = 1
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, failed: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(identityAmbiguous: 1))
+        XCTAssertEqual(controller.diagnosticSnapshot.retainedCount, 1)
+        XCTAssertEqual(fixture.writes, [.init(1, true)])
+    }
+
+    func testRestoreDiagnosticsObserveExistingMissingRetirementThreshold() {
+        let fixture = Fixture()
+        let window = fixture.addWindow(1)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1)
+        window.ordinary = false
+        window.inSnapshot = false
+
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, failed: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(missingPending: 1))
+        XCTAssertEqual(controller.diagnosticSnapshot.missingObservationCount, 1)
+        fixture.clock += 0.2
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, failed: 1)
+        XCTAssertEqual(controller.diagnosticSnapshot.missingObservationCount, 2)
+        fixture.clock += 0.3
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, missing: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(missingRetired: 1))
+        XCTAssertEqual(controller.diagnosticSnapshot, .init())
+        XCTAssertNil(controller.restoreActiveSession())
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init())
+        XCTAssertEqual(fixture.writes, [.init(1, true)])
+    }
+
+    func testRestoreDiagnosticsDistinguishUnreadableNotSettableAndRejectedWrite() {
+        let fixture = Fixture()
+        let window = fixture.addWindow(1)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1)
+        window.minimized = nil
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, failed: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(minimizedUnreadable: 1))
+        XCTAssertEqual(fixture.writes, [.init(1, true)])
+
+        window.minimized = true
+        window.canMinimize = false
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, failed: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(restoreNotSettable: 1))
+        XCTAssertEqual(fixture.writes, [.init(1, true)])
+
+        window.canMinimize = true
+        fixture.onWrite = { _, _ in .cannotComplete }
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, failed: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(restoreWriteFailed: 1))
+        XCTAssertEqual(fixture.writes, [.init(1, true), .init(1, false)])
+        XCTAssertTrue(controller.hasActiveSession)
+        XCTAssertTrue(fixture.activated.isEmpty)
+    }
+
+    func testRestoreDiagnosticsResetPerAttemptAndObserveDelayedCompletion() {
+        let fixture = Fixture()
+        let window = fixture.addWindow(1)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1)
+        fixture.onWrite = { _, _ in .success }
+
+        for _ in 0..<2 {
+            assertRestored(controller.restoreActiveSession()!, confirmed: 0, pending: 1)
+            XCTAssertEqual(controller.lastRestoreDiagnostics, .init(restorePending: 1))
+            XCTAssertEqual(controller.diagnosticSnapshot.restoreRequestedCount, 1)
+        }
+        window.minimized = nil
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, pending: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(minimizedUnreadable: 1))
+        XCTAssertEqual(fixture.writes, [.init(1, true), .init(1, false), .init(1, false)])
+
+        window.minimized = false
+        assertRestored(controller.restoreActiveSession()!, confirmed: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(restored: 1))
+        XCTAssertEqual(controller.diagnosticSnapshot, .init())
+        XCTAssertEqual(fixture.activated, [101])
+        XCTAssertNil(controller.restoreActiveSession())
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init())
+    }
+
+    func testRestoreDiagnosticsCountTerminatedOwnerWithoutAdditionalMutation() {
+        let fixture = Fixture()
+        fixture.addWindow(1)
+        let controller = fixture.controller()
+        assertMinimized(controller.toggle(mode: .all, excludingBundleIdentifiers: []), confirmed: 1)
+        fixture.runningPIDs.remove(101)
+
+        assertRestored(controller.restoreActiveSession()!, confirmed: 0, missing: 1)
+        XCTAssertEqual(controller.lastRestoreDiagnostics, .init(applicationTerminated: 1))
+        XCTAssertEqual(controller.diagnosticSnapshot, .init())
+        XCTAssertEqual(fixture.writes, [.init(1, true)])
+        XCTAssertTrue(fixture.activated.isEmpty)
+    }
+
     private func assertMinimized(
         _ outcome: Controller.Outcome, confirmed: Int, pending: Int = 0, failed: Int = 0,
         mode: Controller.Mode = .all, file: StaticString = #filePath, line: UInt = #line
@@ -459,6 +615,9 @@ final class WindowMinimizationSessionControllerTests: XCTestCase {
             var windowNumber: Int?
             var identifier: String?
             var isLive = true
+            var ordinary = true
+            var inSnapshot = true
+            var canMinimize = true
 
             init(id: Int, pid: pid_t, minimized: Bool?) {
                 self.id = id
@@ -482,6 +641,17 @@ final class WindowMinimizationSessionControllerTests: XCTestCase {
         var onWrite: ((Window, Bool) -> AXError)?
         var date = Date(timeIntervalSince1970: 100)
         var minimizationObservation: (@MainActor () -> Void)?
+        var snapshotAvailable = true
+        var clock: TimeInterval {
+            get { date.timeIntervalSince1970 }
+            set { date = Date(timeIntervalSince1970: newValue) }
+        }
+        var environmentCalls: [String] = []
+
+        private func observe<Value>(_ operation: String, _ read: () -> Value) -> Value {
+            environmentCalls.append(operation)
+            return read()
+        }
 
         @discardableResult
         func addWindow(_ id: Int, pid: pid_t = 101, minimized: Bool? = false) -> Window {
@@ -499,31 +669,42 @@ final class WindowMinimizationSessionControllerTests: XCTestCase {
             Controller(environment: .init(
                 ownProcessIdentifier: 999,
                 applications: {
-                    self.runningPIDs.sorted().map {
-                        .init(processIdentifier: $0, bundleIdentifier: "test.\($0)")
+                    self.observe("applications") {
+                        self.runningPIDs.sorted().map {
+                            .init(processIdentifier: $0, bundleIdentifier: "test.\($0)")
+                        }
                     }
                 },
-                frontmostProcessIdentifier: { self.frontmostPID },
-                isApplicationRunning: { self.runningPIDs.contains($0) },
-                activateApplication: { self.activated.append($0) },
-                windowOrder: { Dictionary(uniqueKeysWithValues: self.windows.enumerated().map { ($1.id, $0) }) },
-                focusedWindow: { self.focused },
-                windows: { pid in (true, self.windows.filter { $0.pid == pid && $0.isLive }.map(\.element)) },
-                processIdentifier: { self.window($0).pid },
-                isOrdinaryWindow: { self.window($0).isLive },
-                windowNumber: { self.window($0).isLive ? self.window($0).windowNumber : nil },
-                identifier: { self.window($0).isLive ? self.window($0).identifier : nil },
-                minimized: { self.window($0).minimized },
-                canMinimize: { _ in true },
+                frontmostProcessIdentifier: { self.observe("frontmost") { self.frontmostPID } },
+                isApplicationRunning: { pid in self.observe("running") { self.runningPIDs.contains(pid) } },
+                activateApplication: { pid in self.observe("activate") { self.activated.append(pid) } },
+                windowOrder: {
+                    self.observe("windowOrder") {
+                        Dictionary(uniqueKeysWithValues: self.windows.enumerated().map { ($1.id, $0) })
+                    }
+                },
+                focusedWindow: { self.observe("focused") { self.focused } },
+                windows: { pid in
+                    self.observe("windows") {
+                        (self.snapshotAvailable, self.windows.filter { $0.pid == pid && $0.inSnapshot && $0.isLive }.map(\.element))
+                    }
+                },
+                processIdentifier: { element in self.observe("pid") { self.window(element).pid } },
+                isOrdinaryWindow: { element in self.observe("ordinary") { self.window(element).ordinary && self.window(element).isLive } },
+                windowNumber: { element in self.observe("number") { self.window(element).isLive ? self.window(element).windowNumber : nil } },
+                identifier: { element in self.observe("identifier") { self.window(element).isLive ? self.window(element).identifier : nil } },
+                minimized: { element in self.observe("minimized") { self.window(element).minimized } },
+                canMinimize: { element in self.observe("settable") { self.window(element).canMinimize } },
                 setMinimized: { element, value in
+                    self.environmentCalls.append("setMinimized")
                     let window = self.window(element)
                     self.writes.append(.init(window.id, value))
                     if let onWrite = self.onWrite { return onWrite(window, value) }
                     window.minimized = value
                     return .success
                 },
-                raiseWindow: { self.raised.append(self.window($0).id) },
-                now: { self.date },
+                raiseWindow: { element in self.observe("raise") { self.raised.append(self.window(element).id) } },
+                now: { self.observe("now") { self.date } },
                 observeMinimizationCompletion: { observe in
                     self.minimizationObservation = observe
                     return { self.minimizationObservation = nil }
