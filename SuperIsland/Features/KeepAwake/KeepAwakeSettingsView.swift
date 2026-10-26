@@ -33,6 +33,7 @@ struct KeepAwakeSettingsView: View {
                     .dataAnnotationID("si.ka.master")
             }
             status
+            if service.isNotebook { KeepAwakeRecapSettings(recap: service.recap, enabled: service.engine.enabled) }
             if service.releasePending {
                 Button(service.lid.busy ? "正在恢复系统设置…" : "重试恢复系统设置") { service.retryRelease() }
                     .disabled(service.lid.busy).dataAnnotationID("si.ka.release-retry")
@@ -251,4 +252,17 @@ struct KeepAwakeSettingsView: View {
         Binding(get: { service.preferences[keyPath: path] }, set: { value in service.updatePreferences { $0[keyPath: path] = value } })
     }
     private func alert(_ text: String) { message = text; showMessage = true }
+}
+
+private struct KeepAwakeRecapSettings: View {
+    @ObservedObject var recap: KeepAwakeRecapController
+    let enabled: Bool
+    var body: some View {
+        SettingGroup {
+            SettingToggleRow(title: "开盖后自动显示回顾", description: "解锁后展示本次任务、保持与休眠结果；关闭后仍可从杯子菜单查看最近一次。",
+                isOn: Binding(get: { recap.autoShow }, set: { _ = recap.setAutoShow($0) }))
+                .toggleStyle(.switch).disabled(!enabled).dataAnnotationID("si.ka.recap.settings-auto")
+            if let error = recap.preferenceError ?? recap.storageError { Text(error).font(.caption).foregroundStyle(.orange).padding(.horizontal, 16).padding(.bottom, 10) }
+        }
+    }
 }

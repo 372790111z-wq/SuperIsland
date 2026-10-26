@@ -4,7 +4,7 @@ import Combine
 @MainActor
 final class KeepAwakeMenuController: NSObject, NSMenuDelegate {
     private enum Role: Int {
-        case state = 4101, detail, master, retry, automatic, manual30, manual60, pause, sources
+        case state = 4101, detail, master, retry, automatic, manual30, manual60, pause, sources, recapLast, recapAuto
     }
     private final class MenuReference {
         weak var menu: NSMenu?
@@ -20,7 +20,7 @@ final class KeepAwakeMenuController: NSObject, NSMenuDelegate {
         super.init()
         // The main App menu and the standalone icon use different NSMenus,
         // but both project the same service. Keep only weak menu references.
-        updateObserver = service.objectWillChange.debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
+        updateObserver = service.objectWillChange.merge(with: service.recap.objectWillChange).debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in self?.refreshLiveValues() }
     }
 
@@ -57,6 +57,10 @@ final class KeepAwakeMenuController: NSObject, NSMenuDelegate {
         row(.automatic)?.state = service.engine.enabled && service.engine.mode == .automatic ? .on : .off
         row(.pause)?.title = service.engine.pauseDeadline.map { $0 > KeepAwakeClock.now() } == true ? "结束暂停" : "暂停 30 分钟"
         row(.pause)?.isEnabled = service.engine.enabled
+        row(.recapLast)?.isEnabled = service.isNotebook && service.recap.latest != nil
+        row(.recapAuto)?.state = service.recap.autoShow ? .on : .off
+        row(.recapAuto)?.isEnabled = service.isNotebook && service.engine.enabled
+        row(.recapAuto)?.isHidden = !service.isNotebook
         row(.sources)?.title = "\(service.decision.runningSources) 个运行来源 · \(service.lidStatus)"
     }
     func item() -> NSMenuItem {
@@ -93,6 +97,10 @@ final class KeepAwakeMenuController: NSObject, NSMenuDelegate {
         add("停止并恢复", action: #selector(stop), to: menu)
         menu.addItem(.separator())
         information("", .sources)
+        let recap = add("最近一次合盖回顾", action: #selector(openRecap), role: .recapLast, to: menu)
+        recap.setAccessibilityIdentifier("data-annotation-id=si.ka.recap.last")
+        let autoRecap = add("开盖后自动显示回顾", action: #selector(toggleRecapAuto), role: .recapAuto, to: menu)
+        autoRecap.setAccessibilityIdentifier("data-annotation-id=si.ka.recap.menu-auto")
         add("管理保持唤醒…", action: #selector(manage), to: menu)
         menu.autoenablesItems = false
         refresh(menu)
@@ -109,5 +117,7 @@ final class KeepAwakeMenuController: NSObject, NSMenuDelegate {
     @objc private func manual60() { service.manual(minutes: 60) }
     @objc private func togglePause() { service.pause() }
     @objc private func stop() { service.stop() }
+    @objc private func openRecap() { service.recap.openLatest() }
+    @objc private func toggleRecapAuto() { _ = service.recap.setAutoShow(!service.recap.autoShow) }
     @objc private func manage() { service.openSettings?() }
 }

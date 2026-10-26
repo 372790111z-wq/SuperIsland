@@ -132,6 +132,8 @@ final class KeepAwakeService: ObservableObject {
     private var completionSleepError: String?
     private var mailbox: KeepAwakeMailbox
     private let acceptance: KeepAwakeAcceptanceRecorder
+    let recap: KeepAwakeRecapController
+    private var recapPhysical: KeepAwakeCompletionSleep.Snapshot?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var started = false
@@ -167,12 +169,14 @@ final class KeepAwakeService: ObservableObject {
             .appendingPathComponent("KeepAwake")
         mailbox = KeepAwakeMailbox(root: support)
         acceptance = KeepAwakeAcceptanceRecorder(root: support)
+        recap = KeepAwakeRecapController(defaults: defaults, root: support)
         if let data = defaults.data(forKey: Self.preferencesKey),
            let value = try? JSONDecoder().decode(KeepAwakeEngine.Preferences.self, from: data),
            (5...50).contains(value.minimumBattery) { engine.preferences = value }
     }
     func start() {
         guard !started else { return }; started = true
+        recap.start()
         lidObserver = lid.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         let saved = defaults.stringArray(forKey: Self.sourcesKey) ?? []
         // A crash after recording the selected home but before committing the
@@ -223,15 +227,17 @@ final class KeepAwakeService: ObservableObject {
                     self.completionSleep.cancel()
                     self.acceptance.append(notification.name == NSWorkspace.willSleepNotification ? "system-will-sleep" : "system-did-wake")
                     if notification.name == NSWorkspace.willSleepNotification {
+                        self.recap.willSleep()
                         self.power.apply(hold: false, policy: .system, notebook: self.isNotebook)
                         self.actualHold = self.power.isHolding
-                    } else { self.tick() }
+                    } else { self.recap.didWake(); self.tick() }
                 }
             })
         }
         refreshNotificationPermission()
     }
     func shutdown() {
+        recap.shutdown()
         acceptance.finish("app-shutdown")
         completionSleep.cancel()
         cancelResume()
@@ -467,11 +473,15 @@ final class KeepAwakeService: ObservableObject {
         acceptance.poll()
         environment = KeepAwakePower.environment()
         let now = KeepAwakeClock.now()
+        recapPhysical = KeepAwakeSystemSleep.snapshot()
+        defer { recapPhysical = nil }
+        updateRecap()
         pollLocalSource(now: now)
         pollCodexSource(now: now)
         for event in mailbox.read() where connections.contains(event.source) {
             let previous = engine.sessions[event.storageKey]
             if engine.receive(event, now: now) {
+                if let session = engine.sessions[event.storageKey] { updateRecap(sessions: [session], complete: false) }
                 acceptance.append("accepted-task-event", fields: ["source": event.source,
                     "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
                     "taskHash": event.taskID.map(KeepAwakeHookContract.anonymousIdentity) ?? "legacy",
@@ -503,7 +513,9 @@ final class KeepAwakeService: ObservableObject {
             decision.title = lid.releaseFailed ? "功能已关闭 · 系统设置恢复失败" : "功能已关闭 · 正在恢复系统设置"
             decision.detail = lid.message
         }
+        updateRecap() // Capture release acknowledgement before a system sleep can suspend the app.
         finishCompletedLidTasks(now: now)
+        updateRecap()
         let stateKey = decision.title + (runtimeError ?? "")
         if lastLog != stateKey { lastLog = stateKey; record(decision.title) }
         if acceptance.sampleDue {
@@ -520,6 +532,31 @@ final class KeepAwakeService: ObservableObject {
                     "taskHash": $0.event.taskID.map(KeepAwakeHookContract.anonymousIdentity) ?? "legacy",
                     "state": $0.event.state.rawValue] }])
         }
+    }
+    /// One-way metadata projection; this function never feeds the power policy.
+    private func updateRecap(sessions: [KeepAwakeEngine.Session]? = nil, complete: Bool = true) {
+        let physical = recapPhysical ?? KeepAwakeSystemSleep.snapshot()
+        let now = KeepAwakeClock.now()
+        let values = (sessions ?? Array(engine.sessions.values)).sorted { $0.event.storageKey < $1.event.storageKey }
+        let inputs = values.map { session -> KeepAwakeRecap.TaskInput in
+            let event = session.event
+            let state: KeepAwakeRecap.State
+            if event.state.isTerminal { state = KeepAwakeRecap.State(rawValue: event.state.rawValue) ?? .unknown }
+            else if event.state == .idle || now >= session.lastSeen + KeepAwakeEngine.staleAfter { state = .unknown }
+            else { state = KeepAwakeRecap.State(rawValue: event.state.rawValue) ?? .unknown }
+            // Existing authenticated compaction IDs explicitly identify auxiliary work.
+            // Other legacy events do not prove human/background classification.
+            let kind: KeepAwakeRecap.Kind = KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) ? .background : .unclassified
+            return .init(id: KeepAwakeHookContract.anonymousIdentity(event.storageKey), source: event.source,
+                         kind: kind, state: state, started: session.hasStarted)
+        }
+        recap.observe(.init(stamp: KeepAwakeRecapController.stamp(), notebook: isNotebook,
+            closed: physical.lidClosed, enabled: engine.enabled, actualHold: actualHold,
+            lidRequired: lid.enabled, lidApplied: lid.applied,
+            released: !actualHold && !lid.applied && !lid.hasPendingRelease && physical.sleepDisabled == false,
+            protection: engine.protection != nil, error: runtimeError != nil || lid.releaseFailed,
+            automatic: engine.mode == .automatic, tasks: inputs, completeTasks: complete,
+            paused: engine.pauseDeadline.map { $0 > now } ?? false))
     }
     private func finishCompletedLidTasks(now: TimeInterval) {
         let phase = engine.completionSleepPhase(now: now, environment: environment)
@@ -543,6 +580,7 @@ final class KeepAwakeService: ObservableObject {
             acceptance.append("completion-sleep-skipped")
             break
         case .accepted:
+            recap.sleepAccepted()
             acceptance.append("completion-sleep-accepted")
             record("全部任务已结束；系统已接受合盖休眠请求，实际休眠仍由系统确认。")
         case .failed(let code):
@@ -583,6 +621,7 @@ final class KeepAwakeService: ObservableObject {
             for event in self.codexLedger.consume(snapshot: snapshot, now: arrived, sequence: self.codexSequence) {
                 let previous = self.engine.sessions[event.storageKey]
                 if self.engine.receive(event, now: arrived) {
+                    if let session = self.engine.sessions[event.storageKey] { self.updateRecap(sessions: [session], complete: false) }
                     self.receivedSources.insert(source)
                     if previous?.isUnfinished == true && event.state == .completed && self.engine.enabled &&
                         !KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) {
@@ -620,7 +659,10 @@ final class KeepAwakeService: ObservableObject {
             if let state = snapshot.state {
                 let event = KeepAwakeEngine.Event(source: source, session: "desktop-aggregate",
                     sequence: mach_continuous_time(), state: state)
-                if self.engine.receive(event, now: KeepAwakeClock.now()) { self.receivedSources.insert(source) }
+                if self.engine.receive(event, now: KeepAwakeClock.now()) {
+                    if let session = self.engine.sessions[event.storageKey] { self.updateRecap(sessions: [session], complete: false) }
+                    self.receivedSources.insert(source)
+                }
             }
             self.localSourceTask = nil
             self.localPollStarted = nil
