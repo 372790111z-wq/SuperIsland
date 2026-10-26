@@ -201,4 +201,18 @@ final class KeepAwakeRecapTests: XCTestCase {
         _ = p.present(manual:false);XCTAssertTrue(p.panel.isVisible);p.dismiss();XCTAssertFalse(p.panel.isVisible);XCTAssertEqual(changes,0)
         _ = p.present(manual:true);XCTAssertTrue(p.panel.canBecomeKey);p.panel.cancelOperation(nil);XCTAssertFalse(p.panel.isVisible)
     }
+    @MainActor func testOpenPanelCanReceiveLateSleepProofOnlyForSameFrozenCycle() throws {
+        var r = begin()
+        r.willSleep(stamp(2)); r.observe(frame(602, closed: false, hold: false, awake: 2))
+        let snapshot = try XCTUnwrap(r.latest)
+        let p = KeepAwakeRecapPanel(summary: snapshot, autoShow: true, editable: true, toggle: { _ in true })
+        XCTAssertNil(p.presentation.summary.sleepAt)
+        r.didWake(stamp(603, awake: 3)); p.updateSummary(r.latest)
+        XCTAssertNotNil(p.presentation.summary.sleepAt)
+        XCTAssertEqual(p.presentation.summary.end, snapshot.end)
+        r.observe(frame(604)); r.observe(frame(605, closed: false))
+        p.updateSummary(r.latest)
+        XCTAssertEqual(p.presentation.summary.id, snapshot.id)
+        p.dismiss()
+    }
 }

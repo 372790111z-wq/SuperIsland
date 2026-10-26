@@ -17,7 +17,7 @@ import SwiftUI
         }
     }
     @MainActor final class Presentation: ObservableObject {
-        let summary: KeepAwakeRecap.Cycle
+        @Published private(set) var summary: KeepAwakeRecap.Cycle
         @Published var autoShow: Bool
         @Published var editable: Bool
         @Published var preferenceError: String?
@@ -30,6 +30,11 @@ import SwiftUI
         func change(_ value: Bool) {
             if toggle(value) { autoShow = value; preferenceError = nil }
             else { preferenceError = "自动显示偏好未保存，原选择仍生效。" }
+        }
+        func refresh(_ value: KeepAwakeRecap.Cycle) {
+            // Only evidence belonging to this frozen cycle may update an open view.
+            guard value.id == summary.id else { return }
+            summary = value
         }
     }
     let panel: Panel
@@ -68,6 +73,7 @@ import SwiftUI
         return panel.isVisible
     }
     func dismiss() { panel.orderOut(nil) }
+    func updateSummary(_ value: KeepAwakeRecap.Cycle?) { if let value { presentation.refresh(value) } }
     func showPersistenceError(_ error: String?) { presentation.persistenceError = error }
     func updatePreference(_ value: Bool, editable: Bool) { presentation.autoShow = value; presentation.editable = editable }
 }
