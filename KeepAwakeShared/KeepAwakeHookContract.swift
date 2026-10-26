@@ -340,29 +340,85 @@ enum KeepAwakeHookContract {
         default: return false
         }
     }
-    /// Attribution only, never a running signal. Terminal-launched hooks do
-    /// not become desktop events simply because the same brand is open.
-    static func hasDesktopParent(source: String) -> Bool {
-        var pid = getppid()
+    enum DesktopProcessRole { case other, shell, workBuddyServer, independentCLI }
+    struct DesktopAncestor {
+        let bundleID: String?
+        let appRoot: String?
+        let hasTerminal: Bool
+        let role: DesktopProcessRole
+    }
+    /// A desktop WorkBuddy session uses its bundled CLI's serve protocol in a
+    /// PTY. A TTY therefore cannot distinguish that worker from an interactive
+    /// CLI. Inspect only the entry point and protocol prefix, never task argv.
+    static func desktopProcessRole(executable: String, appRoot: String?, arguments: [String]) -> DesktopProcessRole {
+        let name = URL(fileURLWithPath: executable).lastPathComponent
+        if ["sh", "bash", "zsh", "dash"].contains(name) { return .shell }
+        if arguments.count >= 2 {
+            let entry = URL(fileURLWithPath: arguments[1]).standardizedFileURL.resolvingSymlinksInPath().path
+            if let appRoot, ["app.asar", "app.asar.unpacked"].contains(where: {
+                entry == appRoot + "/Contents/Resources/" + $0 + "/cli/bin/codebuddy"
+            }) {
+                return arguments.count >= 3 && arguments[2] == "--serve" ? .workBuddyServer : .independentCLI
+            }
+            if ["codebuddy", "codebuddy-lite-wb.mjs"].contains(URL(fileURLWithPath: entry).lastPathComponent) { return .independentCLI }
+        }
+        return ["codebuddy", "wb"].contains(name) ? .independentCLI : .other
+    }
+    static func acceptsDesktopParent(source: String, ancestors: [DesktopAncestor]) -> Bool {
+        guard sources.contains(source) else { return false }
+        var managedRoot: String?
+        for ancestor in ancestors {
+            if let managedRoot {
+                // The managed server must belong directly to the same App's
+                // non-terminal host. A CLI or nested server cannot borrow a
+                // more distant desktop ancestor to change its attribution.
+                return !ancestor.hasTerminal && ancestor.appRoot == managedRoot &&
+                    ancestor.role == .other && accepts(source: source, bundleID: ancestor.bundleID ?? "")
+            }
+            if source == "workbuddy-desktop" {
+                if ancestor.role == .independentCLI { return false }
+                if ancestor.role == .workBuddyServer {
+                    guard accepts(source: source, bundleID: ancestor.bundleID ?? ""), let root = ancestor.appRoot else { return false }
+                    managedRoot = root; continue
+                }
+                if ancestor.hasTerminal && ancestor.role == .shell { continue }
+            }
+            guard !ancestor.hasTerminal else { return false }
+            if accepts(source: source, bundleID: ancestor.bundleID ?? "") { return true }
+        }
+        return false
+    }
+    /// Attribution only, never a running signal. Opening a same-brand App or
+    /// launching an independent CLI inside a desktop tool cannot start a task.
+    static func hasDesktopParent(source: String, startingAt initialPID: pid_t = getppid()) -> Bool {
+        var pid = initialPID
+        var ancestors: [DesktopAncestor] = []
         for _ in 0..<16 {
-            guard pid > 1 else { return false }
+            guard pid > 1 else { break }
             var info = proc_bsdinfo()
             guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size,
-                  info.pbi_uid == getuid(), info.e_tdev == UInt32.max else { return false }
+                  info.pbi_uid == getuid() else { return false }
             var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
             guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return false }
             let executable = String(cString: path)
+            var appRoot: String?, bundleID: String?
             if let range = executable.range(of: ".app/Contents/") {
-                let root = String(executable[..<range.lowerBound]) + ".app"
+                let root = URL(fileURLWithPath: String(executable[..<range.lowerBound]) + ".app")
+                    .standardizedFileURL.resolvingSymlinksInPath().path
                 let url = URL(fileURLWithPath: root).appendingPathComponent("Contents/Info.plist")
                 if let data = try? Data(contentsOf: url),
                    let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-                   let id = plist["CFBundleIdentifier"] as? String,
-                   accepts(source: source, bundleID: id) { return true }
+                   let id = plist["CFBundleIdentifier"] as? String { appRoot = root; bundleID = id }
             }
+            let role = source == "workbuddy-desktop" ? desktopProcessRole(executable: executable, appRoot: appRoot,
+                arguments: processArguments(pid, maximumArguments: 3)) : .other
+            ancestors.append(.init(bundleID: bundleID, appRoot: appRoot, hasTerminal: info.e_tdev != UInt32.max, role: role))
+            // Stop at the first matching host, retaining a following host for
+            // serve workers. Avoid sampling unrelated ancestors or their argv.
+            if accepts(source: source, bundleID: bundleID ?? ""), role != .workBuddyServer { break }
             pid = pid_t(info.pbi_ppid)
         }
-        return false
+        return acceptsDesktopParent(source: source, ancestors: ancestors)
     }
 
     enum CodexProcessRole: Equatable { case cli, appServer, other }
@@ -455,7 +511,7 @@ enum KeepAwakeHookContract {
               let requirement else { return false }
         return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
-    private static func processArguments(_ pid: pid_t) -> [String] {
+    private static func processArguments(_ pid: pid_t, maximumArguments: Int = 64) -> [String] {
         var mib = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
         guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size, size <= 262_144 else { return [] }
@@ -467,7 +523,7 @@ enum KeepAwakeHookContract {
         while index < size && bytes[index] != 0 { index += 1 } // kernel executable path
         while index < size && bytes[index] == 0 { index += 1 }
         var arguments: [String] = []
-        for _ in 0..<Int(count) {
+        for _ in 0..<min(Int(count), maximumArguments) {
             guard index < size else { return [] }
             let start = index
             while index < size && bytes[index] != 0 { index += 1 }

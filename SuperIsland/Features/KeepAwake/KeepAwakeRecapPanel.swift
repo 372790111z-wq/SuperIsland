@@ -66,11 +66,16 @@ import SwiftUI
         presentation.close = { [weak self] in self?.dismiss() }
         panel.dismissHandler = { [weak self] in self?.dismiss() }
     }
+    static func frameOrigin(size: NSSize, visibleFrame: NSRect) -> NSPoint {
+        let topInset = min(64, max(0, visibleFrame.height - size.height))
+        return NSPoint(x: max(visibleFrame.minX, visibleFrame.midX - size.width / 2),
+                       y: max(visibleFrame.minY, visibleFrame.maxY - topInset - size.height))
+    }
     @discardableResult func present(manual: Bool) -> Bool {
         let point = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? NSScreen.main
         if let visible = screen?.visibleFrame {
-            panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.midY - panel.frame.height / 2))
+            panel.setFrameOrigin(Self.frameOrigin(size: panel.frame.size, visibleFrame: visible))
         }
         panel.acceptsKeys = manual
         panel.orderFrontRegardless()

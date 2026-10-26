@@ -3,6 +3,39 @@ import CryptoKit
 @testable import SuperIsland
 
 final class KeepAwakeStableHookTests: XCTestCase {
+    func testWorkBuddyManagedPTYNeedsItsOwnNonTerminalHost() {
+        typealias A = KeepAwakeHookContract.DesktopAncestor
+        let root = "/Applications/WorkBuddy.app", id = "com.tencent.workbuddy.mac"
+        let shell = A(bundleID: nil, appRoot: nil, hasTerminal: true, role: .shell)
+        let server = A(bundleID: id, appRoot: root, hasTerminal: true, role: .workBuddyServer)
+        let host = A(bundleID: id, appRoot: root, hasTerminal: false, role: .other)
+        XCTAssertTrue(KeepAwakeHookContract.acceptsDesktopParent(source: "workbuddy-desktop", ancestors: [shell, server, host]))
+        XCTAssertTrue(KeepAwakeHookContract.acceptsDesktopParent(source: "workbuddy-desktop", ancestors: [server, host]))
+        for chain in [[server], [server, server, host], [shell],
+                      [server, A(bundleID: id, appRoot: "/Other/WorkBuddy.app", hasTerminal: false, role: .other)],
+                      [server, A(bundleID: id, appRoot: root, hasTerminal: true, role: .other)],
+                      [A(bundleID: id, appRoot: root, hasTerminal: false, role: .independentCLI), host],
+                      [A(bundleID: nil, appRoot: nil, hasTerminal: true, role: .other), server, host]] {
+            XCTAssertFalse(KeepAwakeHookContract.acceptsDesktopParent(source: "workbuddy-desktop", ancestors: chain))
+        }
+        for source in ["qoder-desktop", "zcode-desktop", "workbuddy-cli", "unknown"] {
+            XCTAssertFalse(KeepAwakeHookContract.acceptsDesktopParent(source: source, ancestors: [shell, server, host]))
+        }
+    }
+    func testWorkBuddyRoleUsesBundledServePrefixNotPromptOrVersion() {
+        let root = "/Applications/WorkBuddy.app", executable = root + "/Contents/MacOS/Electron"
+        let entry = root + "/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
+        XCTAssertEqual(KeepAwakeHookContract.desktopProcessRole(executable: executable, appRoot: root,
+            arguments: [executable, entry, "--serve", "PRIVATE-ARGS-IGNORED"]), .workBuddyServer)
+        XCTAssertEqual(KeepAwakeHookContract.desktopProcessRole(executable: executable, appRoot: root,
+            arguments: [executable, entry, "--print", "--serve"]), .independentCLI)
+        XCTAssertEqual(KeepAwakeHookContract.desktopProcessRole(executable: executable, appRoot: root,
+            arguments: [executable, "/external/cli/bin/codebuddy", "--serve"]), .independentCLI)
+        XCTAssertEqual(KeepAwakeHookContract.desktopProcessRole(executable: executable, appRoot: nil,
+            arguments: [executable, entry, "--serve"]), .independentCLI)
+        XCTAssertEqual(KeepAwakeHookContract.desktopProcessRole(executable: "/bin/zsh", appRoot: nil,
+            arguments: ["/bin/zsh", "-c", "PRIVATE-COMMAND"]), .shell)
+    }
     private func payload(_ event: String, extra: [String: Any] = [:]) -> [String: Any] {
         var input: [String: Any] = ["session_id": "opaque-session", "hook_event_name": event]
         input.merge(extra) { _, value in value }
@@ -272,6 +305,30 @@ final class KeepAwakeStableHookTests: XCTestCase {
                 XCTAssertThrowsError(try KeepAwakeHookInstaller.install(source: zcode, credential: home, home: home, executable: URL(fileURLWithPath: "/usr/bin/true")))
                 XCTAssertEqual(try Data(contentsOf: path), bytes)
             }
+        }
+    }
+    func testZCodeReinstallRepairsOwnedEmptyMatchersWithoutChangingOtherHooks() throws {
+        try withHome { home in
+            let path = KeepAwakeHookInstaller.path(source: zcode, home: home)
+            try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let other: [String: Any] = ["matcher": "Write|Edit", "hooks": [["type": "process", "command": "/usr/bin/true"]]]
+            let old: [String: Any] = ["matcher": "", "hooks": [["type": "process", "command": "/old/tool",
+                "args": [KeepAwakeHookInstaller.marker, zcode.id, "/old/credential"]]]]
+            let original: [String: Any] = ["hooks": ["enabled": true, "events": ["PreToolUse": [other, old]]]]
+            try JSONSerialization.data(withJSONObject: original).write(to: path)
+            try KeepAwakeHookInstaller.install(source: zcode, credential: home.appendingPathComponent("credential"),
+                                               home: home, executable: URL(fileURLWithPath: "/usr/bin/true"))
+            let hooks = try XCTUnwrap(try read(path)["hooks"] as? [String: Any])
+            let events = try XCTUnwrap(hooks["events"] as? [String: [[String: Any]]])
+            for entries in events.values {
+                for entry in entries {
+                    if let matcher = entry["matcher"] as? String { XCTAssertFalse(matcher.isEmpty) }
+                }
+            }
+            let preTool = try XCTUnwrap(events["PreToolUse"])
+            XCTAssertEqual(preTool.count, 2)
+            XCTAssertEqual(preTool.first?["matcher"] as? String, "Write|Edit")
+            XCTAssertNil(preTool.last?["matcher"])
         }
     }
     func testUninstallWithNoConfigurationDoesNotCreateOne() throws {

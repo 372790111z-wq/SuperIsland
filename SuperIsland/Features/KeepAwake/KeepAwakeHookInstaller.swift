@@ -48,7 +48,11 @@ enum KeepAwakeHookInstaller {
                 for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Stop"] {
                     var entries = events[event] as? [[String: Any]] ?? []
                     if events[event] != nil && !(events[event] is [[String: Any]]) { throw Failure.invalidConfiguration }
-                    entries.append(["matcher": "", "hooks": [["type": "process", "command": tool.path,
+                    // Omission matches all tools. ZCode's configuration schema
+                    // rejects an explicitly empty matcher and drops the whole
+                    // user hook configuration, even though the runtime matcher
+                    // itself tolerates empty strings.
+                    entries.append(["hooks": [["type": "process", "command": tool.path,
                         "args": [marker, source.id, credential.path], "enabled": true, "timeoutMs": 5000]]])
                     events[event] = entries
                 }
