@@ -56,6 +56,15 @@ struct KeepAwakeCodexSessionProof {
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         }
     }
+    func forget(_ identity: String) throws {
+        guard valid(identity) else { return }
+        try locked {
+            var store = try read()
+            guard store.sessions.remove(identity) != nil else { return }
+            try JSONEncoder().encode(store).write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+    }
 }
 
 /// Public hook metadata contract. Extra vendor fields and version strings do
@@ -94,6 +103,22 @@ enum KeepAwakeHookContract {
         return true
     }
     private static let codexCompactionPrefix = "aux.codex.compaction."
+    static let codexSessionStarted = "scope.codex.session.start"
+    static let codexSessionEnded = "scope.codex.session.end"
+    /// Signed control records use reserved IDs, never vendor turn IDs. Only an
+    /// explicit root lifecycle callback can open/close a session's own tasks.
+    static func codexSessionControl(source: String, input: [String: Any]) -> String? {
+        guard codexSources.contains(source), codexHookSession(input) != nil,
+              input["agent_id"] == nil || input["agent_id"] is NSNull else { return nil }
+        if input["hook_event_name"] as? String == "SessionStart",
+           codexRootSessionProof(input) != nil, input["source"] as? String != "compact" {
+            return codexSessionStarted
+        }
+        if input["hook_event_name"] as? String == "SessionEnd", input["reason"] as? String == "other" {
+            return codexSessionEnded
+        }
+        return nil
+    }
     /// The private installer receipt doubles as the router. It contains only
     /// source-to-credential paths, never task content or authentication keys.
     struct CodexRouter: Decodable {
@@ -150,6 +175,9 @@ enum KeepAwakeHookContract {
     /// never leaves this process. Version, cwd, transcript and tool IDs cannot
     /// be substituted for task identity.
     static func metadata(source: String, input: [String: Any]) -> Metadata {
+        if let control = codexSessionControl(source: source, input: input) {
+            return Metadata(taskID: control, startsTask: false)
+        }
         let event = input["hook_event_name"] as? String
         var startsTask = event == "UserPromptSubmit" || (source == "gemini-cli" && event == "BeforeAgent")
         if source == "workbuddy-desktop", isTrue(input["is_internal_continuation"]) { startsTask = false }
@@ -179,6 +207,16 @@ enum KeepAwakeHookContract {
         let session: String
         let metadata: Metadata
         let state = "completed"
+    }
+    /// Interrupt is an irrevocable main-turn end, including any compaction
+    /// currently owned by that turn. Stop and notify cannot provide this proof:
+    /// Stop may continue, and notify may precede post-turn compaction.
+    static func interruptedCodexCompaction(source: String, input: [String: Any]) -> Metadata? {
+        guard codexSources.contains(source), input["hook_event_name"] as? String == "Interrupt",
+              input["agent_id"] == nil || input["agent_id"] is NSNull,
+              codexHookSession(input) != nil, let turn = codexIdentity(input["turn_id"]) else { return nil }
+        return Metadata(taskID: codexCompactionPrefix + anonymousIdentity(turn + "\nka1.codex.compaction.v1"),
+                        startsTask: false)
     }
     /// `notify` appends one JSON argument. It is a different wire contract
     /// from stdin hooks, and can only end the exact thread/turn it identifies.
@@ -268,6 +306,9 @@ enum KeepAwakeHookContract {
             }
         }
         if codexSources.contains(source) {
+            if let control = codexSessionControl(source: source, input: input) {
+                return control == codexSessionEnded ? "ended" : "idle"
+            }
             switch event {
             case "UserPromptSubmit", "PostToolUse", "PreCompact": return "running"
             case "PostCompact": return metadata(source: source, input: input).taskID != nil ? "completed" : "idle"
@@ -276,7 +317,8 @@ enum KeepAwakeHookContract {
             // Stop is pre-final: another hook may ask the agent to continue.
             // Only the main-turn Interrupt contract cannot be blocked/restarted.
             case "Interrupt": return metadata(source: source, input: input).taskID != nil ? "cancelled" : "idle"
-            case "Stop", "SessionEnd": return "idle"
+            case "Stop": return "idle"
+            case "SessionEnd": return nil // Missing/unknown end semantics are not proof.
             default: return nil
             }
         }

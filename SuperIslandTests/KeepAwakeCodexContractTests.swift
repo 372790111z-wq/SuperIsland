@@ -149,6 +149,80 @@ final class KeepAwakeCodexContractTests: XCTestCase {
         XCTAssertTrue(try fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil).isEmpty)
     }
     private let sources = ["codex-cli", "codex-desktop"]
+    func testRootSessionLifecycleRequiresExplicitDocumentedBoundary() throws {
+        for source in sources {
+            var start = hook("SessionStart"); start["source"] = "startup"
+            var end = hook("SessionEnd"); end["reason"] = "other"
+            XCTAssertEqual(KeepAwakeHookContract.metadata(source: source, input: start).taskID, KeepAwakeHookContract.codexSessionStarted)
+            XCTAssertEqual(KeepAwakeHookContract.eventState(source: source, input: end), "ended")
+            XCTAssertEqual(KeepAwakeHookContract.metadata(source: source, input: end).taskID, KeepAwakeHookContract.codexSessionEnded)
+            for reason in ["clear", "resume", "new-reason", ""] {
+                end["reason"] = reason
+                XCTAssertNil(KeepAwakeHookContract.eventState(source: source, input: end))
+            }
+            end["reason"] = "other"; end["agent_id"] = "child"
+            XCTAssertNil(KeepAwakeHookContract.codexSessionControl(source: source, input: end))
+            start["source"] = "compact"
+            XCTAssertNil(KeepAwakeHookContract.codexSessionControl(source: source, input: start), "Compaction does not reopen a closed session.")
+        }
+        XCTAssertNil(KeepAwakeHookContract.codexSessionControl(source: "workbuddy-desktop", input: ["hook_event_name":"SessionEnd", "session_id":"root", "reason":"other"]))
+    }
+    func testEphemeralWithoutNotifyEndsOnlyAtRealSessionEndAndGrace() throws {
+        let source = "codex-desktop", owner = "fixture-root"
+        var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+        let environment = KeepAwakeEngine.Environment(hardware: .desktop)
+        func event(_ task: String?, _ state: KeepAwakeEngine.TaskState, _ sequence: UInt64, starts: Bool = false) -> KeepAwakeEngine.Event {
+            .init(source: source, session: owner, sequence: sequence, state: state, taskID: task, startsTask: starts)
+        }
+        XCTAssertTrue(engine.receive(event(KeepAwakeHookContract.codexSessionStarted, .idle, 1), now: 0))
+        XCTAssertTrue(engine.sessions.isEmpty, "Lifecycle boundaries do not create recap task cards.")
+        engine.receive(event("turn", .running, 2, starts: true), now: 1)
+        engine.receive(event("turn", .idle, 3), now: 2) // Stop can still continue.
+        XCTAssertTrue(engine.evaluate(now: 100_000, environment: environment).hold)
+        engine.receive(event(KeepAwakeHookContract.codexSessionEnded, .ended, 4), now: 100_001)
+        let ended = try XCTUnwrap(engine.sessions.values.first)
+        XCTAssertEqual(ended.event.state, .ended)
+        XCTAssertFalse(ended.isUnfinished)
+        XCTAssertTrue(engine.evaluate(now: 100_030.9, environment: environment).hold)
+        XCTAssertFalse(engine.evaluate(now: 100_031, environment: environment).hold)
+        XCTAssertTrue(engine.receive(event(KeepAwakeHookContract.codexSessionEnded, .ended, 5), now: 100_040))
+        XCTAssertEqual(engine.sessions.values.first?.releaseAt, ended.releaseAt)
+        for task in ["turn", "late-compaction"] {
+            XCTAssertFalse(engine.receive(event(task, .running, 6, starts: true), now: 100_041))
+        }
+        XCTAssertFalse(engine.receive(event(KeepAwakeHookContract.codexSessionStarted, .idle, 3), now: 100_042))
+        XCTAssertTrue(engine.receive(event("turn", .completed, 7), now: 100_043), "Real late results may refine the unknown outcome.")
+        XCTAssertEqual(engine.sessions.values.first?.releaseAt, ended.releaseAt)
+        engine.receive(event(KeepAwakeHookContract.codexSessionStarted, .idle, 8), now: 100_044)
+        XCTAssertTrue(engine.receive(event("new-turn", .running, 9, starts: true), now: 100_045))
+        XCTAssertTrue(engine.evaluate(now: 200_000, environment: environment).hold)
+    }
+    func testSessionEndCannotCrossOwnerSourceOrAffectTerminalOutcomes() {
+        var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+        for source in sources {
+            for owner in ["root", "child"] {
+                for task in ["one", "two"] {
+                    engine.receive(.init(source: source, session: owner, sequence: 1, state: .running, taskID: task, startsTask: true), now: 0)
+                }
+            }
+        }
+        engine.receive(.init(source: "codex-desktop", session: "root", sequence: 2, state: .completed, taskID: "one"), now: 1)
+        XCTAssertFalse(engine.receive(.init(source: "claude-code", session: "root", sequence: 3, state: .ended,
+            taskID: KeepAwakeHookContract.codexSessionEnded, startsTask: false), now: 2))
+        engine.receive(.init(source: "codex-desktop", session: "root", sequence: 3, state: .ended,
+            taskID: KeepAwakeHookContract.codexSessionEnded, startsTask: false), now: 2)
+        XCTAssertEqual(engine.sessions["codex-desktop:root:one"]?.event.state, .completed)
+        XCTAssertEqual(engine.sessions["codex-desktop:root:two"]?.event.state, .ended)
+        XCTAssertEqual(engine.sessions.values.filter(\.isUnfinished).count, 6)
+        XCTAssertTrue(engine.evaluate(now: 1000, environment: .init(hardware: .desktop)).hold)
+        engine.disconnect(source: "codex-desktop")
+        XCTAssertTrue(engine.receive(.init(source: "codex-desktop", session: "root", sequence: 1, state: .running, taskID: "one"), now: 1001))
+    }
+    func testEndedRecapDoesNotClaimSuccessOrUnknownRunning() {
+        XCTAssertTrue(KeepAwakeRecap.State.ended.terminal)
+        XCTAssertEqual(KeepAwakeRecap.State.ended.title, "会话已结束")
+        XCTAssertNotEqual(KeepAwakeRecap.State.ended, .completed)
+    }
     private func hook(_ event: String, turn: Any = "PRIVATE-TURN-A") -> [String: Any] {
         ["session_id": "PRIVATE-THREAD", "turn_id": turn, "hook_event_name": event]
     }
@@ -195,13 +269,75 @@ final class KeepAwakeCodexContractTests: XCTestCase {
             XCTAssertNil(KeepAwakeHookContract.eventState(source: source, input: hook("SubagentStop")))
         }
     }
+    func testInterruptCleanupIdentifiesOnlyItsOwnCodexCompaction() throws {
+        for source in sources {
+            let cleanup = try XCTUnwrap(KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: hook("Interrupt")))
+            XCTAssertEqual(cleanup.taskID, KeepAwakeHookContract.metadata(source: source, input: hook("PreCompact")).taskID)
+            XCTAssertFalse(cleanup.startsTask)
+            for event in ["Stop", "SessionEnd", "PostCompact", "UserPromptSubmit", "agent-turn-complete"] {
+                XCTAssertNil(KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: hook(event)))
+            }
+            for invalid: Any in [NSNull(), "", " ", "line\nbreak", 42, String(repeating: "a", count: 1025)] {
+                XCTAssertNil(KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: hook("Interrupt", turn: invalid)))
+            }
+            var child = hook("Interrupt"); child["agent_id"] = "child"
+            XCTAssertNil(KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: child))
+            var ownerless = hook("Interrupt"); ownerless.removeValue(forKey: "session_id")
+            XCTAssertNil(KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: ownerless))
+        }
+        XCTAssertNil(KeepAwakeHookContract.interruptedCodexCompaction(source: "claude-code", input: hook("Interrupt")))
+    }
+    func testInterruptedCompactionReleasesOnlyAfterItsOwnThirtySecondGrace() throws {
+        for source in sources {
+            var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+            let environment = KeepAwakeEngine.Environment(hardware: .desktop)
+            let owner = try XCTUnwrap(KeepAwakeHookContract.codexHookSession(hook("Interrupt")))
+            let task = KeepAwakeHookContract.metadata(source: source, input: hook("UserPromptSubmit"))
+            let compact = KeepAwakeHookContract.metadata(source: source, input: hook("PreCompact"))
+            let cleanup = try XCTUnwrap(KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: hook("Interrupt")))
+            func event(_ id: String?, _ state: KeepAwakeEngine.TaskState, _ sequence: UInt64, starts: Bool = false) -> KeepAwakeEngine.Event {
+                .init(source: source, session: owner, sequence: sequence, state: state, taskID: id, startsTask: starts)
+            }
+            engine.receive(event(task.taskID, .running, 1, starts: true), now: 0)
+            engine.receive(event(compact.taskID, .running, 2, starts: true), now: 1)
+            engine.receive(event(task.taskID, .cancelled, 3), now: 10)
+            XCTAssertTrue(engine.evaluate(now: 100, environment: environment).hold, "Reproduces the old orphaned compaction.")
+            XCTAssertTrue(engine.receive(event(cleanup.taskID, .cancelled, 3), now: 101))
+            XCTAssertEqual(engine.sessions.values.filter(\.isUnfinished).count, 0)
+            XCTAssertTrue(engine.evaluate(now: 130.9, environment: environment).hold)
+            XCTAssertFalse(engine.evaluate(now: 131, environment: environment).hold)
+            // Repeated cancellation and a late PostCompact cannot extend the
+            // delay or permit a delayed PreCompact to revive this interrupted turn.
+            XCTAssertFalse(engine.receive(event(cleanup.taskID, .cancelled, 4), now: 132))
+            XCTAssertFalse(engine.receive(event(compact.taskID, .completed, 5), now: 133))
+            XCTAssertFalse(engine.receive(event(compact.taskID, .running, 6, starts: true), now: 134))
+            XCTAssertFalse(engine.evaluate(now: 134, environment: environment).hold)
+            XCTAssertEqual(engine.sessions.count, 2)
+        }
+    }
+    func testInterruptCleanupCannotCreateUnstartedCompactionOrFinishSiblings() throws {
+        var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+        let environment = KeepAwakeEngine.Environment(hardware: .desktop)
+        let source = "codex-desktop"
+        let task = try XCTUnwrap(KeepAwakeHookContract.metadata(source: source, input: hook("PreCompact")).taskID)
+        let other = try XCTUnwrap(KeepAwakeHookContract.metadata(source: source, input: hook("PreCompact", turn: "OTHER-TURN")).taskID)
+        XCTAssertFalse(engine.receive(.init(source: source, session: "owner", sequence: 1, state: .cancelled, taskID: task, startsTask: false), now: 0))
+        XCTAssertTrue(engine.sessions.isEmpty, "Ordinary Interrupts do not consume extra task slots.")
+        for (owner, producer, id) in [("owner", source, task), ("sibling", source, task), ("owner", "codex-cli", task), ("owner", source, other)] {
+            engine.receive(.init(source: producer, session: owner, sequence: 2, state: .running, taskID: id, startsTask: true), now: 1)
+        }
+        XCTAssertFalse(engine.receive(.init(source: source, session: "owner", sequence: 1, state: .cancelled, taskID: task), now: 2), "Older cleanup cannot overwrite a newer stage.")
+        engine.receive(.init(source: source, session: "owner", sequence: 3, state: .cancelled, taskID: task), now: 3)
+        XCTAssertEqual(engine.sessions.values.filter(\.isUnfinished).count, 3)
+        XCTAssertTrue(engine.evaluate(now: 100, environment: environment).hold)
+    }
     func testStopCanNeverFinishEvenWithTurnIDOrContinuationFlag() {
         for source in sources {
             for continued in [false, true] {
                 var input = hook("Stop"); input["stop_hook_active"] = continued
                 XCTAssertEqual(KeepAwakeHookContract.eventState(source: source, input: input), "idle")
             }
-            XCTAssertEqual(KeepAwakeHookContract.eventState(source: source, input: hook("SessionEnd")), "idle")
+            XCTAssertNil(KeepAwakeHookContract.eventState(source: source, input: hook("SessionEnd")))
         }
     }
     func testNotificationRequiresExactTypeAndBothBoundedStringIdentities() {

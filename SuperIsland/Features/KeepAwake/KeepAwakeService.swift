@@ -484,7 +484,9 @@ final class KeepAwakeService: ObservableObject {
         for event in mailbox.read() where connections.contains(event.source) {
             let previous = engine.sessions[event.storageKey]
             if engine.receive(event, now: now) {
-                if let session = engine.sessions[event.storageKey] { updateRecap(sessions: [session], complete: false) }
+                if event.taskID == KeepAwakeHookContract.codexSessionEnded {
+                    updateRecap(sessions: Array(engine.sessions.values.filter { $0.event.source == event.source && $0.event.session == event.session }), complete: false)
+                } else if let session = engine.sessions[event.storageKey] { updateRecap(sessions: [session], complete: false) }
                 acceptance.append("accepted-task-event", fields: ["source": event.source,
                     "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
                     "taskHash": event.taskID.map(KeepAwakeHookContract.anonymousIdentity) ?? "legacy",

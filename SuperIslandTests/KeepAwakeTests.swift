@@ -450,7 +450,7 @@ final class KeepAwakeEventToolTests: XCTestCase {
                 ("PostToolUse", "Bash", .running), ("PreToolUse", "request_user_input", .waiting),
                 ("PreCompact", "", .running), ("PostCompact", "", .idle),
                 ("SubagentStart", "", nil), ("SubagentStop", "", nil),
-                ("Stop", "", .idle), ("Interrupt", "", .idle), ("SessionEnd", "", .idle),
+                ("Stop", "", .idle), ("Interrupt", "", .idle), ("SessionEnd", "", nil),
                 ("UnknownFutureEvent", "", nil)
             ]
             for (name, tool, expected) in cases {

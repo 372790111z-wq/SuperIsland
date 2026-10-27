@@ -29,7 +29,9 @@ final class SystemFeedbackTests: XCTestCase {
     }
 
     func testNotchedFeedbackFitsOutsideCameraAndRestoresOriginalSize() throws {
-        let screen = try XCTUnwrap(NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }))
+        guard let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) else {
+            throw XCTSkip("当前显示环境未提供刘海屏幕；此项需在有刘海区域的屏幕上运行。")
+        }
         let state = AppState(synchronizesRuntimeEnergyState: false)
         state.updatePresentationContext(screen: screen)
         let original = state.contentSize(for: .compact)

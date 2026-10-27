@@ -3,9 +3,9 @@ import Foundation
 /// Read-only projection. This type has no power, task-control, IPC or UI calls.
 struct KeepAwakeRecap: Codable, Equatable {
     enum Kind: String, Codable { case user, background, unclassified }
-    enum State: String, Codable, CaseIterable { case running, waiting, unknown, completed, failed, cancelled
-        var terminal: Bool { [.completed, .failed, .cancelled].contains(self) }
-        var title: String { switch self { case .running: return "运行中"; case .waiting: return "等待确认"; case .unknown: return "状态未知"; case .completed: return "已完成"; case .failed: return "失败"; case .cancelled: return "已取消" } }
+    enum State: String, Codable, CaseIterable { case running, waiting, unknown, completed, failed, cancelled, ended
+        var terminal: Bool { [.completed, .failed, .cancelled, .ended].contains(self) }
+        var title: String { switch self { case .running: return "运行中"; case .waiting: return "等待确认"; case .unknown: return "状态未知"; case .completed: return "已完成"; case .failed: return "失败"; case .cancelled: return "已取消"; case .ended: return "会话已结束" } }
     }
     enum Power: String, Codable { case holding, waitingRelease, released, unconfirmed, notHeld, protectedStop
         var title: String { switch self { case .holding: return "继续保持"; case .waitingRelease: return "等待释放（开盖时）"; case .released: return "已确认释放"; case .unconfirmed: return "释放尚未确认"; case .notHeld: return "本次未启用保持"; case .protectedStop: return "保护已停止保持" } }

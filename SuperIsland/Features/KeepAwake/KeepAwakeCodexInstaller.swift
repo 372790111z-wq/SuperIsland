@@ -33,6 +33,7 @@ enum KeepAwakeCodexInstaller {
         var previousNotify: [String]?
         var hookCommand: String
         var sources: [String: String]?
+        var lifecycleVersion: Int? = 2
         var sourceCredentials: [String: String] {
             version == 1 ? ["codex-cli": notify[3]] : sources ?? [:]
         }
@@ -46,7 +47,7 @@ enum KeepAwakeCodexInstaller {
         var id: String
         var changes: [Change]
     }
-    static let events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "PreCompact", "PostCompact", "Stop", "Interrupt"]
+    static let events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "PreCompact", "PostCompact", "Stop", "Interrupt"]
     private static let stateName = ".superisland-keep-awake"
     private static let receiptName = "receipt.json"
     private static let maximumFileSize = 1_048_576
@@ -68,7 +69,8 @@ enum KeepAwakeCodexInstaller {
         let lock = try acquireLock(root: root)
         defer { flock(lock, LOCK_UN); close(lock) }
         try recover(root: root)
-        guard let receipt = try decodeReceipt(read(receiptURL), location: receiptURL) else { return }
+        let beforeReceipt = try read(receiptURL)
+        guard var receipt = try decodeReceipt(beforeReceipt, location: receiptURL) else { return }
         guard receipt.version == 2 else { return } // Legacy receipt migration remains an explicit install action.
         guard let before = try read(root.appendingPathComponent("hooks.json")),
               let object = try JSONSerialization.jsonObject(with: before) as? [String: Any],
@@ -86,14 +88,24 @@ enum KeepAwakeCodexInstaller {
                       $0["type"] as? String == "command" && $0["command"] as? String == receipt.hookCommand && $0["enabled"] as? Bool != false
                   } == true
               }) else { return }
-        let existingStart = hooks["SessionStart"] as? [[String: Any]] ?? []
-        if existingStart.contains(where: { group in
-            (group["hooks"] as? [[String: Any]])?.contains {
-                $0["type"] as? String == "command" && $0["command"] as? String == receipt.hookCommand
-            } == true
-        }) { return }
-        let after = try editHooks(before, removing: nil, adding: receipt.hookCommand, addingEvents: ["SessionStart"])
-        try commit(root: root, changes: [.init(name: "hooks.json", before: before, after: after)])
+        func hasOwned(_ event: String) -> Bool {
+            (hooks[event] as? [[String: Any]] ?? []).contains { group in
+                (group["hooks"] as? [[String: Any]])?.contains {
+                    $0["type"] as? String == "command" && $0["command"] as? String == receipt.hookCommand
+                } == true
+            }
+        }
+        var additions = hasOwned("SessionStart") ? [] : ["SessionStart"]
+        let upgradeEnd = (receipt.lifecycleVersion ?? 0) < 2
+        if upgradeEnd, !hasOwned("SessionEnd") { additions.append("SessionEnd") }
+        guard !additions.isEmpty || upgradeEnd else { return }
+        let after = additions.isEmpty ? before : try editHooks(before, removing: nil, adding: receipt.hookCommand, addingEvents: additions)
+        var changes = [Change(name: "hooks.json", before: before, after: after)]
+        if upgradeEnd {
+            receipt.lifecycleVersion = 2
+            changes.append(.init(name: receiptName, before: beforeReceipt, after: try encodeReceipt(receipt)))
+        }
+        try commit(root: root, changes: changes)
     }
 
     static func install(source: KeepAwakeSource, credential: URL, home: URL, tool: URL,
@@ -370,7 +382,7 @@ enum KeepAwakeCodexInstaller {
                         // Migration changes the owned command in place, keeping
                         // group/handler disables and third-party fields intact.
                         var copy = handler; copy["command"] = adding
-                        if event == "Interrupt" { copy["timeout"] = 3 }
+                        if ["Interrupt", "SessionEnd"].contains(event) { copy["timeout"] = 3 }
                         return copy
                     }
                     guard !kept.isEmpty else { return nil }
@@ -385,7 +397,7 @@ enum KeepAwakeCodexInstaller {
                     (group["hooks"] as? [[String: Any]])?.contains { $0["type"] as? String == "command" && $0["command"] as? String == adding } == true
                 }
                 // Preserve a user's disabled/edited copy instead of enabling it.
-                if !exists { groups.append(["matcher": "", "hooks": [["type": "command", "command": adding, "timeout": event == "Interrupt" ? 3 : 5]]]) }
+                if !exists { groups.append(["matcher": "", "hooks": [["type": "command", "command": adding, "timeout": ["Interrupt", "SessionEnd"].contains(event) ? 3 : 5]]]) }
                 hooks[event] = groups
             }
         }
