@@ -52,4 +52,31 @@ final class WindowFullScreenNativeStateTests: XCTestCase {
         XCTAssertFalse(unknown.matches(fullScreen: false, displayIdentifier: nil))
         XCTAssertFalse(unknown.matches(fullScreen: true, displayIdentifier: nil))
     }
+    func testActiveSpaceSnapshotSeparatesFullscreenAndDesktopDisplays() throws {
+        let snapshot = try XCTUnwrap(WindowActiveSpaceSnapshot.parse(displays: [
+            ["Display Identifier": "internal", "Current Space": ["type": 4]],
+            ["Display Identifier": "external", "Current Space": ["type": 0]]
+        ]))
+        XCTAssertFalse(snapshot.isDesktop(on: "INTERNAL"))
+        XCTAssertTrue(snapshot.isDesktop(on: "EXTERNAL"))
+        XCTAssertFalse(snapshot.isDesktop(on: nil))
+        XCTAssertFalse(snapshot.isDesktop(on: "missing"))
+    }
+
+    func testActiveSpaceSnapshotOnlyAdmitsConfirmedDesktopIncludingSharedSpaces() throws {
+        for type in [0, 4, 99] {
+            let shared = try XCTUnwrap(WindowActiveSpaceSnapshot.parse(displays: [
+                ["Display Identifier": "Main", "Current Space": ["type": type]]
+            ]))
+            XCTAssertEqual(shared.isDesktop(on: nil), type == 0)
+            XCTAssertEqual(shared.isDesktop(on: "some-display"), type == 0)
+        }
+        XCTAssertNil(WindowActiveSpaceSnapshot.parse(displays: []))
+        XCTAssertNil(WindowActiveSpaceSnapshot.parse(displays: [["Display Identifier": "x", "Current Space": [:]]]))
+        XCTAssertNil(WindowActiveSpaceSnapshot.parse(displays: [
+            ["Display Identifier": "x", "Current Space": ["type": 0]],
+            ["Display Identifier": "X", "Current Space": ["type": 4]]
+        ]))
+    }
+
 }
