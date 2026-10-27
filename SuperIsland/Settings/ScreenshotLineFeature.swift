@@ -1013,23 +1013,31 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     private func makePanel() {
         let panel = ScreenshotLinePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
-        panel.level = .floating; panel.hidesOnDeactivate = false; panel.ignoresMouseEvents = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        panel.level = fullscreenEnabled ? .screenSaver : .floating
+        panel.hidesOnDeactivate = false; panel.ignoresMouseEvents = true
+        // Floating panels can implicitly join other apps' fullscreen Spaces.
+        // OFF needs AppKit's explicit opt-out, not merely removal of auxiliary.
+        panel.collectionBehavior = fullscreenEnabled
+            ? [.canJoinAllSpaces, .canJoinAllApplications, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+            : [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenPrimary]
         panel.contentView = NSHostingView(rootView: ScreenshotLineOverlay(feature: self))
         self.panel = panel
-        updatePanelSpaces()
         placePanel()
     }
 
     private func updatePanelSpaces() {
-        guard let panel else { return }
-        let dismissFromFullscreen = !fullscreenEnabled && panel.collectionBehavior.contains(.canJoinAllApplications) && revealed
-        panel.collectionBehavior = fullscreenEnabled
-            ? [.canJoinAllSpaces, .canJoinAllApplications, .stationary, .ignoresCycle, .fullScreenAuxiliary]
-            : [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        panel.level = fullscreenEnabled ? .screenSaver : .floating
-        if dismissFromFullscreen { hideLine() }
-        else if fullscreenEnabled && revealed { panel.orderFrontRegardless() }
+        guard let oldPanel = panel,
+              oldPanel.collectionBehavior.contains(.fullScreenAuxiliary) != fullscreenEnabled else { return }
+        // AppKit can retain an existing fullscreen Space membership even after
+        // changing collectionBehavior and ordering the panel out/in. Recreate
+        // only this overlay when the role changes; never restart the feature.
+        animationGeneration += 1
+        if !fullscreenEnabled && revealed { hideLine() }
+        oldPanel.orderOut(nil)
+        oldPanel.contentView = nil
+        panel = nil
+        makePanel()
+        if fullscreenEnabled && revealed { panel?.orderFrontRegardless() }
     }
 
     private func placePanel() {
