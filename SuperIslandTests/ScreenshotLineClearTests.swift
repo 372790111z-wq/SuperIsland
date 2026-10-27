@@ -89,6 +89,82 @@ final class ScreenshotLineClearTests: XCTestCase {
     }
     @MainActor private func wait(_ line: ScreenshotLineFeature) async { await line.clearTask?.value }
 
+    @MainActor func testFullscreenOptOutSurvivesRevealAndPreferenceRoundTrip() async throws {
+        let f = try Fixture(); defer { f.dispose() }
+        f.defaults.set("none", forKey: "screenshotLine.shortcut")
+        let existing = Set(NSApp.windows.map(ObjectIdentifier.init))
+        let line = f.line()
+        line.start(appName: "SC1FullscreenPolicyTest")
+        defer {
+            line.stop()
+            NSApp.windows.filter { !existing.contains(ObjectIdentifier($0)) && String(describing: type(of: $0)) == "ScreenshotLinePanel" }
+                .forEach { $0.orderOut(nil); $0.contentView = nil }
+        }
+        func currentPanel() throws -> NSWindow {
+            try XCTUnwrap(NSApp.windows.first {
+                !existing.contains(ObjectIdentifier($0)) && String(describing: type(of: $0)) == "ScreenshotLinePanel" && $0.contentView != nil
+            })
+        }
+        var panel = try currentPanel()
+        XCTAssertFalse(line.fullscreenEnabled)
+        XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenPrimary), "OFF must explicitly opt out of joining other apps' fullscreen Spaces; an implicit floating-panel role still joins them")
+        XCTAssertFalse(panel.canBecomeKey)
+        XCTAssertFalse(panel.canBecomeMain)
+        line.toggleLine()
+        XCTAssertTrue(line.lineExpanded)
+        XCTAssertTrue(panel.isVisible, "Opting out of fullscreen must preserve ordinary desktop presentation")
+        XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenPrimary))
+
+        let original = panel
+        line.fullscreenEnabled = true
+        panel = try currentPanel()
+        XCTAssertFalse(panel === original, "A role change must not reuse the old Space membership")
+        XCTAssertFalse(original.isVisible)
+        XCTAssertNil(original.contentView)
+        XCTAssertTrue(panel.collectionBehavior.contains(.canJoinAllApplications))
+        XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenAuxiliary))
+        XCTAssertFalse(panel.collectionBehavior.contains(.fullScreenPrimary))
+        XCTAssertEqual(panel.level, .screenSaver)
+        let fullscreenPanel = panel
+        line.fullscreenEnabled = false
+        panel = try currentPanel()
+        XCTAssertFalse(panel === fullscreenPanel)
+        XCTAssertFalse(fullscreenPanel.isVisible, "The old fullscreen overlay must leave synchronously")
+        XCTAssertNil(fullscreenPanel.contentView)
+        XCTAssertFalse(panel.isVisible)
+        XCTAssertFalse(line.lineExpanded, "Disabling fullscreen dismisses an already-revealed overlay")
+        XCTAssertFalse(f.defaults.bool(forKey: "screenshotLine.fullscreen"))
+        XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenPrimary))
+        XCTAssertFalse(panel.collectionBehavior.contains(.fullScreenAuxiliary))
+        XCTAssertFalse(panel.collectionBehavior.contains(.canJoinAllApplications))
+        XCTAssertEqual(panel.level, .floating)
+        // A reveal arriving during the old dismiss animation must not undo OFF.
+        line.toggleLine()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertTrue(line.lineExpanded)
+        XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenPrimary))
+        XCTAssertEqual(line.items, [])
+    }
+
+    @MainActor func testSavedFullscreenPreferenceAppliesToFirstOverlay() throws {
+        let f = try Fixture(); defer { f.dispose() }
+        f.defaults.set("none", forKey: "screenshotLine.shortcut")
+        f.defaults.set(true, forKey: "screenshotLine.fullscreen")
+        let existing = Set(NSApp.windows.map(ObjectIdentifier.init))
+        let line = f.line(); line.start(appName: "SC1SavedFullscreenTest")
+        let panel = try XCTUnwrap(NSApp.windows.first {
+            !existing.contains(ObjectIdentifier($0)) && String(describing: type(of: $0)) == "ScreenshotLinePanel"
+        })
+        defer { line.stop(); panel.contentView = nil }
+        XCTAssertTrue(line.fullscreenEnabled)
+        XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenAuxiliary))
+        XCTAssertTrue(panel.collectionBehavior.contains(.canJoinAllApplications))
+        XCTAssertFalse(panel.collectionBehavior.contains(.fullScreenPrimary))
+        XCTAssertEqual(panel.level, .screenSaver)
+        XCTAssertFalse(panel.isVisible, "Restoring ON does not itself reveal the overlay")
+    }
+
     @MainActor func testAllKindsAndOffPageItemsClearWithoutTouchingUnlistedFilesOrClipboard() async throws {
         let f = try Fixture(); defer { f.dispose() }
         for i in 0..<14 { _ = try f.file("sample-\(i).png", folder: i % 2 == 0 ? "Screenshots" : "Clipboard") }
@@ -593,9 +669,19 @@ final class ScreenshotLineClearTests: XCTestCase {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 1000), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.contentView = host
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
-            try await Task.sleep(for: .milliseconds(100)); try capture(host, name: "settings-\(Int(width))")
-            let ids = identifiers(window)
-            XCTAssertTrue(ids.contains("data-annotation-id=si.sc.clear-ask-before"), "Native settings must expose the new switch")
+            // SwiftUI's first accessibility tree can arrive after its first
+            // paint under a whole-suite run. Wait for the actual control, not
+            // a fixed 100 ms delay; a missing control still fails below.
+            var ids = Set<String>()
+            let deadline = Date().addingTimeInterval(2)
+            repeat {
+                host.layoutSubtreeIfNeeded()
+                ids = identifiers(window)
+                if ids.contains("data-annotation-id=si.sc.clear-ask-before") { break }
+                try await Task.sleep(for: .milliseconds(25))
+            } while Date() < deadline
+            try capture(host, name: "settings-\(Int(width))")
+            XCTAssertTrue(ids.contains("data-annotation-id=si.sc.clear-ask-before"), "Native settings must expose the switch at width \(width)")
             viewIDs[String(Int(width))] = ids.sorted()
             window.close()
         }
