@@ -43,3 +43,28 @@ struct WindowFullScreenSpaceSnapshot {
         return matches.count == 1 ? matches[0] : nil
     }
 }
+
+/// Current Space type per display, independent of any overlay's sticky window
+/// membership. Unknown/malformed context never grants desktop-only overlays.
+struct WindowActiveSpaceSnapshot {
+    let typesByDisplay: [String: Int]
+
+    static func parse(displays: [[String: Any]]) -> Self? {
+        guard !displays.isEmpty, displays.count <= 32 else { return nil }
+        var types: [String: Int] = [:]
+        for display in displays {
+            guard let name = display["Display Identifier"] as? String, !name.isEmpty,
+                  let current = display["Current Space"] as? [String: Any],
+                  let type = current["type"] as? NSNumber,
+                  types[name.uppercased()] == nil else { return nil }
+            types[name.uppercased()] = type.intValue
+        }
+        return Self(typesByDisplay: types)
+    }
+
+    func isDesktop(on displayIdentifier: String?) -> Bool {
+        if typesByDisplay.count == 1, let shared = typesByDisplay["MAIN"] { return shared == 0 }
+        guard let displayIdentifier else { return false }
+        return typesByDisplay[displayIdentifier.uppercased()] == 0
+    }
+}

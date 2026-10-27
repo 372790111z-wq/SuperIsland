@@ -287,6 +287,9 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     private let defaults: UserDefaults
     private let supportOverride: URL?
     private let pasteboard: NSPasteboard
+    private let readSpaceSnapshot: () -> WindowActiveSpaceSnapshot?
+    private var spaceSnapshot: WindowActiveSpaceSnapshot?
+    private var displayIdentifiers: [CGDirectDisplayID: String] = [:]
     private let readCapture: (String) -> ScreenshotLinePrefs.Value
     private let writeCapture: (String, ScreenshotLinePrefs.Value) -> Void
     private var watchGeneration = 0
@@ -336,8 +339,10 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
          clearTrash: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) },
          clearSave: @escaping @Sendable (Data, URL) throws -> Void = ScreenshotLineClearTransaction.durableWrite,
          clearPreferenceWriter: ((Bool) throws -> Void)? = nil,
-         clearIndexWriter: ((Data, URL) throws -> Void)? = nil) {
+         clearIndexWriter: ((Data, URL) throws -> Void)? = nil,
+         readSpaceSnapshot: @escaping () -> WindowActiveSpaceSnapshot? = { WindowServerInventoryService.shared.activeSpaceSnapshot() }) {
         self.defaults = defaults
+        self.readSpaceSnapshot = readSpaceSnapshot
         self.clearTrash = clearTrash
         self.clearSave = clearSave
         self.clearPreferenceWriter = clearPreferenceWriter
@@ -396,7 +401,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
             retryClearRecovery()
         } else { restoreIndex() }
         restoreInterruptedTakeover()
-        if installUI { makePanel(); makeMenu() }
+        if installUI { readCurrentSpaceContext(); makePanel(); makeMenu() }
         refreshRuntime()
         guard installUI else { return }
         menuObserver = objectWillChange.debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
@@ -413,10 +418,10 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
             return event
         }
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.placePanel() }
+            MainActor.assumeIsolated { self?.refreshSpaceVisibility() }
         }
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.placePanel() }
+            MainActor.assumeIsolated { self?.refreshSpaceVisibility() }
         }
     }
 
@@ -1037,7 +1042,36 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         oldPanel.contentView = nil
         panel = nil
         makePanel()
+        refreshSpaceVisibility()
         if fullscreenEnabled && revealed { panel?.orderFrontRegardless() }
+    }
+
+    private var pointerScreen: NSScreen? {
+        let pointer = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(pointer, $0.frame, false) } ?? NSScreen.main
+    }
+
+    private func permitsPresentation(on screen: NSScreen?) -> Bool {
+        if fullscreenEnabled { return true }
+        let displayID = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        return spaceSnapshot?.isDesktop(on: displayID.flatMap { displayIdentifiers[$0.uint32Value] }) == true
+    }
+
+    private func readCurrentSpaceContext() {
+        spaceSnapshot = readSpaceSnapshot()
+        displayIdentifiers = [:]
+        for screen in NSScreen.screens {
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                  let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value) else { continue }
+            displayIdentifiers[number.uint32Value] = CFUUIDCreateString(nil, uuid.takeRetainedValue()) as String
+        }
+    }
+
+    private func refreshSpaceVisibility() {
+        readCurrentSpaceContext()
+        menuBarSince = nil
+        placePanel()
+        if revealed && !permitsPresentation(on: panel?.screen ?? pointerScreen) { hideLine(immediate: true) }
     }
 
     private func placePanel() {
@@ -1051,6 +1085,11 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
 
     private func reveal(peek: Bool = false) {
         guard started, isEnabled else { return }
+        if !fullscreenEnabled { readCurrentSpaceContext() }
+        guard permitsPresentation(on: pointerScreen) else {
+            if revealed { hideLine(immediate: true) }
+            return
+        }
         placePanel()
         guard let panel else { return }
         animationGeneration += 1
@@ -1064,17 +1103,20 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         objectWillChange.send()
     }
 
-    private func hideLine() {
+    private func hideLine(immediate: Bool = false) {
         revealed = false; pinned = false
         panel?.ignoresMouseEvents = true
         animationGeneration += 1
         let generation = animationGeneration
-        withAnimation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeIn(duration: 0.22)) {
+        withAnimation(immediate || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeIn(duration: 0.22)) {
             lineExpanded = false
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + (NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.24)) { [weak self] in
-            guard let self, self.animationGeneration == generation, !self.revealed else { return }
-            self.panel?.orderOut(nil)
+        if immediate { panel?.orderOut(nil) }
+        else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.24)) { [weak self] in
+                guard let self, self.animationGeneration == generation, !self.revealed else { return }
+                self.panel?.orderOut(nil)
+            }
         }
         objectWillChange.send()
     }
@@ -1140,6 +1182,11 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         guard let panel else { return }
         let pointer = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) }) ?? NSScreen.main else { return }
+        guard permitsPresentation(on: screen) else {
+            menuBarSince = nil
+            if revealed { hideLine(immediate: true) }
+            return
+        }
         let menuStart = min(screen.visibleFrame.maxY, screen.frame.maxY - 4)
         let inMenu = pointer.y >= menuStart && pointer.y <= screen.frame.maxY
             && pointer.x >= screen.frame.minX && pointer.x <= screen.frame.maxX

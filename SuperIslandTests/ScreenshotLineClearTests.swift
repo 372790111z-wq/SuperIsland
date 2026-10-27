@@ -58,7 +58,8 @@ final class ScreenshotLineClearTests: XCTestCase {
         func store() -> ScreenshotLineClearTransaction {
             ScreenshotLineClearTransaction(support: root, roots: [root.appendingPathComponent("Screenshots"), root.appendingPathComponent("Clipboard")], trash: { [io] in try io.move($0) }, save: { [io] in try io.save($0, $1) })
         }
-        func line(preferenceFailure: Bool = false, indexInjection: Bool = false) -> ScreenshotLineFeature {
+        func line(preferenceFailure: Bool = false, indexInjection: Bool = false,
+                  readSpaceSnapshot: @escaping () -> WindowActiveSpaceSnapshot? = { .init(typesByDisplay: ["MAIN": 0]) }) -> ScreenshotLineFeature {
             ScreenshotLineFeature(defaults: defaults, supportDirectory: root, pasteboard: pasteboard,
                 readCapture: { _ in .init() }, writeCapture: { _, _ in },
                 clearTrash: { [io] in try io.move($0) }, clearSave: { [io] in try io.save($0, $1) },
@@ -66,7 +67,7 @@ final class ScreenshotLineClearTests: XCTestCase {
                 clearIndexWriter: indexInjection ? { [unowned self] data, url in
                     if failIndex { throw POSIXError(.ENOSPC) }
                     try ScreenshotLineClearTransaction.durableWrite(data, url)
-                } : nil)
+                } : nil, readSpaceSnapshot: readSpaceSnapshot)
         }
         func exists(_ item: ScreenshotLineItem) -> Bool { FileManager.default.fileExists(atPath: item.path) }
         func dispose() { defaults.removePersistentDomain(forName: name); pasteboard.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
@@ -145,6 +146,51 @@ final class ScreenshotLineClearTests: XCTestCase {
         XCTAssertTrue(line.lineExpanded)
         XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenPrimary))
         XCTAssertEqual(line.items, [])
+    }
+
+    @MainActor func testFullscreenOffRejectsRevealAndSpaceChangeRetractsImmediately() async throws {
+        let f = try Fixture(); defer { f.dispose() }
+        f.defaults.set("none", forKey: "screenshotLine.shortcut")
+        var snapshot: WindowActiveSpaceSnapshot? = .init(typesByDisplay: ["MAIN": 0])
+        var reads = 0
+        let line = f.line(readSpaceSnapshot: { reads += 1; return snapshot })
+        let existing = Set(NSApp.windows.map(ObjectIdentifier.init))
+        line.start(appName: "SC1SpaceGateTest")
+        defer {
+            line.stop()
+            NSApp.windows.filter { !existing.contains(ObjectIdentifier($0)) && String(describing: type(of: $0)) == "ScreenshotLinePanel" }
+                .forEach { $0.orderOut(nil); $0.contentView = nil }
+        }
+        func overlay() throws -> NSWindow { try XCTUnwrap(NSApp.windows.first {
+            !existing.contains(ObjectIdentifier($0)) && String(describing: type(of: $0)) == "ScreenshotLinePanel" && $0.contentView != nil
+        }) }
+        line.toggleLine()
+        XCTAssertTrue(try overlay().isVisible)
+        snapshot = .init(typesByDisplay: ["MAIN": 4])
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        XCTAssertFalse(line.lineExpanded)
+        XCTAssertFalse(try overlay().isVisible, "Space changes must retract without the ordinary hide animation")
+        for _ in 0..<3 { line.toggleLine(); XCTAssertFalse(line.lineExpanded); XCTAssertFalse(try overlay().isVisible) }
+        let settledReads = reads
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(reads, settledReads, "Pointer ticks must use the Space cache, not poll WindowServer")
+
+        line.fullscreenEnabled = true
+        line.toggleLine()
+        XCTAssertTrue(line.lineExpanded)
+        XCTAssertTrue(try overlay().isVisible)
+        line.fullscreenEnabled = false
+        line.toggleLine()
+        XCTAssertFalse(line.lineExpanded)
+        XCTAssertFalse(try overlay().isVisible)
+        snapshot = nil
+        line.toggleLine()
+        XCTAssertFalse(line.lineExpanded, "Unknown Space context must not grant fullscreen opt-out visibility")
+        snapshot = .init(typesByDisplay: ["MAIN": 0])
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        line.toggleLine()
+        XCTAssertTrue(line.lineExpanded)
+        XCTAssertTrue(try overlay().isVisible, "Returning to an ordinary desktop restores presentation")
     }
 
     @MainActor func testSavedFullscreenPreferenceAppliesToFirstOverlay() throws {

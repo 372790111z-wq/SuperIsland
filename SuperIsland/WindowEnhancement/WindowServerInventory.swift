@@ -1463,6 +1463,16 @@ final class WindowServerInventoryService: @unchecked Sendable {
         return WindowFullScreenSpaceSnapshot.parse(displays: displays, windowSpaces: spaces)
     }
 
+    /// Event-driven overlay visibility read. Do not infer fullscreen from a
+    /// maximized window's geometry or from the overlay's own Space membership.
+    func activeSpaceSnapshot() -> WindowActiveSpaceSnapshot? {
+        guard let resolvers = Self.skyLightResolvers else { return nil }
+        let connection = resolvers.mainConnectionID()
+        guard connection != 0,
+              let displays = resolvers.copyManagedDisplaySpaces(connection)?.takeRetainedValue() as? [[String: Any]] else { return nil }
+        return WindowActiveSpaceSnapshot.parse(displays: displays)
+    }
+
     private struct SkyLightResolvers {
         let mainConnectionID: WindowInventoryCGSMainConnectionID
         let getWindowOwner: WindowInventoryCGSGetWindowOwner
