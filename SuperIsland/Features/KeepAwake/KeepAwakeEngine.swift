@@ -25,8 +25,8 @@ struct KeepAwakeEngine: Equatable {
         var thermalUnsafe = false
     }
     enum TaskState: String, Codable {
-        case running, waiting, idle, completed, failed, cancelled
-        var isTerminal: Bool { self == .completed || self == .failed || self == .cancelled }
+        case running, waiting, idle, completed, failed, cancelled, ended
+        var isTerminal: Bool { self == .completed || self == .failed || self == .cancelled || self == .ended }
     }
     struct Event: Codable, Equatable {
         var source: String
@@ -64,6 +64,8 @@ struct KeepAwakeEngine: Equatable {
     private(set) var protection: String?
     private(set) var sessions: [String: Session] = [:]
     private(set) var capacityExceededSources: Set<String> = []
+    private struct Lifecycle: Equatable { var sequence: UInt64; var closed: Bool }
+    private var lifecycles: [String: Lifecycle] = [:]
     // Tombstones remain for the connection lifetime, preventing delayed replay.
     // A new connection resets the source generation and clears its tombstones.
     static let sessionLimit = 1024
@@ -113,6 +115,7 @@ struct KeepAwakeEngine: Equatable {
     }
     mutating func disconnect(source: String) {
         sessions = sessions.filter { $0.value.event.source != source }
+        lifecycles = lifecycles.filter { !$0.key.hasPrefix(source + ":") }
         capacityExceededSources.remove(source)
     }
     @discardableResult
@@ -125,8 +128,42 @@ struct KeepAwakeEngine: Equatable {
                   !taskID.contains(":"), !taskID.contains("\n"),
                   !taskID.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return false }
         }
+        let owner = event.source + ":" + event.session
+        if let taskID = event.taskID, [KeepAwakeHookContract.codexSessionStarted, KeepAwakeHookContract.codexSessionEnded].contains(taskID) {
+            guard KeepAwakeHookContract.codexSources.contains(event.source), event.startsTask == false,
+                  event.sequence > (lifecycles[owner]?.sequence ?? 0) else { return false }
+            let closed = event.taskID == KeepAwakeHookContract.codexSessionEnded
+            guard closed ? event.state == .ended : event.state == .idle else { return false }
+            guard lifecycles[owner] != nil || lifecycles.count < Self.sessionLimit else {
+                capacityExceededSources.insert(event.source); return false
+            }
+            lifecycles[owner] = Lifecycle(sequence: event.sequence, closed: closed)
+            if closed {
+                for key in sessions.keys where sessions[key]?.event.source == event.source && sessions[key]?.event.session == event.session {
+                    guard var task = sessions[key], task.isUnfinished, event.sequence > task.event.sequence else { continue }
+                    task.event.state = .ended; task.event.sequence = event.sequence; task.event.startsTask = false
+                    task.lastSeen = now; task.releaseAt = now + Self.releaseDelay
+                    sessions[key] = task
+                }
+            }
+            return true
+        }
+        guard event.state != .ended else { return false } // Ended is a session boundary, not a claimed result.
         let key = event.storageKey
+        if let lifecycle = lifecycles[owner] {
+            guard event.sequence > lifecycle.sequence else { return false }
+            // A delayed explicit outcome may refine an ended task, but cannot
+            // create work or revive any stage in a closed session.
+            if lifecycle.closed && (!event.state.isTerminal || sessions[key] == nil) { return false }
+        }
         let previous = sessions[key]
+        if KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) {
+            // Interrupt cleanup must not invent an auxiliary card for every
+            // ordinary turn. An interrupted compaction cannot restart later;
+            // completed compactions can still repeat in a non-interrupted turn.
+            if event.state == .cancelled && previous == nil { return false }
+            if previous?.event.state == .cancelled { return false }
+        }
         guard previous == nil || event.sequence > previous!.event.sequence else { return false }
         guard previous != nil || sessions.count < Self.sessionLimit else {
             // Missing a newly reported running task must not silently permit

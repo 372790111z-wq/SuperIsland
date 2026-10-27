@@ -2,6 +2,33 @@ import XCTest
 @testable import SuperIsland
 
 final class KeepAwakeCodexInstallerTests: XCTestCase {
+    func testOldOwnedReceiptAddsSessionEndOnceWithoutChangingNotifyOrThirdPartyHooks() throws {
+        let f = try Fixture(); defer { f.cleanup() }
+        try json(["notify": [String]()]).write(to: f.config)
+        try install(f)
+        var receipt = try object(f.receipt); receipt.removeValue(forKey: "lifecycleVersion")
+        try json(receipt).write(to: f.receipt)
+        var root = try object(f.hooks), hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        hooks["SessionEnd"] = [["hooks": [["type":"command", "command":"/other/end", "enabled":false]]]]
+        root["hooks"] = hooks; try json(root).write(to: f.hooks)
+        let config = try Data(contentsOf: f.config)
+        try KeepAwakeCodexInstaller.refreshOwnedLifecycleHooks(home: f.home)
+        XCTAssertEqual(commands(try object(f.hooks), event: "SessionEnd").count, 2)
+        XCTAssertEqual(commands(try object(f.hooks), event: "SessionEnd").first, "/other/end")
+        XCTAssertEqual(try object(f.receipt)["lifecycleVersion"] as? Int, 2)
+        XCTAssertEqual(try Data(contentsOf: f.config), config)
+        let installed = try Data(contentsOf: f.hooks), stableReceipt = try Data(contentsOf: f.receipt)
+        try KeepAwakeCodexInstaller.refreshOwnedLifecycleHooks(home: f.home)
+        XCTAssertEqual(try Data(contentsOf: f.hooks), installed)
+        // A user can subsequently remove the new event; migration is not a
+        // permanent watchdog that silently undoes that explicit edit.
+        root = try object(f.hooks); hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        hooks.removeValue(forKey: "SessionEnd"); root["hooks"] = hooks; try json(root).write(to: f.hooks)
+        let edited = try Data(contentsOf: f.hooks)
+        try KeepAwakeCodexInstaller.refreshOwnedLifecycleHooks(home: f.home)
+        XCTAssertEqual(try Data(contentsOf: f.hooks), edited)
+        XCTAssertEqual(try Data(contentsOf: f.receipt), stableReceipt)
+    }
     func testLifecycleRefreshAddsOnlyOwnedSessionStartAndPreservesNotifyTrustAndDisabledHandlers() throws {
         let f = try Fixture(); defer { f.cleanup() }
         try json(["notify": [String](), "other": true]).write(to: f.config)

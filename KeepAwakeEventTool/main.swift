@@ -66,7 +66,7 @@ func run(arguments args: [String] = CommandLine.arguments,
         let proof = KeepAwakeCodexSessionProof(credential: URL(fileURLWithPath: credentialPath))
         if let identity = KeepAwakeHookContract.codexRootSessionProof(payload) {
             try proof.remember(identity)
-            return // Opening a session is not a running task.
+            if KeepAwakeHookContract.codexSessionControl(source: source, input: payload) == nil { return }
         }
         if !KeepAwakeHookContract.codexTaskInputIsIdentified(payload, verifiedSession: false) {
             let session = (payload["session_id"] as? String).map(KeepAwakeHookContract.anonymousIdentity)
@@ -88,11 +88,27 @@ func run(arguments args: [String] = CommandLine.arguments,
             session = KeepAwakeHookContract.anonymousIdentity(sessionID)
         }
     }
-    let event = Event(source: credential.source, session: session, sequence: mach_continuous_time(), state: state,
-                      taskID: metadata.taskID, startsTask: metadata.startsTask)
+    var events = [Event(source: credential.source, session: session, sequence: mach_continuous_time(), state: state,
+                        taskID: metadata.taskID, startsTask: metadata.startsTask)]
+    if (isHook || isAutoHook),
+       let compaction = KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: payload) {
+        // Exact source/owner/turn only; this never cancels a sibling or a real
+        // background process. The consumer ignores an auxiliary not started.
+        events.append(Event(source: credential.source, session: session, sequence: events[0].sequence,
+                            state: "cancelled", taskID: compaction.taskID, startsTask: false))
+    }
+    for event in events {
+        if try deliver(event, credential: credential, key: key),
+           event.taskID == KeepAwakeHookContract.codexSessionEnded {
+            try KeepAwakeCodexSessionProof(credential: URL(fileURLWithPath: credentialPath)).forget(event.session)
+        }
+    }
+}
+@discardableResult
+func deliver(_ event: Event, credential: Credential, key: Data) throws -> Bool {
     let issuedAt = Date().timeIntervalSince1970
     let bytes = KeepAwakeHookContract.authenticatedBytes(generation: credential.generation, source: event.source,
-        session: event.session, sequence: event.sequence, state: state, issuedAt: issuedAt,
+        session: event.session, sequence: event.sequence, state: event.state, issuedAt: issuedAt,
         taskID: event.taskID, startsTask: event.startsTask)
     let mac = Data(HMAC<SHA256>.authenticationCode(for: bytes, using: SymmetricKey(data: key))).base64EncodedString()
     let envelope = Envelope(generation: credential.generation, event: event, issuedAt: issuedAt, mac: mac)
@@ -100,12 +116,13 @@ func run(arguments args: [String] = CommandLine.arguments,
     let attrs = try FileManager.default.attributesOfItem(atPath: directory.path)
     guard attrs[.type] as? FileAttributeType == .typeDirectory,
           (attrs[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
-          (attrs[.posixPermissions] as? NSNumber)?.uint16Value == 0o700 else { return }
+          (attrs[.posixPermissions] as? NSNumber)?.uint16Value == 0o700 else { return false }
     // A crashed/stopped consumer must not allow a long-lived source to fill disk.
-    guard try FileManager.default.contentsOfDirectory(atPath: directory.path).count < 512 else { return }
+    guard try FileManager.default.contentsOfDirectory(atPath: directory.path).count < 512 else { return false }
     let output = directory.appendingPathComponent(UUID().uuidString + ".json")
     try JSONEncoder().encode(envelope).write(to: output, options: .atomic)
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
+    return true
 }
 func currentExecutablePath() -> String {
     var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
