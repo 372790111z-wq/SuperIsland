@@ -118,3 +118,20 @@ Qoder / WorkBuddy 的事件父进程可归属对应桌面应用。ZCode 重写�
 隐私与证据：只分析自有 hook 配置、随附应用协议实现、匿名任务事件和功耗。静态随附代码证据不等于真实 IDE 验收；本轮证据存于忽略的 build/WorkBuddyZCodeRepair.noindex，用户旧挂绳内容、其他任务、系统信任与权限保持原状。
 
 首轮安装后的真实 WorkBuddy 新会话揭示补充边界：新 root 可尚无 durable storeId，agent_id 字段缺省。20261028100521 收到了实际开始、60 秒工具和两条 idle，未建立 actor 证明，未算通过。后续修正允许明确开始的同会话/同轮次在 actor 字段始终缺省时建立证明；空字符串、null、非法类型不是缺省；一旦出现其他 actor 或角色不一致仍不接受完成。新增真实首轮形态的回归，并将失败证据保留在独立文件，后续候选需重新备份安装实测。
+
+
+## 2026-10-28 ZCode 精确轮次终态与 WorkBuddy 压缩收尾复核
+
+ZCode 在 Stop 及后续继续全部完成后，向本机 `turn_usage` 写入精确 `(session_id,turn_id)` 的终态。用户明确允许只读五列：session_id、turn_id、status、started_at、completed_at。新增读取器只匹配已认证开始的匿名身份，不读取其他业务列/表，不保存原始 ID；无行、未知状态、错误、路径覆盖或结构变化保持未知。只读 SQLite、同用户普通文件/侧文件、符号链接拒绝、SQL 授权器列白名单、运行预算及异步五秒调度共同限制访问和开销。断开/关闭后的迟到结果不能重建任务；未进入查询快照的新轮次不能被旧结果结束。
+
+11 项读取专项与包含服务调度的 20 项回归通过；全套 1131 项、2 项原有跳过、零失败。编译后的生产读取代码只读核对之前获授权的真实 ZCode sleep60 测试，精确读到 completed，单次约10毫秒。上述证明是代码/状态读取证据，尚非已安装服务自动释放证据。
+
+WorkBuddy 桌面真正完成信号在 ACP executePrompt 完整运行及事件转发之后，但当前未找到可安全被动接入的精确请求生命周期通道。会话数据库状态可由手动/恢复流程改写且缺少 generation，普通历史没有通用终态；实时 bus 无生命周期字段过滤，且要求绑定 ACP 会话。新建/恢复连接会初始化和绑定会话，不能保证不影响现有任务，因此未接管或接入。压缩后 FinalStop 仍维持未知，不能称完整修复。
+
+本检查点保存源码修改及 build/WorkBuddyZCodeRepair.noindex/FinalSettlement 证据；未构建/安装新包，当前本机仍为20261028101328/PID71143。未变更来源配置、信任、权限或其他任务，未通过全任务自然释放或物理合盖验收。
+
+
+继续静态调查补充：已明确构造乱序反例——压缩内部Stop聚合晚到，FinalStop从恢复后的可变session取身份，故SessionStart(compact)或恢复后首个工具不能解除压缩保护。新增反例与相关48项回归零失败，仅证明保守安全性。只读HTTP/SDK状态不含完整dispatch屏障；强ACP结果事件仅发远端Galileo，当前没有不重定向其他遥测的本地独立导出入口。完整调查与最小安全出口要求见build/WorkBuddyZCodeRepair.noindex/SafeWorkBuddySettlement；WorkBuddy完整收尾、安装及自然释放仍未通过。未改WorkBuddy配置、信任、任务或现有App。
+
+
+用户随后调整交付范围：WorkBuddy问题暂缓，保留保守保护且停止监测WorkBuddy；单独交付ZCode修复，测试后备份安装并验自然释放。已通过当前App原生来源页断开WorkBuddy，14条自有hooks移除，非自有hooks及其他设置语义回读不变，原配置0600备份；此动作不是任务完成或自动释放证据。新阶段为build/WorkBuddyZCodeRepair.noindex/ZCodeOnlyValidation。用户另要求其余监测任务结束后请求系统休眠；请求与实际睡眠分别验收，常规行为范围另行澄清。
