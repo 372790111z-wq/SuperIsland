@@ -113,11 +113,12 @@ struct KeepAwakeWorkBuddyTurnProof {
         let event = input["hook_event_name"] as? String
         let actor = KeepAwakeHookContract.workBuddyActor(input)
         let role = KeepAwakeHookContract.workBuddyRole(input)
+        let actorIsWellFormed = KeepAwakeHookContract.workBuddyActorIsWellFormed(input)
         if ["UserPromptSubmit", "PreCompact", "PostCompact"].contains(event ?? ""),
            store.turns[turn] == nil, store.turns.count >= 4096 { store.overflowed = true }
         if event == "UserPromptSubmit", store.turns[turn] == nil,
            KeepAwakeHookContract.metadata(source: "workbuddy-desktop", input: input).startsTask,
-           let actor, store.turns.count < 4096, !store.overflowed {
+           actorIsWellFormed, store.turns.count < 4096, !store.overflowed {
             store.turns[turn] = Turn(actor: actor, role: role)
         }
         if ["PreCompact", "PostCompact"].contains(event ?? ""), store.turns[turn] == nil, store.turns.count < 4096 {
@@ -129,11 +130,11 @@ struct KeepAwakeWorkBuddyTurnProof {
             // On first use the prompt hook may run before the actor's role is
             // assigned. Only its own tool hook, before any compaction, can bind it.
             if event == "PreToolUse", !admission.compacted, admission.role == nil,
-               actor == admission.actor, let role { admission.role = role }
+               actorIsWellFormed, actor == admission.actor, let role { admission.role = role }
             store.turns[turn] = admission
         }
         let verified = store.turns[turn].map {
-            !store.overflowed && !$0.compacted && $0.actor != nil && $0.actor == actor && $0.role != nil && $0.role == role
+            !store.overflowed && !$0.compacted && actorIsWellFormed && $0.actor == actor && $0.role != nil && $0.role == role
         } ?? false
         if finished { store.turns.removeValue(forKey: turn) }
         func save() throws {
@@ -342,6 +343,11 @@ enum KeepAwakeHookContract {
     }
     static func workBuddyActor(_ input: [String: Any]) -> String? {
         codexIdentity(input["agent_id"]).map(anonymousIdentity)
+    }
+    static func workBuddyActorIsWellFormed(_ input: [String: Any]) -> Bool {
+        // New desktop roots may have no durable storeId yet. Absence must
+        // remain consistent across their hooks; malformed values are not absence.
+        input["agent_id"] == nil || codexIdentity(input["agent_id"]) != nil
     }
     static func workBuddyRole(_ input: [String: Any]) -> String? {
         codexIdentity(input["agent_type"]).map(anonymousIdentity)
