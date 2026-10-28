@@ -67,7 +67,8 @@ enum KeepAwakeHookInstaller {
                 : source.hookFamily == "gemini"
                 ? ["BeforeAgent", "BeforeTool", "AfterTool", "AfterAgent", "SessionEnd", "Notification"]
                 : ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Notification", "Stop", "StopFailure", "SessionEnd", "Elicitation", "ElicitationResult"]
-            for event in events {
+            let sourceEvents = events + (source.hookFamily == "workbuddy" ? ["FinalStop", "PreCompact", "PostCompact"] : [])
+            for event in sourceEvents {
                 var entries = hooks[event] as? [[String: Any]] ?? []
                 if hooks[event] != nil && !(hooks[event] is [[String: Any]]) { throw Failure.invalidConfiguration }
                 let timeout = source.hookFamily == "gemini" ? 5000 : 5

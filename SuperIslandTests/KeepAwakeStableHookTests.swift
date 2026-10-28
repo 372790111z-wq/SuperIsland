@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import Darwin
 @testable import SuperIsland
 
 final class KeepAwakeStableHookTests: XCTestCase {
@@ -101,7 +102,144 @@ final class KeepAwakeStableHookTests: XCTestCase {
             XCTAssertEqual(KeepAwakeHookContract.eventState(source: source,
                 input: payload("Notification", extra: ["notification_type": "agent_completed"])), "idle")
             XCTAssertNil(KeepAwakeHookContract.eventState(source: source, input: payload("SubagentStop")))
-            XCTAssertNil(KeepAwakeHookContract.eventState(source: source, input: payload("FinalStop")))
+            XCTAssertEqual(KeepAwakeHookContract.eventState(source: source, input: payload("FinalStop")), source == "workbuddy-desktop" ? "idle" : nil)
+        }
+    }
+    private func workBuddy(_ event: String, generation: String = "round", actor: String = "actor", role: String? = "main") -> [String: Any] {
+        var input = payload(event, extra: ["generation_id": generation, "agent_id": actor,
+            "final_stop_reason": "completed", "is_truncation_recovery": false, "tool_name": "Bash"])
+        if let role { input["agent_type"] = role }
+        return input
+    }
+    func testWorkBuddyFinalStopNeedsStartedActorAndRoleAndKeepsThirtySecondGrace() throws {
+        try withHome { home in
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+            let proof = KeepAwakeWorkBuddyTurnProof(credential: home.appendingPathComponent("credential"))
+            var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+            var sequence: UInt64 = 0
+            func deliver(_ input: [String: Any], at time: Double) throws {
+                let verified = try proof.observe(input)
+                let state = try XCTUnwrap(KeepAwakeHookContract.eventState(source: "workbuddy-desktop", input: input,
+                    verifiedWorkBuddyTurn: verified).flatMap(KeepAwakeEngine.TaskState.init(rawValue:)))
+                let metadata = KeepAwakeHookContract.metadata(source: "workbuddy-desktop", input: input)
+                sequence += 1
+                XCTAssertTrue(engine.receive(.init(source: "workbuddy-desktop", session: "anonymous", sequence: sequence,
+                    state: state, taskID: metadata.taskID, startsTask: metadata.startsTask), now: time))
+            }
+            XCTAssertFalse(try proof.observe(workBuddy("FinalStop")))
+            try deliver(workBuddy("UserPromptSubmit", role: nil), at: 0)
+            try deliver(workBuddy("PreToolUse"), at: 2)
+            try deliver(workBuddy("Stop"), at: 60)
+            XCTAssertTrue(engine.evaluate(now: 600, environment: .init(hardware: .desktop)).hold)
+            try deliver(workBuddy("FinalStop"), at: 601)
+            XCTAssertTrue(engine.evaluate(now: 630.999, environment: .init(hardware: .desktop)).hold)
+            XCTAssertFalse(engine.evaluate(now: 631, environment: .init(hardware: .desktop)).hold)
+            XCTAssertFalse(engine.sessions.values.contains(where: \.isUnfinished))
+            _ = try proof.observe(workBuddy("FinalStop"), finished: true)
+            XCTAssertFalse(try proof.observe(workBuddy("FinalStop")))
+            let bytes = try String(contentsOf: proof.url)
+            XCTAssertFalse(bytes.contains("opaque-session")); XCTAssertFalse(bytes.contains("\"actor\":\"actor\""))
+        }
+    }
+    func testWorkBuddyFinalStopRejectsOtherActorsRolesTurnsAndUncertainReasons() throws {
+        try withHome { home in
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+            let proof = KeepAwakeWorkBuddyTurnProof(credential: home.appendingPathComponent("credential"))
+            _ = try proof.observe(workBuddy("UserPromptSubmit"))
+            for input in [workBuddy("FinalStop", actor: "child"), workBuddy("FinalStop", role: "compact"),
+                          workBuddy("FinalStop", role: nil), workBuddy("FinalStop", generation: "next")] {
+                XCTAssertFalse(try proof.observe(input))
+            }
+            for (reason, expected) in [("completed", "completed"), ("interrupted", "cancelled"), ("cancelled", "cancelled"), ("failed", "failed"), ("unknown", "idle")] {
+                var input = workBuddy("FinalStop"); input["final_stop_reason"] = reason
+                XCTAssertEqual(KeepAwakeHookContract.eventState(source: "workbuddy-desktop", input: input,
+                    verifiedWorkBuddyTurn: try proof.observe(input)), expected)
+            }
+            for invalid: Any in [true, 0, "false", NSNull()] {
+                var input = workBuddy("FinalStop"); input["is_truncation_recovery"] = invalid
+                XCTAssertEqual(KeepAwakeHookContract.eventState(source: "workbuddy-desktop", input: input, verifiedWorkBuddyTurn: true), "idle")
+            }
+            var missing = workBuddy("FinalStop"); missing.removeValue(forKey: "is_truncation_recovery")
+            XCTAssertEqual(KeepAwakeHookContract.eventState(source: "workbuddy-desktop", input: missing, verifiedWorkBuddyTurn: true), "idle")
+            for source in ["zcode-desktop", "qoder-desktop", "codex-desktop", "claude-code"] {
+                XCTAssertNil(KeepAwakeHookContract.eventState(source: source, input: workBuddy("FinalStop"), verifiedWorkBuddyTurn: true))
+            }
+        }
+    }
+    func testWorkBuddyCompactionAndPostCompactNeverProveWholeTaskCompletion() throws {
+        try withHome { home in
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+            let credential = home.appendingPathComponent("credential")
+            let proof = KeepAwakeWorkBuddyTurnProof(credential: credential)
+            _ = try proof.observe(workBuddy("UserPromptSubmit"))
+            for event in ["PreCompact", "PostCompact"] {
+                XCTAssertFalse(try proof.observe(workBuddy(event)))
+                XCTAssertNil(KeepAwakeHookContract.eventState(source: "workbuddy-desktop", input: workBuddy(event)))
+            }
+            // New tool activity or a duplicated start cannot erase a compact
+            // boundary. The current vendor contract lacks final settlement proof.
+            for event in ["PreToolUse", "UserPromptSubmit", "Stop", "FinalStop"] {
+                XCTAssertFalse(try KeepAwakeWorkBuddyTurnProof(credential: credential).observe(workBuddy(event)))
+            }
+            XCTAssertTrue(try proof.observe(workBuddy("UserPromptSubmit", generation: "next")))
+            XCTAssertTrue(try proof.observe(workBuddy("FinalStop", generation: "next")))
+        }
+    }
+    func testWorkBuddyCompactionBeforeDelayedAdmissionKeepsItsTombstone() throws {
+        try withHome { home in
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+            for compact in ["PreCompact", "PostCompact"] {
+                let proof = KeepAwakeWorkBuddyTurnProof(credential: home.appendingPathComponent(compact))
+                XCTAssertFalse(try proof.observe(workBuddy(compact)))
+                XCTAssertFalse(try proof.observe(workBuddy("UserPromptSubmit")))
+                XCTAssertFalse(try proof.observe(workBuddy("PreToolUse")))
+                XCTAssertFalse(try proof.observe(workBuddy("FinalStop")))
+            }
+        }
+    }
+    func testWorkBuddyFinalVerificationAndDeliveryAreSerializedWithCompaction() throws {
+        try withHome { home in
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+            let proof = KeepAwakeWorkBuddyTurnProof(credential: home.appendingPathComponent("credential"))
+            _ = try proof.observe(workBuddy("UserPromptSubmit"))
+            XCTAssertTrue(try proof.observe(workBuddy("FinalStop"), delivery: { verified in
+                XCTAssertTrue(verified)
+                let fd = open(proof.url.appendingPathExtension("lock").path, O_RDWR | O_NOFOLLOW)
+                XCTAssertGreaterThanOrEqual(fd, 0)
+                defer { close(fd) }
+                XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), -1, "another hook cannot mutate admission before terminal enqueue")
+                return true
+            }))
+            XCTAssertFalse(try proof.observe(workBuddy("FinalStop")))
+        }
+    }
+    func testWorkBuddyMissingIdentityStillDeliversUnverifiedRunningWork() throws {
+        try withHome { home in
+            var input = workBuddy("UserPromptSubmit"); input.removeValue(forKey: "generation_id")
+            var called = false
+            let proof = KeepAwakeWorkBuddyTurnProof(credential: home.appendingPathComponent("credential"))
+            XCTAssertFalse(try proof.observe(input, delivery: { verified in
+                called = true; XCTAssertFalse(verified)
+                XCTAssertEqual(KeepAwakeHookContract.eventState(source: "workbuddy-desktop", input: input,
+                    verifiedWorkBuddyTurn: verified), "running")
+                return false
+            }))
+            XCTAssertTrue(called)
+        }
+    }
+    func testWorkBuddyOverflowRemainsFailClosedWithoutRepeatedWrites() throws {
+        try withHome { home in
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+            let proof = KeepAwakeWorkBuddyTurnProof(credential: home.appendingPathComponent("credential"))
+            let data = Data("{\"version\":1,\"turns\":{},\"overflowed\":true}".utf8)
+            try data.write(to: proof.url)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: proof.url.path)
+            let inode = try FileManager.default.attributesOfItem(atPath: proof.url.path)[.systemFileNumber] as? NSNumber
+            for event in ["UserPromptSubmit", "PreToolUse", "Stop", "FinalStop"] {
+                XCTAssertFalse(try proof.observe(workBuddy(event)))
+            }
+            XCTAssertEqual(try Data(contentsOf: proof.url), data)
+            XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: proof.url.path)[.systemFileNumber] as? NSNumber, inode)
         }
     }
     func testOnlyWorkBuddyPublicGenerationCanIdentifyDesktopRound() {
@@ -143,6 +281,29 @@ final class KeepAwakeStableHookTests: XCTestCase {
             }
             XCTAssertFalse(KeepAwakeHookContract.metadata(source: source, input: payload("completed", extra: ["task_start": true])).startsTask)
         }
+    }
+    func testZCodeNativeTurnIdentitySeparatesRoundsWithoutInventingCompletion() throws {
+        let raw = "PRIVATE-ZCODE-TURN"
+        let start = payload("UserPromptSubmit", extra: ["turnId": raw])
+        let metadata = KeepAwakeHookContract.metadata(source: "zcode-desktop", input: start)
+        XCTAssertEqual(metadata.taskID, KeepAwakeHookContract.anonymousIdentity(raw))
+        XCTAssertTrue(metadata.startsTask)
+        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Stop"] {
+            let input = payload(event, extra: ["turnId": raw, "tool_name": "Bash"])
+            XCTAssertEqual(KeepAwakeHookContract.metadata(source: "zcode-desktop", input: input).taskID, metadata.taskID)
+            XCTAssertFalse(KeepAwakeHookContract.metadata(source: "zcode-desktop", input: input).startsTask)
+        }
+        XCTAssertNotEqual(metadata.taskID, KeepAwakeHookContract.metadata(source: "zcode-desktop",
+            input: payload("UserPromptSubmit", extra: ["turnId": "another-turn"])).taskID)
+        for invalid: Any in ["", "  ", "turn\nidentity", String(repeating: "x", count: 1025), 1, NSNull()] {
+            XCTAssertNil(KeepAwakeHookContract.metadata(source: "zcode-desktop",
+                input: payload("Stop", extra: ["turnId": invalid])).taskID)
+        }
+        for source in ["workbuddy-desktop", "qoder-desktop", "claude-code", "codex-desktop"] {
+            XCTAssertNil(KeepAwakeHookContract.metadata(source: source, input: start).taskID)
+        }
+        XCTAssertEqual(KeepAwakeHookContract.eventState(source: "zcode-desktop",
+            input: payload("Stop", extra: ["turnId": raw, "stop_hook_active": true])), "idle")
     }
     func testOwnedPiRoundIdentityIsHashedAndNeverAcceptedForAnotherSource() {
         let raw = UUID().uuidString

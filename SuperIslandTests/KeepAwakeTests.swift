@@ -633,6 +633,9 @@ final class KeepAwakePublicHookTests: XCTestCase {
             let hooks = installed["hooks"] as! [String: [[String: Any]]]
             XCTAssertEqual(hooks["Stop"]?.count, 2)
             XCTAssertEqual(hooks["PermissionRequest"]?.count, 1)
+            for event in ["FinalStop", "PreCompact", "PostCompact"] {
+                XCTAssertEqual(hooks[event]?.count, family == "workbuddy" ? 1 : nil)
+            }
             try KeepAwakeHookInstaller.uninstall(source: source, home: root)
             let restored = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as! [String: Any]
             XCTAssertEqual(restored["theme"] as? String, "preserve")
