@@ -242,6 +242,26 @@ final class KeepAwakeStableHookTests: XCTestCase {
             XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: proof.url.path)[.systemFileNumber] as? NSNumber, inode)
         }
     }
+    func testWorkBuddyNewRootWithoutDurableActorStillNeedsItsOwnStartedTurnAndRole() throws {
+        try withHome { home in
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+            let proof = KeepAwakeWorkBuddyTurnProof(credential: home.appendingPathComponent("credential"))
+            func root(_ event: String, role: String? = "main") -> [String: Any] {
+                var input = workBuddy(event, role: role); input.removeValue(forKey: "agent_id"); return input
+            }
+            XCTAssertFalse(try proof.observe(root("FinalStop")))
+            XCTAssertFalse(try proof.observe(root("UserPromptSubmit", role: nil)))
+            XCTAssertTrue(try proof.observe(root("PreToolUse")))
+            XCTAssertTrue(try proof.observe(root("FinalStop")))
+            XCTAssertFalse(try proof.observe(workBuddy("FinalStop", actor: "child")))
+            for invalid: Any in ["", NSNull(), 42, "actor\n"] {
+                var input = root("FinalStop"); input["agent_id"] = invalid
+                XCTAssertFalse(try proof.observe(input))
+            }
+            _ = try proof.observe(root("PreCompact"))
+            XCTAssertFalse(try proof.observe(root("FinalStop")))
+        }
+    }
     func testOnlyWorkBuddyPublicGenerationCanIdentifyDesktopRound() {
         let raw = "PRIVATE-VENDOR-GENERATION"
         let start = payload("UserPromptSubmit", extra: ["generation_id": raw])
