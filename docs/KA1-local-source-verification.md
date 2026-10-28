@@ -102,3 +102,17 @@ Qoder / WorkBuddy 的事件父进程可归属对应桌面应用。ZCode 重写�
 新增回归将这两种实际事件顺序送入纯策略引擎：等待 30 秒释放，回答后重新运行，Stop 后 30 秒释放且不虚构成功完成。hook-resume-tests.log 最终 18 项通过；纯引擎回放不是原生 IOKit 端到端验收。注册表文案更新为提问、恢复与结束已实测，自动接入仍关闭，静默长任务健康信号和一般工具授权恢复仍未闭环。
 
 临时配置再次备份后窄合并；收尾移除 WorkBuddy 10、ZCode 7 个探针 hooks，两份配置与本轮各自原始备份逐字节一致。缓存探针再次禁用，恢复清单 build/KA1Validation/probe-round2-cleanup.json。没有改动权限模式、生产 App、合盖服务、正式 PRD/标注或远端仓库。
+
+
+## 2026-10-28 WorkBuddy 最终停止与 ZCode 漏采修复
+
+本轮为已确认 KA1 需求的实现修正，未改变界面、正式 PRD、HTML 或 annotation 映射。
+
+- ZCode 3.16.3 本机原有六条自有配置含空 matcher；已安装代码的配置 schema 要求该字段非空或省略，旧配置因此不能加载。源码安装器原已省略 matcher，本轮经用户明确授权备份并仅删除这六个旧空字段，语义回读确认其他配置不变。新会话 sleep 60 实测，当前已安装 20261028000455 收到 zcode-desktop 的 startsTask/running、工具前后 running、Stop/idle；开始归属已恢复。这份实测属于配置修正与旧 App，不冒称新候选已验收。
+- ZCode 原生 hook 保留 camelCase turnId；新增按其哈希隔离任务轮次。Stop 后仍可自动继续，维持 idle；不伪造该来源不提供的 FinalStop/SessionEnd。自动完成仍未获证明。
+- WorkBuddy 5.9.3 本机随附实现有 FinalStop，发生在 Stop 的继续判断之后。agent_completed 仅找到枚举，未证实它被实际分发；不能靠它补完成。本轮安装器为 WorkBuddy 单独添加 FinalStop、PreCompact、PostCompact；本机这三项写入已获用户分别明确授权，安装阶段再执行并回读。
+- FinalStop 仅在同会话/同 generation 的明确开始准入、相同 agent_id 和 agent_type、显式 is_truncation_recovery=false 及允许的结束原因下映射 completed/failed/cancelled。角色尚未赋值时，只允许本任务 actor 的首个工具前事件补齐。身份摘要保存在私有目录，受有界容量、文件/所有者/权限校验与锁保护；任务正文、工具输入输出与凭据不写入该证明。
+- PreCompact/PostCompact 均为该 generation 建立保守阻断，包括先于延迟开始到达的边界。当前协议不能完整证明压缩后的主任务最终结算，因此本轮不靠 PostCompact、计时、Stop 或丢失恢复信号解除该阻断。普通任务完成修复与压缩任务仍待核实必须分开报告。
+- 最终校验和已认证终态入队在同一证明文件锁中执行；仅在成功投递终态后清除对应准入，迟到旧轮次不得结束新任务。存储不可用仍上报真实 running，但不能上报未经证明的完成。
+
+隐私与证据：只分析自有 hook 配置、随附应用协议实现、匿名任务事件和功耗。静态随附代码证据不等于真实 IDE 验收；本轮证据存于忽略的 build/WorkBuddyZCodeRepair.noindex，用户旧挂绳内容、其他任务、系统信任与权限保持原状。

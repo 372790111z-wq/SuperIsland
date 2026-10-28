@@ -67,6 +67,100 @@ struct KeepAwakeCodexSessionProof {
     }
 }
 
+/// WorkBuddy can emit FinalStop for an internal compaction run. Admit only a
+/// task's own actor and keep compacted turns unverified until a stronger vendor
+/// settlement signal exists. The private store contains hashes, never hook text.
+struct KeepAwakeWorkBuddyTurnProof {
+    let credential: URL
+    struct Turn: Codable {
+        var actor: String?
+        var role: String?
+        var compacted = false
+    }
+    private struct Store: Codable { var version = 1; var turns: [String: Turn] = [:]; var overflowed = false }
+    var url: URL { credential.appendingPathExtension("workbuddy-turns.json") }
+
+    func observe(_ input: [String: Any], finished: Bool = false,
+                 delivery: ((Bool) throws -> Bool)? = nil) throws -> Bool {
+        guard let turn = KeepAwakeHookContract.workBuddyTurn(input) else {
+            _ = try delivery?(false)
+            return false
+        }
+        let parent = credential.deletingLastPathComponent().path
+        var info = stat()
+        guard lstat(parent, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+              info.st_uid == getuid(), info.st_mode & 0o077 == 0 else { throw CocoaError(.fileReadNoPermission) }
+        let fd = open(url.appendingPathExtension("lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { throw CocoaError(.fileReadNoPermission) }
+        defer { close(fd) }
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_uid == getuid(), info.st_mode & 0o077 == 0, flock(fd, LOCK_EX) == 0 else { throw CocoaError(.fileReadNoPermission) }
+        defer { flock(fd, LOCK_UN) }
+        var store = Store()
+        let file = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        if file >= 0 {
+            let handle = FileHandle(fileDescriptor: file, closeOnDealloc: true)
+            defer { try? handle.close() }
+            guard fstat(file, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+                  info.st_uid == getuid(), info.st_mode & 0o077 == 0, info.st_size <= 1_048_576 else { throw CocoaError(.fileReadNoPermission) }
+            store = try JSONDecoder().decode(Store.self, from: handle.read(upToCount: 1_048_577) ?? Data())
+            guard store.version == 1, store.turns.count <= 4096,
+                  store.turns.allSatisfy({ Self.validHash($0.key) && ($0.value.actor.map(Self.validHash) ?? true)
+                    && ($0.value.role.map(Self.validHash) ?? true) }) else { throw CocoaError(.fileReadCorruptFile) }
+        } else if errno != ENOENT { throw CocoaError(.fileReadNoPermission) }
+        let before = store.turns
+        let wasOverflowed = store.overflowed
+        let event = input["hook_event_name"] as? String
+        let actor = KeepAwakeHookContract.workBuddyActor(input)
+        let role = KeepAwakeHookContract.workBuddyRole(input)
+        if ["UserPromptSubmit", "PreCompact", "PostCompact"].contains(event ?? ""),
+           store.turns[turn] == nil, store.turns.count >= 4096 { store.overflowed = true }
+        if event == "UserPromptSubmit", store.turns[turn] == nil,
+           KeepAwakeHookContract.metadata(source: "workbuddy-desktop", input: input).startsTask,
+           let actor, store.turns.count < 4096, !store.overflowed {
+            store.turns[turn] = Turn(actor: actor, role: role)
+        }
+        if ["PreCompact", "PostCompact"].contains(event ?? ""), store.turns[turn] == nil, store.turns.count < 4096 {
+            // A compact boundary can arrive before a delayed prompt hook.
+            store.turns[turn] = Turn(actor: nil, role: nil, compacted: true)
+        }
+        if var admission = store.turns[turn] {
+            if event == "PreCompact" || event == "PostCompact" { admission.compacted = true }
+            // On first use the prompt hook may run before the actor's role is
+            // assigned. Only its own tool hook, before any compaction, can bind it.
+            if event == "PreToolUse", !admission.compacted, admission.role == nil,
+               actor == admission.actor, let role { admission.role = role }
+            store.turns[turn] = admission
+        }
+        let verified = store.turns[turn].map {
+            !store.overflowed && !$0.compacted && $0.actor != nil && $0.actor == actor && $0.role != nil && $0.role == role
+        } ?? false
+        if finished { store.turns.removeValue(forKey: turn) }
+        func save() throws {
+            let temporary = url.appendingPathExtension(UUID().uuidString + ".tmp")
+            let output = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+            guard output >= 0 else { throw CocoaError(.fileWriteNoPermission) }
+            let handle = FileHandle(fileDescriptor: output, closeOnDealloc: true)
+            defer { try? handle.close(); unlink(temporary.path) }
+            try handle.write(contentsOf: JSONEncoder().encode(store))
+            try handle.synchronize()
+            guard rename(temporary.path, url.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
+        }
+        // Final verification and authenticated terminal enqueue share this
+        // lock with compaction admission; no stale verification escapes it.
+        if before != store.turns || wasOverflowed != store.overflowed { try save() }
+        if try delivery?(verified) == true, event == "FinalStop", verified {
+            store.turns.removeValue(forKey: turn); try save()
+        }
+        return verified
+    }
+    private static func validHash(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+}
+
+extension KeepAwakeWorkBuddyTurnProof.Turn: Equatable {}
+
 /// Public hook metadata contract. Extra vendor fields and version strings do
 /// not affect compatibility. Unsupported events cannot invent running state.
 enum KeepAwakeHookContract {
@@ -189,6 +283,11 @@ enum KeepAwakeHookContract {
            !generation.isEmpty, generation.utf8.count <= 1024 {
             taskID = SHA256.hash(data: Data(generation.utf8)).map { String(format: "%02x", $0) }.joined()
         }
+        // ZCode retains its native camelCase trace identity alongside the
+        // snake_case hook aliases. Tool IDs and transcript paths are not turns.
+        if source == "zcode-desktop", let turn = codexIdentity(input["turnId"]) {
+            taskID = anonymousIdentity(turn)
+        }
         if source == "pi", let ownedID = input["ka1_task_id"] as? String,
            ownedID.utf8.count <= 1024, UUID(uuidString: ownedID) != nil {
             taskID = SHA256.hash(data: Data(ownedID.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -237,6 +336,16 @@ enum KeepAwakeHookContract {
     static func anonymousIdentity(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
+    static func workBuddyTurn(_ input: [String: Any]) -> String? {
+        guard let session = codexIdentity(input["session_id"]), let generation = codexIdentity(input["generation_id"]) else { return nil }
+        return anonymousIdentity(session + "\n" + generation)
+    }
+    static func workBuddyActor(_ input: [String: Any]) -> String? {
+        codexIdentity(input["agent_id"]).map(anonymousIdentity)
+    }
+    static func workBuddyRole(_ input: [String: Any]) -> String? {
+        codexIdentity(input["agent_type"]).map(anonymousIdentity)
+    }
     /// Auxiliary stages still hold power until completion, but must not emit a
     /// user-task completion notification. The complete label is authenticated
     /// by the existing taskID field; no envelope schema change is needed.
@@ -261,10 +370,21 @@ enum KeepAwakeHookContract {
         }
         return Data(fields.joined(separator: "\n").utf8)
     }
-    static func state(_ input: [String: Any], source: String? = nil) -> String? {
+    static func state(_ input: [String: Any], source: String? = nil, verifiedWorkBuddyTurn: Bool = false) -> String? {
         guard let session = input["session_id"] as? String, !session.isEmpty, session.utf8.count <= 1024,
               let event = input["hook_event_name"] as? String else { return nil }
         switch event {
+        case "FinalStop":
+            guard source == "workbuddy-desktop" else { return nil }
+            guard verifiedWorkBuddyTurn, workBuddyTurn(input) != nil,
+                  let recovery = input["is_truncation_recovery"] as? NSNumber,
+                  CFGetTypeID(recovery) == CFBooleanGetTypeID(), !recovery.boolValue else { return "idle" }
+            switch input["final_stop_reason"] as? String {
+            case "completed": return "completed"
+            case "interrupted", "cancelled": return "cancelled"
+            case "failed": return "failed"
+            default: return "idle"
+            }
         case "UserPromptSubmit", "PostToolUse", "PreCompact", "PostCompact", "ElicitationResult": return "running"
         // A failed or interrupted tool can be followed by model recovery. It
         // does not cancel the parent task, even when is_interrupt is true.
@@ -289,10 +409,15 @@ enum KeepAwakeHookContract {
     }
     /// Shared mapping for the standalone event tool. Returning idle means an
     /// unverified boundary, not permission to release an already-started task.
-    static func eventState(source: String, input: [String: Any]) -> String? {
+    static func eventState(source: String, input: [String: Any], verifiedWorkBuddyTurn: Bool = false) -> String? {
         guard let session = input["session_id"] as? String, !session.isEmpty, session.utf8.count <= 1024,
               let event = input["hook_event_name"] as? String else { return nil }
-        if sources.contains(source) { return state(input, source: source) }
+        if sources.contains(source) {
+            // Compaction is private admission metadata, not a new task or an
+            // outcome. It must not create another hold record without a start.
+            if source == "workbuddy-desktop", ["PreCompact", "PostCompact"].contains(event) { return nil }
+            return state(input, source: source, verifiedWorkBuddyTurn: verifiedWorkBuddyTurn)
+        }
         if ["opencode", "pi"].contains(source) {
             switch event {
             case "running", "waiting", "idle": return event

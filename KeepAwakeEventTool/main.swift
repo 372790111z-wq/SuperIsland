@@ -73,36 +73,53 @@ func run(arguments args: [String] = CommandLine.arguments,
             guard try session.map({ try proof.contains($0) }) ?? false else { return }
         }
     }
-    let state: String, metadata: KeepAwakeHookContract.Metadata, session: String
-    if isCodexNotify || isAutoNotify {
-        guard let notification = KeepAwakeHookContract.codexNotification(payload) else { return }
-        state = notification.state; metadata = notification.metadata; session = notification.session
-    } else {
-        guard let sessionID = payload["session_id"] as? String, !sessionID.isEmpty, sessionID.utf8.count <= 1024,
-              let hookState = KeepAwakeHookContract.eventState(source: credential.source, input: payload) else { return }
-        state = hookState; metadata = KeepAwakeHookContract.metadata(source: credential.source, input: payload)
-        if KeepAwakeHookContract.codexSources.contains(source) {
-            guard let owner = KeepAwakeHookContract.codexHookSession(payload) else { return }
-            session = owner
+    func emit(verifiedWorkBuddyTurn: Bool) throws -> Bool {
+        let state: String, metadata: KeepAwakeHookContract.Metadata, session: String
+        if isCodexNotify || isAutoNotify {
+            guard let notification = KeepAwakeHookContract.codexNotification(payload) else { return false }
+            state = notification.state; metadata = notification.metadata; session = notification.session
         } else {
-            session = KeepAwakeHookContract.anonymousIdentity(sessionID)
+            guard let sessionID = payload["session_id"] as? String, !sessionID.isEmpty, sessionID.utf8.count <= 1024,
+                  let hookState = KeepAwakeHookContract.eventState(source: credential.source, input: payload,
+                      verifiedWorkBuddyTurn: verifiedWorkBuddyTurn) else { return false }
+            state = hookState; metadata = KeepAwakeHookContract.metadata(source: credential.source, input: payload)
+            if KeepAwakeHookContract.codexSources.contains(source) {
+                guard let owner = KeepAwakeHookContract.codexHookSession(payload) else { return false }
+                session = owner
+            } else {
+                session = KeepAwakeHookContract.anonymousIdentity(sessionID)
+            }
         }
-    }
-    var events = [Event(source: credential.source, session: session, sequence: mach_continuous_time(), state: state,
-                        taskID: metadata.taskID, startsTask: metadata.startsTask)]
-    if (isHook || isAutoHook),
-       let compaction = KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: payload) {
-        // Exact source/owner/turn only; this never cancels a sibling or a real
-        // background process. The consumer ignores an auxiliary not started.
-        events.append(Event(source: credential.source, session: session, sequence: events[0].sequence,
-                            state: "cancelled", taskID: compaction.taskID, startsTask: false))
-    }
-    for event in events {
-        if try deliver(event, credential: credential, key: key),
-           event.taskID == KeepAwakeHookContract.codexSessionEnded {
-            try KeepAwakeCodexSessionProof(credential: URL(fileURLWithPath: credentialPath)).forget(event.session)
+        var events = [Event(source: credential.source, session: session, sequence: mach_continuous_time(), state: state,
+                            taskID: metadata.taskID, startsTask: metadata.startsTask)]
+        if (isHook || isAutoHook),
+           let compaction = KeepAwakeHookContract.interruptedCodexCompaction(source: source, input: payload) {
+            // Exact source/owner/turn only; this never cancels a sibling or a real
+            // background process. The consumer ignores an auxiliary not started.
+            events.append(Event(source: credential.source, session: session, sequence: events[0].sequence,
+                                state: "cancelled", taskID: compaction.taskID, startsTask: false))
         }
+        var deliveredTerminal = false
+        for event in events {
+            if try deliver(event, credential: credential, key: key) {
+                deliveredTerminal = ["completed", "failed", "cancelled"].contains(event.state)
+                if event.taskID == KeepAwakeHookContract.codexSessionEnded {
+                    try KeepAwakeCodexSessionProof(credential: URL(fileURLWithPath: credentialPath)).forget(event.session)
+                }
+            }
+        }
+        return deliveredTerminal
     }
+    if source == "workbuddy-desktop" {
+        do {
+            _ = try KeepAwakeWorkBuddyTurnProof(credential: URL(fileURLWithPath: credentialPath)).observe(payload, delivery: {
+                try emit(verifiedWorkBuddyTurn: $0)
+            })
+        } catch {
+            // Storage failure still reports running work, but cannot release it.
+            _ = try emit(verifiedWorkBuddyTurn: false)
+        }
+    } else { _ = try emit(verifiedWorkBuddyTurn: false) }
 }
 @discardableResult
 func deliver(_ event: Event, credential: Credential, key: Data) throws -> Bool {
