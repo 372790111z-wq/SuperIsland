@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 @testable import SuperIsland
 
 final class KeepAwakeCodexMonitorTests: XCTestCase {
@@ -225,5 +226,215 @@ final class KeepAwakeCodexMonitorTests: XCTestCase {
         XCTAssertTrue(ledger.consume(snapshot: active, now: .nan, sequence: 1).isEmpty)
         XCTAssertTrue(ledger.consume(snapshot: .init(threads: [thread("active", id: "")]), now: 0, sequence: 0).isEmpty)
         XCTAssertEqual(ledger.consume(snapshot: active, now: 1, sequence: 1).first?.state, .running)
+    }
+}
+
+final class KeepAwakeZCodeTurnMetadataReaderTests: XCTestCase {
+    private typealias Reader = KeepAwakeZCodeTurnMetadataReader
+    private let schema = "CREATE TABLE turn_usage (session_id TEXT NOT NULL,turn_id TEXT NOT NULL,status TEXT,started_at INTEGER,completed_at INTEGER,private_body TEXT,PRIMARY KEY(session_id,turn_id))"
+    private let now: TimeInterval = 1_800_000_100
+
+    private func identity(_ session: String = "session-a", _ turn: String = "turn-a") -> Reader.Identity {
+        .init(sessionHash: KeepAwakeHookContract.anonymousIdentity(session), taskHash: KeepAwakeHookContract.anonymousIdentity(turn))
+    }
+    private func withDatabase(_ customSchema: String? = nil,
+                              _ body: (OpaquePointer, URL) throws -> Void) throws {
+        // SQLite's NOFOLLOW protects every path component; macOS /var is a
+        // symlink, so use the physical temporary directory for the fixture.
+        let temporaryPath = FileManager.default.temporaryDirectory.path
+        let physicalTemporaryPath = temporaryPath.hasPrefix("/var/") ? "/private" + temporaryPath : temporaryPath
+        let root = URL(fileURLWithPath: physicalTemporaryPath).appendingPathComponent("zcode-metadata-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("db.sqlite")
+        var connection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &connection), SQLITE_OK)
+        let database = try XCTUnwrap(connection)
+        defer { sqlite3_close(database) }
+        try execute(customSchema ?? schema, database)
+        try body(database, url)
+    }
+    private func execute(_ sql: String, _ database: OpaquePointer) throws {
+        guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+            XCTFail("Synthetic SQLite fixture failed")
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+    private func insert(_ database: OpaquePointer, session: String = "session-a", turn: String = "turn-a",
+                        state: String = "completed", started: Int64 = 1_800_000_000_000,
+                        completed: Int64 = 1_800_000_010_000) throws {
+        var prepared: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(database, "INSERT INTO turn_usage(session_id,turn_id,status,started_at,completed_at) VALUES(?,?,?,?,?)", -1, &prepared, nil), SQLITE_OK)
+        let statement = try XCTUnwrap(prepared)
+        defer { sqlite3_finalize(statement) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(statement, 1, session, -1, transient)
+        sqlite3_bind_text(statement, 2, turn, -1, transient)
+        sqlite3_bind_text(statement, 3, state, -1, transient)
+        sqlite3_bind_int64(statement, 4, started)
+        sqlite3_bind_int64(statement, 5, completed)
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_DONE)
+    }
+
+    func testOnlyExactAdmittedSessionAndTurnCanEndParallelTasks() throws {
+        try withDatabase { database, url in
+            try insert(database)
+            try insert(database, turn: "turn-b", state: "running")
+            try insert(database, session: "session-b", state: "error")
+            try insert(database, session: "unadmitted", state: "completed")
+            let result = Reader.read(database: url, identities: [identity(), identity("session-a", "turn-b"), identity("session-b")], now: now)
+            XCTAssertEqual(Set(result.map(\.identity)), [identity(), identity("session-b")])
+            XCTAssertEqual(Set(result.map(\.state)), ["completed", "failed"])
+            XCTAssertEqual(result.first?.startedAt, 1_800_000_000)
+            XCTAssertEqual(result.first?.completedAt, 1_800_000_010)
+            XCTAssertFalse(String(describing: result).contains("session-a"))
+        }
+    }
+
+    func testPriorTurnCompletionCannotCloseNewTurnOrSessionWithSameTurnID() throws {
+        try withDatabase { database, url in
+            try insert(database, turn: "old-turn")
+            try insert(database, session: "different-session", turn: "new-turn")
+            XCTAssertTrue(Reader.read(database: url, identities: [identity("session-a", "new-turn")], now: now).isEmpty)
+            try insert(database, turn: "new-turn", state: "running")
+            XCTAssertTrue(Reader.read(database: url, identities: [identity("session-a", "new-turn")], now: now).isEmpty)
+        }
+    }
+
+    func testCancelledAndFailureAreDistinctAndStopOrCompactionRunningRemainUnknown() throws {
+        try withDatabase { database, url in
+            try insert(database, turn: "cancelled", state: "cancelled")
+            try insert(database, turn: "failed", state: "error")
+            for state in ["idle", "Stop", "running", "future-outcome"] {
+                try insert(database, turn: state, state: state)
+            }
+            let known = Set(["cancelled", "failed", "idle", "Stop", "running", "future-outcome"].map { identity("session-a", $0) })
+            let result = Reader.read(database: url, identities: known, now: now)
+            XCTAssertEqual(Set(result.map(\.state)), ["cancelled", "failed"])
+            XCTAssertEqual(result.count, 2)
+        }
+    }
+
+    func testWALFactsAreReadWithoutWritingDatabaseOrProjectingPrivateColumns() throws {
+        try withDatabase { database, url in
+            try execute("PRAGMA journal_mode=WAL", database)
+            try execute("CREATE TABLE message (private_body TEXT);INSERT INTO message VALUES('must never be queried')", database)
+            try insert(database)
+            try execute("UPDATE turn_usage SET private_body='not part of the allowed projection'", database)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path + "-wal"))
+            let before = try Data(contentsOf: url)
+            let beforeWAL = try Data(contentsOf: URL(fileURLWithPath: url.path + "-wal"))
+            XCTAssertEqual(Reader.read(database: url, identities: [identity()], now: now).map(\.state), ["completed"])
+            XCTAssertEqual(try Data(contentsOf: url), before)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: url.path + "-wal")), beforeWAL)
+        }
+    }
+
+    func testUnknownSchemaCorruptionAndViewsCannotSupplyTerminalProof() throws {
+        for schema in ["CREATE TABLE turn_usage (session_id TEXT, turn_id TEXT,status TEXT)",
+                       "CREATE TABLE message (session_id TEXT,turn_id TEXT,status TEXT,started_at INTEGER,completed_at INTEGER);CREATE VIEW turn_usage AS SELECT * FROM message"] {
+            try withDatabase(schema) { database, url in
+                if schema.contains("CREATE VIEW") {
+                    try execute("INSERT INTO message VALUES('session-a','turn-a','completed',1800000000000,1800000010000)", database)
+                }
+                XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+            }
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("not a SQLite database".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+        XCTAssertTrue(Reader.read(database: url.appendingPathExtension("missing"), identities: [identity()], now: now).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.appendingPathExtension("missing").path))
+    }
+
+    func testDatabaseAndSidecarSymlinksAreRejected() throws {
+        try withDatabase { database, url in
+            try insert(database)
+            let link = url.appendingPathExtension("symlink")
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: url)
+            XCTAssertTrue(Reader.read(database: link, identities: [identity()], now: now).isEmpty)
+            let sidecar = URL(fileURLWithPath: url.path + "-wal")
+            try FileManager.default.createSymbolicLink(at: sidecar, withDestinationURL: url)
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+        }
+    }
+
+    func testWideNativeUsageSchemaStillProjectsOnlyAllowedColumns() throws {
+        let columns = (0..<40).map { "private_column_\($0) TEXT" }.joined(separator: ",")
+        let wide = "CREATE TABLE turn_usage(session_id TEXT,turn_id TEXT,status TEXT,started_at INTEGER,completed_at INTEGER," + columns + ")"
+        try withDatabase(wide) { database, url in
+            try insert(database)
+            XCTAssertEqual(Reader.read(database: url, identities: [identity()], now: now).map(\.state), ["completed"])
+        }
+    }
+
+    func testLargeUnmatchedHistoryExhaustsBoundedBudgetWithoutEndingTask() throws {
+        try withDatabase { database, url in
+            try execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO turn_usage(session_id,turn_id,status,started_at,completed_at) SELECT 'other',CAST(x AS TEXT),'completed',1800000000000,1800000010000 FROM n", database)
+            let start = ProcessInfo.processInfo.systemUptime
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now,
+                                      budget: .init(maximumVMInstructions: 1000, maximumDuration: 0.05)).isEmpty)
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 1)
+        }
+    }
+
+    func testInvalidClocksAndIdentifiersCannotEndAnAdmittedTask() throws {
+        try withDatabase { database, url in
+            for (turn, started, completed) in [("backwards", Int64(20_000), Int64(10_000)),
+                                               ("negative", -1, 1_800_000_010_000),
+                                               ("future", 1_800_000_000_000, 1_800_000_200_000)] {
+                try insert(database, turn: turn, started: started, completed: completed)
+            }
+            try insert(database, turn: "text-clock")
+            try execute("UPDATE turn_usage SET completed_at='invalid' WHERE turn_id='text-clock'", database)
+            try insert(database, turn: "null-clock")
+            try execute("UPDATE turn_usage SET completed_at=NULL WHERE turn_id='null-clock'", database)
+            let turns = ["backwards", "negative", "future", "text-clock", "null-clock"]
+            XCTAssertTrue(Reader.read(database: url, identities: Set(turns.map { identity("session-a", $0) }), now: now).isEmpty)
+            try insert(database, session: "session\n", turn: "control")
+            try insert(database, turn: " ")
+            XCTAssertTrue(Reader.read(database: url, identities: [identity("session\n", "control"), identity("session-a", " ")], now: now).isEmpty)
+            XCTAssertTrue(Reader.read(database: url, identities: [.init(sessionHash: "invalid", taskHash: identity().taskHash)], now: now).isEmpty)
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: .infinity).isEmpty)
+        }
+    }
+
+    func testDuplicateIdentitiesAndInstructionExhaustionFailClosed() throws {
+        try withDatabase("CREATE TABLE turn_usage (session_id TEXT,turn_id TEXT,status TEXT,started_at INTEGER,completed_at INTEGER)") { database, url in
+            try insert(database)
+            try insert(database)
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+        }
+        try withDatabase { database, url in
+            try execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<500) INSERT INTO turn_usage(session_id,turn_id,status,started_at,completed_at) SELECT 'unadmitted',CAST(x AS TEXT),'completed',1800000000000,1800000010000 FROM n", database)
+            try insert(database)
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now,
+                                      budget: .init(maximumVMInstructions: 100, maximumDuration: 0.25)).isEmpty)
+            XCTAssertEqual(Reader.read(database: url, identities: [identity()], now: now).count, 1)
+        }
+    }
+
+    func testCustomDatabaseConfigDoesNotFallBackToWrongDefault() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("zcode-config-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".zcode/cli"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let config = home.appendingPathComponent(".zcode/cli/config.json")
+        XCTAssertTrue(Reader.defaultPathIsConfigured(home: home))
+        for value in ["{}", "{\"storage\":{}}", "{\"storage\":{\"sessionDbPath\":\"~/.zcode/cli/db/db.sqlite\"}}"] {
+            try Data(value.utf8).write(to: config)
+            XCTAssertTrue(Reader.defaultPathIsConfigured(home: home))
+        }
+        let absolute = try JSONSerialization.data(withJSONObject: ["storage": ["sessionDbPath": Reader.defaultDatabaseURL(home: home).path]])
+        try absolute.write(to: config)
+        XCTAssertTrue(Reader.defaultPathIsConfigured(home: home))
+        for value in ["invalid-json", "[]", "{\"storage\":false}", "{\"storage\":{\"sessionDbPath\":null}}",
+                      "{\"storage\":{\"sessionDbPath\":\"other.sqlite\"}}", "{\"storage\":{\"sessionDbPath\":\"/tmp/custom.sqlite\"}}"] {
+            try Data(value.utf8).write(to: config)
+            XCTAssertFalse(Reader.defaultPathIsConfigured(home: home))
+        }
+        try FileManager.default.removeItem(at: config)
+        try FileManager.default.createSymbolicLink(at: config, withDestinationURL: home.appendingPathComponent("missing"))
+        XCTAssertFalse(Reader.defaultPathIsConfigured(home: home))
     }
 }

@@ -1,10 +1,84 @@
 import XCTest
+import CryptoKit
 @testable import SuperIsland
 
 /// Exercise real service scheduling with an injected metadata source. The
 /// service remains disabled; policy decisions are evaluated on a local copy so
 /// these fixtures never acquire a real power assertion or a helper lease.
 final class KeepAwakeCodexServiceTests: XCTestCase {
+    private actor ZCodeGate {
+        var continuation: CheckedContinuation<[KeepAwakeZCodeTurnMetadataReader.Terminal], Never>?
+        var requested = Set<KeepAwakeZCodeTurnMetadataReader.Identity>()
+        func sample(_ identities: Set<KeepAwakeZCodeTurnMetadataReader.Identity>) async -> [KeepAwakeZCodeTurnMetadataReader.Terminal] {
+            requested = identities
+            return await withCheckedContinuation { continuation = $0 }
+        }
+        func isWaiting() -> Bool { continuation != nil }
+        func finish(_ results: [KeepAwakeZCodeTurnMetadataReader.Terminal]) {
+            continuation?.resume(returning: results); continuation = nil
+        }
+    }
+    @MainActor private func zcodeFixture(gate: ZCodeGate) throws -> (UserDefaults, URL, KeepAwakeService) {
+        let name = "KA1ZCodeService-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defaults.set(["zcode-desktop"], forKey: "keepAwake.sources.v1")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let service = KeepAwakeService(defaults: defaults, root: root, hookUninstaller: { _ in },
+            zcodeSampler: { await gate.sample($0) })
+        service.start() // Remains disabled: no real power assertion is acquired.
+        return (defaults, root, service)
+    }
+    @MainActor private func submitZCode(_ identity: KeepAwakeZCodeTurnMetadataReader.Identity, root: URL,
+                                       service: KeepAwakeService) throws {
+        let credential = try JSONDecoder().decode(KeepAwakeMailbox.Credential.self,
+            from: Data(contentsOf: root.appendingPathComponent("credentials/zcode-desktop.json")))
+        var envelope = KeepAwakeMailbox.Envelope(generation: credential.generation,
+            event: .init(source: "zcode-desktop", session: identity.sessionHash, sequence: mach_continuous_time(),
+                         state: .running, taskID: identity.taskHash, startsTask: true),
+            issuedAt: Date().timeIntervalSince1970, mac: "")
+        envelope.mac = Data(HMAC<SHA256>.authenticationCode(for: envelope.authenticatedBytes,
+            using: SymmetricKey(data: Data(base64Encoded: credential.key)!))).base64EncodedString()
+        try JSONEncoder().encode(envelope).write(to: root.appendingPathComponent("inbox/" + UUID().uuidString + ".json"))
+        service.tick()
+    }
+    private func waitForZCode(_ gate: ZCodeGate) async {
+        for _ in 0..<100 {
+            if await gate.isWaiting() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Metadata sample did not begin")
+    }
+    @MainActor func testZCodeMetadataCompletesOnlyAdmittedExactTurnAndPreservesParallelTask() async throws {
+        let gate = ZCodeGate(), (defaults, root, service) = try zcodeFixture(gate: gate)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        let a = KeepAwakeZCodeTurnMetadataReader.Identity(sessionHash: String(repeating: "a", count: 64), taskHash: String(repeating: "1", count: 64))
+        let b = KeepAwakeZCodeTurnMetadataReader.Identity(sessionHash: a.sessionHash, taskHash: String(repeating: "2", count: 64))
+        try submitZCode(a, root: root, service: service)
+        await waitForZCode(gate)
+        try submitZCode(b, root: root, service: service)
+        await gate.finish([.init(identity: a, state: "completed", startedAt: 1, completedAt: 2),
+                           .init(identity: b, state: "completed", startedAt: 1, completedAt: 2)])
+        for _ in 0..<100 {
+            if service.engine.sessions.values.contains(where: { $0.event.taskID == a.taskHash && $0.event.state == .completed }) { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(service.engine.sessions.values.first { $0.event.taskID == a.taskHash }?.event.state, .completed)
+        XCTAssertTrue(service.engine.sessions.values.first { $0.event.taskID == b.taskHash }?.isUnfinished == true)
+        assertNoRealHold(service)
+    }
+    @MainActor func testZCodeMetadataLateResultCannotRecreateDisconnectedTask() async throws {
+        let gate = ZCodeGate(), (defaults, root, service) = try zcodeFixture(gate: gate)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        let identity = KeepAwakeZCodeTurnMetadataReader.Identity(sessionHash: String(repeating: "a", count: 64), taskHash: String(repeating: "1", count: 64))
+        try submitZCode(identity, root: root, service: service)
+        await waitForZCode(gate)
+        try service.disconnect(XCTUnwrap(KeepAwakeSource.all.first { $0.id == "zcode-desktop" }))
+        await gate.finish([.init(identity: identity, state: "completed", startedAt: 1, completedAt: 2)])
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertFalse(service.connections.contains("zcode-desktop"))
+        XCTAssertFalse(service.engine.sessions.values.contains { $0.event.source == "zcode-desktop" })
+        assertNoRealHold(service)
+    }
     @MainActor func testAppOwnedAcceptanceRecorderIsExplicitBoundedAndSurvivesCallerScope() throws {
         let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

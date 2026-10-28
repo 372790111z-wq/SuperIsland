@@ -197,6 +197,44 @@ final class KeepAwakeStableHookTests: XCTestCase {
             }
         }
     }
+    func testDelayedCompactFinalStopCannotReleaseAfterSessionStartOrResumedTool() throws {
+        // The vendor's compact stream and Stop batch finish independently.
+        // An old batch can construct FinalStop from the restored mutable root
+        // session, making its public fields identical to the real final event.
+        for resumesWithTool in [false, true] {
+            try withHome { home in
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+                let proof = KeepAwakeWorkBuddyTurnProof(credential: home.appendingPathComponent("credential"))
+                var engine = KeepAwakeEngine(); engine.setAutomatic(true)
+                var sequence: UInt64 = 0
+                func deliver(_ input: [String: Any]) throws {
+                    let verified = try proof.observe(input)
+                    guard let rawState = KeepAwakeHookContract.eventState(source: "workbuddy-desktop", input: input,
+                        verifiedWorkBuddyTurn: verified), let state = KeepAwakeEngine.TaskState(rawValue: rawState) else { return }
+                    let metadata = KeepAwakeHookContract.metadata(source: "workbuddy-desktop", input: input)
+                    sequence += 1
+                    XCTAssertTrue(engine.receive(.init(source: "workbuddy-desktop", session: "anonymous",
+                        sequence: sequence, state: state, taskID: metadata.taskID, startsTask: metadata.startsTask), now: Double(sequence)))
+                }
+                try deliver(workBuddy("UserPromptSubmit"))
+                try deliver(workBuddy("PreCompact"))
+                try deliver(workBuddy("PostCompact"))
+                var resume = workBuddy("SessionStart"); resume["source"] = "compact"
+                try deliver(resume)
+                if resumesWithTool { try deliver(workBuddy("PreToolUse")) }
+                let delayedCompactFinal = workBuddy("FinalStop")
+                let eventualRootFinal = workBuddy("FinalStop")
+                XCTAssertEqual(delayedCompactFinal as NSDictionary, eventualRootFinal as NSDictionary)
+                try deliver(delayedCompactFinal)
+                XCTAssertTrue(engine.sessions.values.contains(where: \.isUnfinished))
+                XCTAssertTrue(engine.evaluate(now: 86_400, environment: .init(hardware: .desktop)).hold)
+                // Without an independent settlement proof, even a second
+                // identical event cannot safely be called the root ending.
+                try deliver(eventualRootFinal)
+                XCTAssertTrue(engine.sessions.values.contains(where: \.isUnfinished))
+            }
+        }
+    }
     func testWorkBuddyFinalVerificationAndDeliveryAreSerializedWithCompaction() throws {
         try withHome { home in
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)

@@ -110,6 +110,10 @@ final class KeepAwakeService: ObservableObject {
     private var nextCodexPoll: TimeInterval = 0
     private var codexSequence: UInt64 = 0
     private var codexLedger = KeepAwakeCodexMonitor.Ledger()
+    private var zcodeTask: Task<Void, Never>?
+    private var zcodeGeneration: UInt64 = 0
+    private var nextZCodePoll: TimeInterval = 0
+    private let zcodeSampler: @Sendable (Set<KeepAwakeZCodeTurnMetadataReader.Identity>) async -> [KeepAwakeZCodeTurnMetadataReader.Terminal]
     private let codexSampler: (@MainActor () async throws -> KeepAwakeCodexMonitor.Snapshot)?
     private let codexAvailability: @MainActor () -> Bool
     private let codexResolver: @MainActor () throws -> KeepAwakeCodexEnvironment.Profile
@@ -151,7 +155,8 @@ final class KeepAwakeService: ObservableObject {
          codexResolver: @escaping @MainActor () throws -> KeepAwakeCodexEnvironment.Profile = { try KeepAwakeCodexEnvironment.discover() },
          codexHookInstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil,
          codexHookUninstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil,
-         lidClient: KeepAwakeLidClient? = nil) {
+         lidClient: KeepAwakeLidClient? = nil,
+         zcodeSampler: (@Sendable (Set<KeepAwakeZCodeTurnMetadataReader.Identity>) async -> [KeepAwakeZCodeTurnMetadataReader.Terminal])? = nil) {
         self.defaults = defaults
         lid = lidClient ?? KeepAwakeLidClient(
             readEnabledIntent: { defaults.bool(forKey: KeepAwakeLidClient.enabledIntentKey) },
@@ -163,6 +168,12 @@ final class KeepAwakeService: ObservableObject {
         self.codexResolver = codexResolver
         self.codexHookInstaller = codexHookInstaller
         self.codexHookUninstaller = codexHookUninstaller
+        self.zcodeSampler = zcodeSampler ?? { identities in
+            await Task.detached(priority: .utility) {
+                guard KeepAwakeZCodeTurnMetadataReader.defaultPathIsConfigured() else { return [] }
+                return KeepAwakeZCodeTurnMetadataReader.read(identities: identities)
+            }.value
+        }
         codexConnections = KeepAwakeCodexConnection.load(defaults.data(forKey: KeepAwakeCodexConnection.defaultsKey))
         cleanupPendingSources = Set(defaults.stringArray(forKey: Self.cleanupKey) ?? [])
         let support = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -243,6 +254,7 @@ final class KeepAwakeService: ObservableObject {
         completionSleep.cancel()
         cancelResume()
         codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
+        zcodeGeneration &+= 1; zcodeTask?.cancel(); zcodeTask = nil
         localSourceGeneration += 1; localSourceTask?.cancel(); localSourceTask = nil
         timer?.invalidate(); timer = nil; engine.stop(); lid.suspendForShutdown()
         power.apply(hold: false, policy: .system, notebook: isNotebook)
@@ -394,6 +406,9 @@ final class KeepAwakeService: ObservableObject {
             throw error
         }
         engine.disconnect(source: source.id); receivedSources.remove(source.id)
+        if source.id == "zcode-desktop" {
+            zcodeGeneration &+= 1; zcodeTask?.cancel(); zcodeTask = nil; nextZCodePoll = 0
+        }
         connections.insert(source.id); saveSources()
         sourceRestorationIssues.remove(source.id)
         record(source.name + " 配置已写入，等待真实事件验证；结束信号不明时会继续保持。")
@@ -401,6 +416,9 @@ final class KeepAwakeService: ObservableObject {
     }
     func disconnect(_ source: KeepAwakeSource) throws {
         completionSleep.cancel()
+        if source.id == "zcode-desktop" {
+            zcodeGeneration &+= 1; zcodeTask?.cancel(); zcodeTask = nil
+        }
         // Stop accepting events first, even if external configuration restoration fails.
         engine.disconnect(source: source.id); connections.remove(source.id); receivedSources.remove(source.id)
         saveSources()
@@ -498,6 +516,7 @@ final class KeepAwakeService: ObservableObject {
                 }
             }
         }
+        pollZCodeSource(now: now)
         // Evaluating an unchanged value through @Published's modifying accessor
         // used to invalidate settings and menus on every timer tick.
         var evaluatedEngine = engine
@@ -659,6 +678,40 @@ final class KeepAwakeService: ObservableObject {
             let unknown = self.engine.capacityExceededSources.contains(source) || unfinished.contains { $0.event.state == .idle }
             self.codexStatus = unknown || (!unfinished.isEmpty && snapshot.threads.allSatisfy({ $0.status != "active" })) ?
                 "任务状态待核实 · 继续保持；" + status : status
+            self.tick()
+        }
+    }
+    private func pollZCodeSource(now: TimeInterval) {
+        let source = "zcode-desktop"
+        guard started, connections.contains(source), zcodeTask == nil, now >= nextZCodePoll else { return }
+        let identities = Set(engine.sessions.values.compactMap { session -> KeepAwakeZCodeTurnMetadataReader.Identity? in
+            guard session.event.source == source, session.isUnfinished, let task = session.event.taskID else { return nil }
+            return .init(sessionHash: session.event.session, taskHash: task)
+        })
+        guard !identities.isEmpty else { return }
+        nextZCodePoll = now + 5
+        let generation = zcodeGeneration, sample = zcodeSampler
+        zcodeTask = Task { @MainActor [weak self] in
+            let terminal = await sample(identities)
+            guard !Task.isCancelled, let self, self.started,
+                  generation == self.zcodeGeneration, self.connections.contains(source) else { return }
+            self.zcodeTask = nil
+            self.nextZCodePoll = KeepAwakeClock.now() + 5
+            for result in terminal where identities.contains(result.identity) {
+                let event = KeepAwakeEngine.Event(source: source, session: result.identity.sessionHash,
+                    sequence: mach_continuous_time(), state: KeepAwakeEngine.TaskState(rawValue: result.state) ?? .idle,
+                    taskID: result.identity.taskHash, startsTask: false)
+                guard event.state.isTerminal, self.engine.sessions[event.storageKey]?.isUnfinished == true,
+                      self.engine.receive(event, now: KeepAwakeClock.now()) else { continue }
+                if let session = self.engine.sessions[event.storageKey] { self.updateRecap(sessions: [session], complete: false) }
+                self.acceptance.append("accepted-task-event", fields: ["source": source,
+                    "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
+                    "taskHash": KeepAwakeHookContract.anonymousIdentity(result.identity.taskHash),
+                    "state": event.state.rawValue, "startsTask": false, "evidence": "exact-turn-status"])
+                if event.state == .completed && self.engine.enabled {
+                    self.notifyCompletion(source: source, session: event.session, sequence: event.sequence)
+                }
+            }
             self.tick()
         }
     }
