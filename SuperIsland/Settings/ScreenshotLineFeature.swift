@@ -917,6 +917,17 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         guard let data = entry.data(forType: .png) ?? entry.data(forType: .tiff), data.count <= 64 * 1024 * 1024,
               let image = NSImage(data: data), let tiff = image.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) else { return }
+        // Another app may temporarily replace the clipboard (for example, for
+        // dictation) and then restore the same image with a new changeCount.
+        // Keep the existing card instead of treating that restoration as a capture.
+        guard !items.contains(where: { item in
+            guard item.kind == .image,
+                  item.url.deletingLastPathComponent().standardizedFileURL == clipboardFolder.standardizedFileURL,
+                  let size = try? item.url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                  size == png.count,
+                  let existing = try? Data(contentsOf: item.url, options: .mappedIfSafe) else { return false }
+            return existing == png
+        }) else { return }
         let url = clipboardFolder.appendingPathComponent(UUID().uuidString + ".png")
         do { try png.write(to: url, options: .atomic); add(url, owned: true) }
         catch { setStatus(SL("剪贴板图片保存失败：") + error.localizedDescription) }

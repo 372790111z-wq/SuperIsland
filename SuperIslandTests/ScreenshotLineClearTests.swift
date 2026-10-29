@@ -193,6 +193,42 @@ final class ScreenshotLineClearTests: XCTestCase {
         let saved = try JSONDecoder().decode([ScreenshotLineItem].self, from: Data(contentsOf: f.root.appendingPathComponent("index.json")))
         XCTAssertEqual(saved, line.items)
     }
+    @MainActor func testRestoredClipboardImageDoesNotCreateAnotherCard() throws {
+        let f = try Fixture(); defer { f.dispose() }
+        f.defaults.set(true, forKey: "screenshotLine.clipboard")
+        let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+
+        func image(_ byte: UInt8) -> Data {
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+                                       bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                       isPlanar: false, colorSpaceName: .deviceRGB,
+                                       bytesPerRow: 0, bitsPerPixel: 0)!
+            memset(rep.bitmapData!, Int32(byte), rep.bytesPerRow * rep.pixelsHigh)
+            return rep.representation(using: .png, properties: [:])!
+        }
+        func publishImage(_ data: Data) {
+            let entry = NSPasteboardItem(); entry.setData(data, forType: .png)
+            f.pasteboard.clearContents(); f.pasteboard.writeObjects([entry])
+            RunLoop.current.run(until: Date().addingTimeInterval(0.75))
+        }
+
+        let original = image(32)
+        publishImage(original)
+        XCTAssertEqual(line.items.count, 1)
+        publishImage(original)
+        XCTAssertEqual(line.items.count, 1, "A repeated image must not depend on a specific app or shortcut")
+
+        let text = NSPasteboardItem()
+        text.setString("test", forType: .string)
+        text.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        f.pasteboard.clearContents(); f.pasteboard.writeObjects([text])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.75))
+        publishImage(original)
+        XCTAssertEqual(line.items.count, 1, "Restoring the same image must not create another card")
+
+        publishImage(image(200))
+        XCTAssertEqual(line.items.count, 2, "A different image must still enter the lanyard")
+    }
     @MainActor func testDisableDuringConfirmationCancelsWithoutSavingPreference() async throws {
         let f = try Fixture(); defer { f.dispose() }; let item = try f.file("one.png"); try f.index()
         let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
