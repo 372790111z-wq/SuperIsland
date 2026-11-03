@@ -32,14 +32,15 @@ final class FeatureMasterSwitchTests: XCTestCase {
             pasteboard.releaseGlobally()
             try? FileManager.default.removeItem(at: root)
         }
-        func image() throws -> Data {
+        func image(_ byte: UInt8 = 32) throws -> Data {
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            memset(rep.bitmapData!, Int32(byte), rep.bytesPerRow * rep.pixelsHigh)
             return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
         }
-        func copyImage() throws {
-            let item = NSPasteboardItem(); item.setData(try image(), forType: .png)
+        func copyImage(_ byte: UInt8 = 32) throws {
+            let item = NSPasteboardItem(); item.setData(try image(byte), forType: .png)
             pasteboard.clearContents(); pasteboard.writeObjects([item])
         }
         func snapshot(original: ScreenshotLinePrefs.Value, owned: ScreenshotLinePrefs.Value) throws {
@@ -83,8 +84,8 @@ final class FeatureMasterSwitchTests: XCTestCase {
         XCTAssertFalse(reopened.isEnabled); XCTAssertEqual(reopened.items, line.items)
         reopened.setEnabled(true); try await wait()
         XCTAssertEqual(reopened.items.count, 1, "Off-period copy establishes the new baseline")
-        try f.copyImage(); try await wait()
-        XCTAssertEqual(reopened.items.count, 2)
+        try f.copyImage(200); try await wait()
+        XCTAssertEqual(reopened.items.count, 2, "A new image after re-enabling is still collected")
         XCTAssertEqual(f.writes, 0, "A master toggle must not take over system screenshots")
     }
 
