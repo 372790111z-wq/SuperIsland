@@ -69,6 +69,60 @@ final class KeepAwakeRecapTests: XCTestCase {
     func completed() -> R {
         var r=begin([task()]); r.observe(frame(2,hold:false,tasks:[task(state:.completed)]));r.observe(frame(3,closed:false,hold:false));return r
     }
+    @MainActor func testFirstThermalObservationPersistsBeforeOrdinaryCheckpoint() async throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let name = "KA2-Thermal-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!; defer { defaults.removePersistentDomain(forName: name) }
+        let controller = KeepAwakeRecapController(defaults: defaults, root: root, isLocked: { false })
+        controller.start(installUI: false); await controller.flush()
+        controller.observe(frame(0, closed: false, hold: false))
+        controller.observe(frame(1)); await controller.flush()
+        var hot = frame(2, hold: false); hot.protection = true; hot.thermalProtection = true; hot.thermalLevel = 3
+        controller.observe(hot); await controller.flush()
+        let saved = try JSONDecoder().decode(R.self, from: Data(contentsOf: root.appendingPathComponent("Recap/summary.json")))
+        XCTAssertEqual(saved.current?.firstThermalProtection?.stamp, stamp(2))
+        XCTAssertEqual(saved.current?.firstThermalProtection?.level, 3)
+        await controller.prepareForTermination()
+    }
+
+    @MainActor func testFirstLowPowerObservationPersistsAndLegacySummaryStillLoads() async throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let name = "KA2-LowPower-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!; defer { defaults.removePersistentDomain(forName: name) }
+        let controller = KeepAwakeRecapController(defaults: defaults, root: root, isLocked: { false })
+        controller.start(installUI: false); await controller.flush()
+        controller.observe(frame(0, closed: false, hold: false)); controller.observe(frame(1)); await controller.flush()
+        var low = frame(2, hold: false); low.protection = true; low.lowPowerProtection = true
+        controller.observe(low); await controller.flush()
+        let data = try Data(contentsOf: root.appendingPathComponent("Recap/summary.json"))
+        let saved = try JSONDecoder().decode(R.self, from: data)
+        XCTAssertEqual(saved.current?.firstLowPowerProtection, stamp(2))
+        low.stamp = stamp(3); controller.observe(low)
+        XCTAssertEqual(controller.ledger.current?.firstLowPowerProtection, stamp(2))
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var current = try XCTUnwrap(legacy["current"] as? [String: Any]); current.removeValue(forKey: "firstLowPowerProtection"); legacy["current"] = current
+        XCTAssertNil(try JSONDecoder().decode(R.self, from: JSONSerialization.data(withJSONObject: legacy)).current?.firstLowPowerProtection)
+        await controller.prepareForTermination()
+    }
+
+    func testThermalObservationIsBoundedAndOlderSummariesStillDecode() throws {
+        var recap = begin([task()])
+        var hot = frame(2, hold: false, tasks: [task()])
+        hot.protection = true; hot.thermalProtection = true; hot.thermalLevel = 2
+        recap.observe(hot)
+        for i in 3...1000 {
+            hot.stamp = stamp(Double(i)); hot.thermalLevel = 3; recap.observe(hot)
+        }
+        let first = try XCTUnwrap(recap.current?.firstThermalProtection)
+        XCTAssertEqual(first.stamp, stamp(2)); XCTAssertEqual(first.level, 2)
+        let data = try JSONEncoder().encode(recap)
+        XCTAssertEqual(try JSONDecoder().decode(R.self, from: data).current?.firstThermalProtection, first)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var cycle = try XCTUnwrap(legacy["current"] as? [String: Any]); cycle.removeValue(forKey: "firstThermalProtection")
+        legacy["current"] = cycle
+        XCTAssertNil(try JSONDecoder().decode(R.self, from: JSONSerialization.data(withJSONObject: legacy)).current?.firstThermalProtection)
+    }
+
     func testConcurrentIntervalsAreNotSummedAndReleaseGraceCounts() throws {
         var r=R();r.observe(frame(0,closed:false,hold:false))
         for t in 1...1140 {
@@ -130,6 +184,163 @@ final class KeepAwakeRecapTests: XCTestCase {
     }
     func testRequestAcceptedDoesNotProveSleep() {
         var r=begin();r.sleepRequestAccepted(stamp(2));r.observe(frame(3,closed:false,hold:false));XCTAssertTrue(r.latest!.sleepRequested);XCTAssertNil(r.latest?.sleepAt)
+    }
+    private func kernelFrame(_ t: Double, sleep: Double, wake: Double, awake: Double, closed: Bool = true) -> R.Frame {
+        var value = frame(t, closed: closed, hold: false, awake: awake)
+        value.kernelSleepTime = 1_800_000_000 + sleep
+        value.kernelWakeTime = 1_800_000_000 + wake
+        return value
+    }
+    func testCapturedThreeSleepsSurviveDarkWakeWithoutWorkspaceCallbacks() throws {
+        var r = begin(); r.observe(frame(2, hold: false)); r.willSleep(stamp(5))
+        r.observe(kernelFrame(606, sleep: 10, wake: 605, awake: 11))
+        r.observe(kernelFrame(1533, sleep: 616, wake: 1532, awake: 22))
+        r.observe(kernelFrame(9075, sleep: 8070, wake: 9074, awake: 6560))
+        XCTAssertEqual(r.current?.sleepCount, 3)
+        XCTAssertNil(r.current?.sleepStart, "The old willSleep anchor must not span several DarkWakes")
+        r.observe(kernelFrame(10_000, sleep: 8070, wake: 9074, awake: 7485, closed: false))
+        r.didWake(stamp(10_001, awake: 7486))
+        let cycle = try XCTUnwrap(r.latest)
+        XCTAssertEqual(cycle.sleepCount, 3)
+        XCTAssertEqual(cycle.sleepAt, 1_800_000_010)
+        XCTAssertEqual(cycle.timeline.filter { $0.title == "已确认系统实际休眠" }.count, 3)
+        XCTAssertEqual(cycle.timeline.filter { $0.title.contains("仍合盖，内核已确认") }.count, 3)
+        XCTAssertTrue(r.validate())
+        let restored = try JSONDecoder().decode(R.self, from: JSONEncoder().encode(r))
+        XCTAssertEqual(restored.latest?.sleepCount, 3)
+        XCTAssertTrue(restored.validate())
+    }
+    func testNotificationFirstAndKernelFirstBothDeduplicateTheSameSleep() {
+        for notificationFirst in [false, true] {
+            var r = begin(); r.observe(frame(2, hold: false)); r.willSleep(stamp(5))
+            if notificationFirst { r.didWake(stamp(605, awake: 10)) }
+            r.observe(kernelFrame(606, sleep: 10, wake: 605, awake: 11))
+            if !notificationFirst { r.didWake(stamp(607, awake: 12)) }
+            for t in 608...620 { r.observe(kernelFrame(Double(t), sleep: 10, wake: 605, awake: Double(t)-595)) }
+            XCTAssertEqual(r.current?.sleepCount, 1)
+            XCTAssertEqual(r.current?.sleepAt, 1_800_000_010)
+            XCTAssertEqual(r.current?.timeline.filter { $0.title == "已确认系统实际休眠" }.count, 1)
+        }
+    }
+    func testFirstOpenFrameCanConfirmFinalSleepButLaterOpenFramesCannotRewriteIt() {
+        var r = begin(); r.observe(frame(2, hold: false))
+        r.observe(kernelFrame(606, sleep: 10, wake: 605, awake: 11, closed: false))
+        XCTAssertEqual(r.latest?.sleepCount, 1)
+        let frozen = r.latest
+        r.observe(kernelFrame(1000, sleep: 700, wake: 900, awake: 205, closed: false))
+        XCTAssertEqual(r.latest, frozen)
+    }
+    func testOldInvalidFutureAndRegressingKernelPairsCannotInventSleep() {
+        var r = begin(); r.observe(frame(2, hold: false))
+        for pair in [(-100.0, 0.0), (20, 19), (3, 1000), (Double.nan, 10), (3, Double.infinity)] {
+            r.observe(kernelFrame(20, sleep: pair.0, wake: pair.1, awake: 20))
+        }
+        XCTAssertEqual(r.current?.sleepCount, 0)
+        r.observe(kernelFrame(606, sleep: 10, wake: 605, awake: 11))
+        r.observe(kernelFrame(607, sleep: 5, wake: 600, awake: 12))
+        XCTAssertEqual(r.current?.sleepCount, 1)
+        XCTAssertTrue(r.validate())
+    }
+    func testKernelSleepWhileHoldingDoesNotClaimContinuousHold() {
+        var r = begin([task()])
+        var value = kernelFrame(606, sleep: 10, wake: 605, awake: 11)
+        value.actualHold = true; value.lidApplied = true; value.tasks = [task()]
+        r.observe(value); r.observe(frame(607, closed: false, hold: false, awake: 12))
+        XCTAssertEqual(r.latest?.sleepCount, 1)
+        XCTAssertNil(r.latest?.holdDuration)
+        XCTAssertEqual(r.latest?.tasks.first?.state, .running)
+    }
+    func testKernelEvidenceIsBoundedAndLegacySummaryWithoutItStillDecodes() throws {
+        var r = begin(); r.observe(frame(2, hold: false))
+        for i in 1...100 {
+            let t = Double(i * 10)
+            r.observe(kernelFrame(t+1, sleep: t-5, wake: t, awake: t-Double(i*5)+1))
+        }
+        r.observe(frame(1002, closed: false, hold: false, awake: 502))
+        XCTAssertEqual(r.latest?.sleepCount, 100)
+        XCTAssertLessThanOrEqual(r.latest!.timeline.count, R.timelineLimit)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as? [String: Any])
+        var latest = try XCTUnwrap(json["latest"] as? [String: Any]); latest.removeValue(forKey: "lastSleepEvidence"); json["latest"] = latest
+        let restored = try JSONDecoder().decode(R.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertTrue(restored.validate()); XCTAssertEqual(restored.latest?.sleepCount, 100)
+    }
+    func testCPUDeferralExplainsOnlyAllowedAggregateTypesAndNeverStoresClientText() throws {
+        var r = begin()
+        r.sleepRequestDeferred(stamp(2), cpuBlocked: true, blockingTypes: ["BackgroundTask", "BackgroundTask", "private task content"])
+        let title = try XCTUnwrap(r.current?.timeline.last?.title)
+        XCTAssertTrue(title.contains("后台维护")); XCTAssertTrue(title.contains("暂缓"))
+        XCTAssertFalse(title.contains("private")); XCTAssertNil(r.current?.sleepAt)
+        XCTAssertFalse(r.current!.sleepRequested)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(r), as: UTF8.self).contains("private task content"))
+    }
+    func testRestoredInterruptedCycleCannotBackfillOldKernelPairAsAnotherSleep() throws {
+        var r = begin(); r.observe(frame(2, hold: false)); r.willSleep(stamp(5)); r.didWake(stamp(605, awake: 10))
+        r = try JSONDecoder().decode(R.self, from: JSONEncoder().encode(r))
+        r.resumeAfterRelaunch()
+        r.observe(kernelFrame(606, sleep: 10, wake: 605, awake: 11))
+        XCTAssertEqual(r.current?.sleepCount, 1)
+        XCTAssertTrue(r.current!.interrupted)
+        XCTAssertEqual(r.current?.lastSleepEvidence?.kernel, false)
+    }
+    func testWallClockRollbackDuringNotificationSleepKeepsStoreValidAndMarksUncertainty() {
+        var r = begin(); r.observe(frame(2, hold: false)); r.willSleep(stamp(5))
+        r.didWake(stamp(605, awake: 10, wall: 1_700_000_000))
+        XCTAssertEqual(r.current?.sleepCount, 1, "Monotonic clocks still prove suspension")
+        XCTAssertNil(r.current?.lastSleepEvidence)
+        XCTAssertTrue(r.current!.issues.contains("休眠期间系统时间发生变化，起止时间未确认"))
+        XCTAssertTrue(r.validate())
+    }
+    func testDelayedHistoricalKernelProofDoesNotStopAccountingForNewHold() {
+        var r = begin(); r.observe(frame(2, hold: false))
+        r.observe(frame(606, hold: false, awake: 11))
+        r.observe(frame(607, hold: true, awake: 12))
+        let before = r.current!.heldSeconds
+        var delayed = kernelFrame(608, sleep: 10, wake: 605, awake: 13)
+        delayed.actualHold = true; delayed.lidApplied = true
+        r.observe(delayed)
+        XCTAssertEqual(r.current?.sleepCount, 1)
+        XCTAssertEqual(r.current!.heldSeconds, before + 1, accuracy: 0.001)
+        XCTAssertFalse(r.current!.issues.contains("保持期间检测到休眠，部分保持时段未确认"))
+    }
+    @MainActor func testControllerPersistsThreeKernelSleepsAndDoesNotReopenAfterFreeze() async throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let name = "KA2-Kernel-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let controller = KeepAwakeRecapController(defaults: defaults, root: root, isLocked: { false })
+        controller.start(installUI: false); await controller.flush()
+        controller.observe(frame(0, closed: false, hold: false)); controller.observe(frame(1, hold: false))
+        controller.observe(kernelFrame(606, sleep: 10, wake: 605, awake: 11))
+        controller.observe(kernelFrame(1533, sleep: 616, wake: 1532, awake: 22))
+        controller.observe(kernelFrame(9075, sleep: 8070, wake: 9074, awake: 6560))
+        controller.observe(kernelFrame(10_000, sleep: 8070, wake: 9074, awake: 7485, closed: false))
+        await controller.flush()
+        let saved = try JSONDecoder().decode(R.self, from: Data(contentsOf: root.appendingPathComponent("Recap/summary.json")))
+        XCTAssertEqual(saved.latest?.sleepCount, 3)
+        XCTAssertEqual(controller.latest?.sleepCount, 3)
+        let frozen = controller.latest
+        controller.didWake(stamp(10_001, awake: 7486))
+        XCTAssertEqual(controller.latest, frozen)
+        await controller.prepareForTermination()
+    }
+    func testCPUDeferralPersistsWithoutClaimingRequestAcceptanceOrSleep() throws {
+        var r = begin()
+        r.sleepRequestDeferred(stamp(2), cpuBlocked: true)
+        r.sleepRequestDeferred(stamp(3), cpuBlocked: true)
+        XCTAssertFalse(r.current!.sleepRequested); XCTAssertNil(r.current!.sleepAt)
+        XCTAssertEqual(r.current!.timeline.filter { $0.title.contains("CPU") }.count, 1)
+        let restored = try JSONDecoder().decode(KeepAwakeRecap.self, from: JSONEncoder().encode(r))
+        XCTAssertTrue(restored.validate())
+        XCTAssertFalse(restored.current!.sleepRequested); XCTAssertNil(restored.current!.sleepAt)
+    }
+    func testUnknownCPUDeferralCannotCreateCycleOrAlterClosedCycle() {
+        var r = KeepAwakeRecap()
+        r.sleepRequestDeferred(stamp(1), cpuBlocked: nil)
+        XCTAssertNil(r.current); XCTAssertNil(r.latest)
+        r = begin(); r.observe(frame(3, closed: false, hold: false))
+        let latest = r.latest
+        r.sleepRequestDeferred(stamp(4), cpuBlocked: nil)
+        XCTAssertEqual(r.latest, latest)
     }
     func testWillSleepWithNoSuspensionCannotClaimActualSleep() {
         var r=begin();r.willSleep(stamp(2));r.didWake(stamp(3));r.observe(frame(4,closed:false,hold:false));XCTAssertNil(r.latest?.sleepAt)

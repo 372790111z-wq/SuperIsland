@@ -438,3 +438,128 @@ final class KeepAwakeZCodeTurnMetadataReaderTests: XCTestCase {
         XCTAssertFalse(Reader.defaultPathIsConfigured(home: home))
     }
 }
+
+
+final class KeepAwakeCodexTurnMetadataReaderTests: XCTestCase {
+    private typealias Reader = KeepAwakeCodexTurnMetadataReader
+    private let now: TimeInterval = 1_800_000_100
+    private let schema = "CREATE TABLE thread_turns(thread_id TEXT,turn_id TEXT,status TEXT,started_at INTEGER,completed_at INTEGER,error_json TEXT,PRIMARY KEY(thread_id,turn_id));CREATE TABLE thread_items(private_body TEXT)"
+    private func identity(_ thread: String = "thread-a", _ turn: String = "turn-a") -> Reader.Identity {
+        .init(sessionHash: KeepAwakeHookContract.anonymousIdentity(thread), taskHash: KeepAwakeHookContract.anonymousIdentity(turn))
+    }
+    private func execute(_ sql: String, _ db: OpaquePointer) throws {
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw CocoaError(.fileWriteUnknown) }
+    }
+    private func fixture(_ override: String? = nil, _ body: (OpaquePointer, URL) throws -> Void) throws {
+        let temporary = FileManager.default.temporaryDirectory.path
+        let physical = temporary.hasPrefix("/var/") ? "/private" + temporary : temporary
+        let path = URL(fileURLWithPath: physical).appendingPathComponent("codex-turn-meta-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: path) }
+        let url = path.appendingPathComponent("thread_history_1.sqlite")
+        var raw: OpaquePointer?; XCTAssertEqual(sqlite3_open(url.path, &raw), SQLITE_OK)
+        let db = try XCTUnwrap(raw); defer { sqlite3_close(db) }
+        try execute(override ?? schema, db); try body(db, url)
+    }
+    private func insert(_ db: OpaquePointer, thread: String = "thread-a", turn: String = "turn-a", state: String = "failed",
+                        start: Int64 = 1_800_000_000, end: Int64 = 1_800_000_010) throws {
+        var raw: OpaquePointer?; XCTAssertEqual(sqlite3_prepare_v2(db, "INSERT INTO thread_turns(thread_id,turn_id,status,started_at,completed_at) VALUES(?,?,?,?,?)", -1, &raw, nil), SQLITE_OK)
+        let q = try XCTUnwrap(raw); defer { sqlite3_finalize(q) }
+        let copy = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(q, 1, thread, -1, copy); sqlite3_bind_text(q, 2, turn, -1, copy); sqlite3_bind_text(q, 3, state, -1, copy)
+        sqlite3_bind_int64(q, 4, start); sqlite3_bind_int64(q, 5, end); XCTAssertEqual(sqlite3_step(q), SQLITE_DONE)
+    }
+    func testExactFailedOldTurnClosesDespiteANewerCompletedTurn() throws {
+        try fixture { db, url in
+            try insert(db); try insert(db, turn: "newer", state: "completed", start: 1_800_000_020, end: 1_800_000_030)
+            try insert(db, thread: "other-thread", state: "completed")
+            let r = Reader.read(database: url, identities: [identity()], now: now)
+            XCTAssertEqual(r, [.init(identity: identity(), state: "failed", startedAt: 1_800_000_000, completedAt: 1_800_000_010)])
+        }
+    }
+    func testAllExplicitCodexTerminalStatesAndUnknownStatesRemainDistinct() throws {
+        try fixture { db, url in
+            for state in ["completed", "failed", "interrupted", "idle", "Stop", "inProgress", "unknown", "error", "cancelled"] {
+                try insert(db, turn: state, state: state)
+            }
+            let known = Set(["completed", "failed", "interrupted", "idle", "Stop", "inProgress", "unknown", "error", "cancelled"].map { identity("thread-a", $0) })
+            let r = Reader.read(database: url, identities: known, now: now)
+            XCTAssertEqual(Set(r.map(\.state)), ["completed", "failed", "cancelled"]); XCTAssertEqual(r.count, 3)
+        }
+    }
+    func testAnotherThreadOrAnotherTurnCannotClosePendingIdentity() throws {
+        try fixture { db, url in
+            try insert(db, thread: "other"); try insert(db, turn: "old")
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+            try insert(db, state: "inProgress")
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+        }
+    }
+    func testWALMetadataIsFreshAndPrivateColumnsAndItemsAreNeverProjected() throws {
+        try fixture { db, url in
+            try execute("PRAGMA journal_mode=WAL", db); try insert(db)
+            try execute("UPDATE thread_turns SET error_json=zeroblob(1000000);INSERT INTO thread_items VALUES('private fixture, never query')", db)
+            let wal = URL(fileURLWithPath: url.path + "-wal")
+            let original = try Data(contentsOf: url), originalWAL = try Data(contentsOf: wal)
+            XCTAssertEqual(Reader.read(database: url, identities: [identity()], now: now).map(\.state), ["failed"])
+            XCTAssertEqual(try Data(contentsOf: url), original); XCTAssertEqual(try Data(contentsOf: wal), originalWAL)
+        }
+    }
+    func testViewsAndMissingSchemaCannotSupplyEndProof() throws {
+        let view = "CREATE TABLE hidden(thread_id TEXT,turn_id TEXT,status TEXT,started_at INTEGER,completed_at INTEGER);INSERT INTO hidden VALUES('thread-a','turn-a','failed',1800000000,1800000010);CREATE VIEW thread_turns AS SELECT * FROM hidden"
+        for schema in [view, "CREATE TABLE thread_turns(thread_id TEXT,turn_id TEXT,status TEXT)"] {
+            try fixture(schema) { _, url in XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty) }
+        }
+    }
+    func testDuplicateFactsFailClosedRatherThanChoosingLatest() throws {
+        try fixture("CREATE TABLE thread_turns(thread_id TEXT,turn_id TEXT,status TEXT,started_at INTEGER,completed_at INTEGER)") { db, url in
+            try insert(db); try insert(db, state: "completed")
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+        }
+    }
+    func testInvalidMissingOrMillisecondClocksDoNotEndTask() throws {
+        try fixture { db, url in
+            for (turn, start, end) in [("negative", Int64(-1), Int64(1)), ("backwards", 20, 10), ("future", 1_800_000_000, 1_800_001_000), ("milliseconds", 1_800_000_000_000, 1_800_000_010_000)] {
+                try insert(db, turn: turn, start: start, end: end)
+            }
+            try insert(db, turn: "null"); try insert(db, turn: "text")
+            try execute("UPDATE thread_turns SET completed_at=NULL WHERE turn_id='null';UPDATE thread_turns SET started_at='invalid' WHERE turn_id='text'", db)
+            let known = Set(["negative", "backwards", "future", "milliseconds", "null", "text"].map { identity("thread-a", $0) })
+            XCTAssertTrue(Reader.read(database: url, identities: known, now: now).isEmpty)
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: .nan).isEmpty)
+        }
+    }
+    func testSymlinkAndSidecarSymlinkAreRejected() throws {
+        try fixture { db, url in
+            try insert(db)
+            let link = url.appendingPathExtension("link"); try FileManager.default.createSymbolicLink(at: link, withDestinationURL: url)
+            XCTAssertTrue(Reader.read(database: link, identities: [identity()], now: now).isEmpty)
+            try FileManager.default.createSymbolicLink(at: URL(fileURLWithPath: url.path + "-wal"), withDestinationURL: url)
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+        }
+    }
+    func testMissingOrCorruptDatabaseDoesNotCreateAnythingOrEndTask() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        try Data("invalid".utf8).write(to: url); defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now).isEmpty)
+    }
+    func testHistoryReadHasAnInstructionAndTimeBudget() throws {
+        try fixture { db, url in
+            try execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO thread_turns(thread_id,turn_id,status,started_at,completed_at) SELECT 'other',CAST(x AS TEXT),'completed',1800000000,1800000010 FROM n", db)
+            let start = ProcessInfo.processInfo.systemUptime
+            XCTAssertTrue(Reader.read(database: url, identities: [identity()], now: now, budget: .init(maximumVMInstructions: 1000, maximumDuration: 0.05)).isEmpty)
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 1)
+        }
+    }
+    func testOnlyAuthorizedHomeAndMainIdentitiesAreEligible() throws {
+        let authorized = URL(fileURLWithPath: "/fixture/authorized")
+        XCTAssertEqual(Reader.databaseURL(codexHome: authorized, authorizedHome: authorized), authorized.appendingPathComponent("thread_history_1.sqlite"))
+        XCTAssertNil(Reader.databaseURL(codexHome: URL(fileURLWithPath: "/fixture/another"), authorizedHome: authorized))
+        XCTAssertTrue(Reader.isMainIdentity(identity()))
+        let auxiliary = try XCTUnwrap(KeepAwakeHookContract.metadata(source: "codex-desktop", input: ["hook_event_name": "PreCompact", "session_id": "thread-a", "turn_id": "turn-a"]).taskID)
+        XCTAssertFalse(Reader.isMainIdentity(.init(sessionHash: identity().sessionHash, taskHash: auxiliary)))
+        XCTAssertFalse(Reader.isMainIdentity(.init(sessionHash: identity().sessionHash, taskHash: "legacy")))
+    }
+}

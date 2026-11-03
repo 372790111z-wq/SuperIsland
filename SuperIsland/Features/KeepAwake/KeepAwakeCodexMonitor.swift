@@ -190,10 +190,9 @@ enum KeepAwakeCodexMonitor {
     }
 }
 
-/// ZCode's final per-turn usage fact is written after Stop hooks have either
-/// continued the model loop or accepted its ending. Read only that fact for a
-/// turn already admitted by an authenticated hook; absence is never an ending.
-enum KeepAwakeZCodeTurnMetadataReader {
+/// Fixed five-column projections share one bounded, read-only SQLite core.
+/// No caller can add a table, message column, view, or custom SQL expression.
+enum KeepAwakeTurnMetadataReader {
     struct Identity: Hashable, Sendable {
         var sessionHash: String
         var taskHash: String
@@ -208,39 +207,21 @@ enum KeepAwakeZCodeTurnMetadataReader {
         var maximumVMInstructions = 200_000
         var maximumDuration: TimeInterval = 0.25
     }
-    static var defaultDatabaseURL: URL {
-        defaultDatabaseURL(home: FileManager.default.homeDirectoryForCurrentUser)
+    enum Schema {
+        case zcode, codex
+        var table: String { self == .zcode ? "turn_usage" : "thread_turns" }
+        var sessionColumn: String { self == .zcode ? "session_id" : "thread_id" }
+        var clockScale: Double { self == .zcode ? 1000 : 1 }
+        func terminalState(_ value: String) -> String? {
+            switch self {
+            case .zcode: ["completed": "completed", "error": "failed", "cancelled": "cancelled"][value]
+            case .codex: ["completed": "completed", "failed": "failed", "interrupted": "cancelled"][value]
+            }
+        }
     }
-    static func defaultDatabaseURL(home: URL) -> URL {
-        home.appendingPathComponent(".zcode/cli/db/db.sqlite")
-    }
-
-    /// A custom/invalid path must not silently cause a read of a different,
-    /// stale default database. Only the already-authorized configuration field
-    /// is inspected; its other keys are neither returned nor retained.
-    static func defaultPathIsConfigured(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
-        let url = home.appendingPathComponent(".zcode/cli/config.json")
-        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
-        guard descriptor >= 0 else { return errno == ENOENT }
-        defer { close(descriptor) }
-        var info = stat()
-        guard fstat(descriptor, &info) == 0, isOwnedRegular(info), info.st_size <= 1_048_576 else { return false }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
-        guard let data = try? handle.read(upToCount: 1_048_577), data.count <= 1_048_576,
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
-        guard let rawStorage = root["storage"] else { return true }
-        guard let storage = rawStorage as? [String: Any] else { return false }
-        guard let rawPath = storage["sessionDbPath"] else { return true }
-        guard var path = rawPath as? String, !path.isEmpty, path.utf8.count <= 4096,
-              !path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return false }
-        if path.hasPrefix("~/") { path = home.appendingPathComponent(String(path.dropFirst(2))).path }
-        guard path.hasPrefix("/") else { return false }
-        return URL(fileURLWithPath: path).standardizedFileURL.path == defaultDatabaseURL(home: home).standardizedFileURL.path
-    }
-
     /// Synchronous and bounded; the service calls this off the main thread.
     /// A failed or interrupted read returns no proof, preserving unknown holds.
-    static func read(database: URL = defaultDatabaseURL, identities: Set<Identity>,
+    static func read(database: URL, schema: Schema, identities: Set<Identity>,
                      now: TimeInterval = Date().timeIntervalSince1970,
                      budget: Budget = Budget()) -> [Terminal] {
         guard !identities.isEmpty, identities.count <= 1024,
@@ -269,7 +250,7 @@ enum KeepAwakeZCodeTurnMetadataReader {
         // The native table contains more usage columns than our projection.
         // This limit also applies while SQLite parses its existing schema.
         sqlite3_limit(connection, SQLITE_LIMIT_COLUMN, 128)
-        let context = ReadContext(identities: identities, budget: budget)
+        let context = ReadContext(identities: identities, schema: schema, budget: budget)
         defer { withExtendedLifetime(context) {} }
         let opaque = Unmanaged.passUnretained(context).toOpaque()
         guard sqlite3_create_function_v2(connection, "superisland_known_turn", 2, SQLITE_UTF8,
@@ -277,25 +258,35 @@ enum KeepAwakeZCodeTurnMetadataReader {
                 guard let result, count == 2, let values, let raw = sqlite3_user_data(result) else { return }
                 let context = Unmanaged<ReadContext>.fromOpaque(raw).takeUnretainedValue()
                 guard context.withinDeadline else { sqlite3_result_error(result, "read budget exhausted", -1); return }
-                guard let session = KeepAwakeZCodeTurnMetadataReader.identifier(values[0]),
-                      let task = KeepAwakeZCodeTurnMetadataReader.identifier(values[1]) else { sqlite3_result_int(result, 0); return }
-                let identity = Identity(sessionHash: KeepAwakeZCodeTurnMetadataReader.digest(session),
-                                        taskHash: KeepAwakeZCodeTurnMetadataReader.digest(task))
+                guard let session = KeepAwakeTurnMetadataReader.identifier(values[0]),
+                      let task = KeepAwakeTurnMetadataReader.identifier(values[1]) else { sqlite3_result_int(result, 0); return }
+                let identity = Identity(sessionHash: KeepAwakeTurnMetadataReader.digest(session),
+                                        taskHash: KeepAwakeTurnMetadataReader.digest(task))
                 sqlite3_result_int(result, context.identities.contains(identity) ? 1 : 0)
             }, nil, nil, nil) == SQLITE_OK else { return [] }
-        sqlite3_set_authorizer(connection, { _, action, first, second, database, origin in
+        guard sqlite3_create_function_v2(connection, "superisland_known_session", 1, SQLITE_UTF8,
+            opaque, { result, count, values in
+                guard let result, count == 1, let values, let raw = sqlite3_user_data(result) else { return }
+                let context = Unmanaged<ReadContext>.fromOpaque(raw).takeUnretainedValue()
+                guard context.withinDeadline else { sqlite3_result_error(result, "read budget exhausted", -1); return }
+                guard let session = KeepAwakeTurnMetadataReader.identifier(values[0]) else { sqlite3_result_int(result, 0); return }
+                sqlite3_result_int(result, context.sessionHashes.contains(KeepAwakeTurnMetadataReader.digest(session)) ? 1 : 0)
+            }, nil, nil, nil) == SQLITE_OK else { return [] }
+        sqlite3_set_authorizer(connection, { raw, action, first, second, database, origin in
+            guard let raw else { return SQLITE_DENY }
+            let schema = Unmanaged<ReadContext>.fromOpaque(raw).takeUnretainedValue().schema
             switch action {
             case SQLITE_SELECT: return SQLITE_OK
             case SQLITE_READ:
                 guard origin == nil, let first, let second, let database,
-                      String(cString: database) == "main", String(cString: first) == "turn_usage",
-                      ["session_id", "turn_id", "status", "started_at", "completed_at"].contains(String(cString: second)) else { return SQLITE_DENY }
+                      String(cString: database) == "main", String(cString: first) == schema.table,
+                      [schema.sessionColumn, "turn_id", "status", "started_at", "completed_at"].contains(String(cString: second)) else { return SQLITE_DENY }
                 return SQLITE_OK
             case SQLITE_FUNCTION:
-                return second.map { String(cString: $0) == "superisland_known_turn" } == true ? SQLITE_OK : SQLITE_DENY
+                return second.map { ["superisland_known_turn", "superisland_known_session"].contains(String(cString: $0)) } == true ? SQLITE_OK : SQLITE_DENY
             default: return SQLITE_DENY
             }
-        }, nil)
+        }, opaque)
         sqlite3_progress_handler(connection, 100, { raw in
             guard let raw else { return 1 }
             let context = Unmanaged<ReadContext>.fromOpaque(raw).takeUnretainedValue()
@@ -304,7 +295,11 @@ enum KeepAwakeZCodeTurnMetadataReader {
         }, opaque)
         // The predicate inspects IDs only. SQLite does not project other row
         // metadata until both IDs match an admitted task's anonymous identity.
-        let sql = "SELECT session_id,turn_id,status,started_at,completed_at FROM main.turn_usage WHERE superisland_known_turn(session_id,turn_id)=1 LIMIT ?"
+        // Codex history is much larger than one active task. Group on the
+        // existing leading thread-ID index so session hashing runs once per
+        // thread, then seek only matching threads and inspect their turn IDs.
+        let sessionFilter = schema == .codex ? "\(schema.sessionColumn) IN (SELECT \(schema.sessionColumn) FROM main.\(schema.table) GROUP BY \(schema.sessionColumn) HAVING superisland_known_session(\(schema.sessionColumn))=1) AND " : ""
+        let sql = "SELECT \(schema.sessionColumn),turn_id,status,started_at,completed_at FROM main.\(schema.table) WHERE \(sessionFilter)superisland_known_turn(\(schema.sessionColumn),turn_id)=1 LIMIT ?"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(connection, sql, -1, &statement, nil) == SQLITE_OK, let statement else { return [] }
         defer { sqlite3_finalize(statement) }
@@ -321,11 +316,11 @@ enum KeepAwakeZCodeTurnMetadataReader {
             let identity = Identity(sessionHash: digest(session), taskHash: digest(task))
             guard identities.contains(identity), seen.insert(identity).inserted, seen.count <= identities.count else { return [] }
             guard let nativeState = columnText(statement, 2, limit: 32),
-                  let state = ["completed": "completed", "error": "failed", "cancelled": "cancelled"][nativeState],
+                  let state = schema.terminalState(nativeState),
                   sqlite3_column_type(statement, 3) == SQLITE_INTEGER,
                   sqlite3_column_type(statement, 4) == SQLITE_INTEGER else { continue }
-            let startedAt = Double(sqlite3_column_int64(statement, 3)) / 1000
-            let completedAt = Double(sqlite3_column_int64(statement, 4)) / 1000
+            let startedAt = Double(sqlite3_column_int64(statement, 3)) / schema.clockScale
+            let completedAt = Double(sqlite3_column_int64(statement, 4)) / schema.clockScale
             guard startedAt >= 0, completedAt >= startedAt, completedAt <= now + 5 else { continue }
             terminals.append(.init(identity: identity, state: state, startedAt: startedAt, completedAt: completedAt))
         }
@@ -337,16 +332,20 @@ enum KeepAwakeZCodeTurnMetadataReader {
     }
     private final class ReadContext {
         let identities: Set<Identity>
+        let sessionHashes: Set<String>
+        let schema: Schema
         let deadline: TimeInterval
         var remainingInstructions: Int
         var withinDeadline: Bool { ProcessInfo.processInfo.systemUptime <= deadline }
-        init(identities: Set<Identity>, budget: Budget) {
+        init(identities: Set<Identity>, schema: Schema, budget: Budget) {
             self.identities = identities
+            sessionHashes = Set(identities.map(\.sessionHash))
+            self.schema = schema
             deadline = ProcessInfo.processInfo.systemUptime + min(0.25, budget.maximumDuration)
             remainingInstructions = min(200_000, budget.maximumVMInstructions)
         }
     }
-    private static func isOwnedRegular(_ info: stat) -> Bool {
+    fileprivate static func isOwnedRegular(_ info: stat) -> Bool {
         (info.st_mode & S_IFMT) == S_IFREG && info.st_uid == getuid()
     }
     private static func safeSidecars(_ database: URL) -> Bool {
@@ -360,7 +359,7 @@ enum KeepAwakeZCodeTurnMetadataReader {
         }
         return true
     }
-    private static func validHash(_ value: String) -> Bool {
+    static func validHash(_ value: String) -> Bool {
         value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
     private static func validIdentifier(_ value: String) -> Bool {
@@ -383,5 +382,70 @@ enum KeepAwakeZCodeTurnMetadataReader {
     }
     private static func digest(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// ZCode facts only close exact turns already admitted by authenticated hooks.
+enum KeepAwakeZCodeTurnMetadataReader {
+    typealias Identity = KeepAwakeTurnMetadataReader.Identity
+    typealias Terminal = KeepAwakeTurnMetadataReader.Terminal
+    typealias Budget = KeepAwakeTurnMetadataReader.Budget
+    static var defaultDatabaseURL: URL {
+        defaultDatabaseURL(home: FileManager.default.homeDirectoryForCurrentUser)
+    }
+    static func defaultDatabaseURL(home: URL) -> URL {
+        home.appendingPathComponent(".zcode/cli/db/db.sqlite")
+    }
+
+    /// A custom/invalid path must not silently cause a read of a different,
+    /// stale default database. Only the already-authorized configuration field
+    /// is inspected; its other keys are neither returned nor retained.
+    static func defaultPathIsConfigured(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+        let url = home.appendingPathComponent(".zcode/cli/config.json")
+        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return errno == ENOENT }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, KeepAwakeTurnMetadataReader.isOwnedRegular(info), info.st_size <= 1_048_576 else { return false }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        guard let data = try? handle.read(upToCount: 1_048_577), data.count <= 1_048_576,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
+        guard let rawStorage = root["storage"] else { return true }
+        guard let storage = rawStorage as? [String: Any] else { return false }
+        guard let rawPath = storage["sessionDbPath"] else { return true }
+        guard var path = rawPath as? String, !path.isEmpty, path.utf8.count <= 4096,
+              !path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return false }
+        if path.hasPrefix("~/") { path = home.appendingPathComponent(String(path.dropFirst(2))).path }
+        guard path.hasPrefix("/") else { return false }
+        return URL(fileURLWithPath: path).standardizedFileURL.path == defaultDatabaseURL(home: home).standardizedFileURL.path
+    }
+
+    static func read(database: URL = defaultDatabaseURL, identities: Set<Identity>,
+                     now: TimeInterval = Date().timeIntervalSince1970, budget: Budget = Budget()) -> [Terminal] {
+        KeepAwakeTurnMetadataReader.read(database: database, schema: .zcode, identities: identities, now: now, budget: budget)
+    }
+}
+
+/// Codex hook outcomes can omit a terminal for a failed/interrupted turn.
+/// Read only the exact admitted main turn; never infer auxiliary compaction
+/// completion or create a new task from database history.
+enum KeepAwakeCodexTurnMetadataReader {
+    typealias Identity = KeepAwakeTurnMetadataReader.Identity
+    typealias Terminal = KeepAwakeTurnMetadataReader.Terminal
+    typealias Budget = KeepAwakeTurnMetadataReader.Budget
+    static var defaultDatabaseURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/thread_history_1.sqlite")
+    }
+    static func databaseURL(codexHome: URL, authorizedHome: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")) -> URL? {
+        guard codexHome.isFileURL, authorizedHome.isFileURL,
+              codexHome.standardizedFileURL.path == authorizedHome.standardizedFileURL.path else { return nil }
+        return codexHome.appendingPathComponent("thread_history_1.sqlite")
+    }
+    static func isMainIdentity(_ value: Identity) -> Bool {
+        KeepAwakeTurnMetadataReader.validHash(value.sessionHash) && KeepAwakeTurnMetadataReader.validHash(value.taskHash)
+    }
+    static func read(database: URL = defaultDatabaseURL, identities: Set<Identity>,
+                     now: TimeInterval = Date().timeIntervalSince1970, budget: Budget = Budget()) -> [Terminal] {
+        KeepAwakeTurnMetadataReader.read(database: database, schema: .codex, identities: identities, now: now, budget: budget)
     }
 }

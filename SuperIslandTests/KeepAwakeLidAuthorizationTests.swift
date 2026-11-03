@@ -4,6 +4,133 @@ import Combine
 @testable import SuperIsland
 
 final class KeepAwakeLidAuthorizationTests: XCTestCase {
+    @MainActor func testAlDenteConflictUsesRunningIdentityAndHelperNotInstallation() {
+        XCTAssertNil(KeepAwakeLidConflict.reason(bundleIDs: [], helperPaths: []))
+        for id in KeepAwakeLidConflict.alDenteIDs {
+            XCTAssertNotNil(KeepAwakeLidConflict.reason(bundleIDs: [id], helperPaths: []))
+        }
+        XCTAssertNotNil(KeepAwakeLidConflict.reason(bundleIDs: [], helperPaths: [KeepAwakeLidConflict.helperPath]))
+        XCTAssertNil(KeepAwakeLidConflict.reason(bundleIDs: ["com.example.AlDente"], helperPaths: ["/tmp/AlDente"]))
+        XCTAssertNotNil(KeepAwakeLidConflict.reason(bundleIDs: [], helperPaths: [], inventoryComplete: false))
+    }
+
+    @MainActor func testConflictPreventsAuthorizationAndSavedIntentRestoreWithoutRegistration() async {
+        for restoring in [false, true] {
+            var registrations = 0, saved = true
+            let transport = AuthorizationTransport()
+            let client = client(transport, readIntent: { saved }, saveIntent: { saved = $0 },
+                register: { registrations += 1 }, conflict: { "AlDente conflict" })
+            if restoring { client.restoreAuthorizedIntent() } else { client.authorize() }
+            await settle()
+            XCTAssertFalse(client.enabled); XCTAssertFalse(saved)
+            XCTAssertEqual(registrations, 0); XCTAssertTrue(transport.statusReplies.isEmpty)
+            XCTAssertTrue(transport.renewReplies.isEmpty); XCTAssertTrue(transport.releaseReplies.isEmpty)
+            XCTAssertEqual(client.message, "AlDente conflict")
+        }
+    }
+
+    @MainActor func testConflictDuringStatusCannotBeOverriddenByLateSuccess() async {
+        var conflict: String?
+        let transport = AuthorizationTransport(); transport.autoStatus = false
+        let client = client(transport, conflict: { conflict })
+        client.authorize()
+        conflict = "AlDente conflict"
+        transport.statusReplies[0](true, "late ready"); await settle()
+        XCTAssertFalse(client.enabled); XCTAssertFalse(client.applied)
+        XCTAssertEqual(client.message, conflict)
+        XCTAssertTrue(transport.renewReplies.isEmpty)
+    }
+
+    @MainActor func testRunningConflictReleasesOnlyOwnedLeaseAndRequiresExplicitRecovery() async {
+        var conflict: String?, saved = false
+        let transport = AuthorizationTransport()
+        let client = client(transport, readIntent: { saved }, saveIntent: { saved = $0 }, conflict: { conflict })
+        client.authorize(); await settle()
+        client.apply(hold: true); transport.renewReplies[0](true, "applied"); await settle()
+        conflict = "AlDente conflict"; client.apply(hold: true)
+        XCTAssertFalse(client.enabled); XCTAssertFalse(saved)
+        XCTAssertEqual(transport.releaseReplies.count, 1)
+        transport.releaseReplies[0](true, "released"); await settle()
+        XCTAssertFalse(client.hasPendingRelease); XCTAssertFalse(client.applied)
+        conflict = nil
+        for _ in 0..<5 { client.apply(hold: true); client.restoreAuthorizedIntent() }
+        XCTAssertFalse(client.enabled); XCTAssertEqual(transport.renewReplies.count, 1)
+        XCTAssertFalse(client.releasedForCompletionSleep)
+        let automaticRecovery = await client.recoverAndEnable(allowConflictRecovery: false)
+        XCTAssertFalse(automaticRecovery); XCTAssertFalse(client.enabled); XCTAssertFalse(saved)
+        let recovered = await client.recoverAndEnable()
+        XCTAssertTrue(recovered); XCTAssertTrue(client.enabled); XCTAssertTrue(saved)
+        client.apply(hold: true); XCTAssertEqual(transport.renewReplies.count, 2)
+    }
+
+    @MainActor func testConflictDuringRenewWaitsForReplyAndStillReleasesUnknownLease() async {
+        for renewalSucceeded in [false, true] {
+            var conflict: String?
+            let transport = AuthorizationTransport()
+            let client = client(transport, conflict: { conflict })
+            client.authorize(); await settle(); client.apply(hold: true)
+            conflict = "AlDente conflict"; client.apply(hold: true)
+            XCTAssertTrue(transport.releaseReplies.isEmpty, "Do not abandon the in-flight owner reply")
+            transport.renewReplies[0](renewalSucceeded, "renew reply"); await settle()
+            XCTAssertEqual(transport.releaseReplies.count, 1)
+            transport.releaseReplies[0](true, "released"); await settle()
+            XCTAssertFalse(client.enabled); XCTAssertFalse(client.hasPendingRelease)
+            XCTAssertEqual(client.message, conflict)
+        }
+    }
+
+    @MainActor func testConflictReleaseFailureIsRetainedWithoutTickRetryOrSleepPermission() async {
+        var conflict: String?
+        let transport = AuthorizationTransport()
+        let client = client(transport, conflict: { conflict })
+        client.authorize(); await settle(); client.apply(hold: true)
+        transport.renewReplies[0](true, "applied"); await settle()
+        conflict = "AlDente conflict"; client.apply(hold: true)
+        transport.releaseReplies[0](false, "unknown"); await settle()
+        for _ in 0..<5 { client.apply(hold: true) }
+        XCTAssertEqual(transport.releaseReplies.count, 1)
+        XCTAssertTrue(client.hasPendingRelease); XCTAssertFalse(client.releasedForCompletionSleep)
+        client.retryRelease(); XCTAssertEqual(transport.releaseReplies.count, 2)
+        transport.releaseReplies[1](true, "released"); await settle()
+        XCTAssertFalse(client.enabled); XCTAssertFalse(client.hasPendingRelease)
+        let recovered = await client.recoverAndEnable()
+        XCTAssertFalse(recovered)
+    }
+
+    @MainActor func testConflictAppearingDuringExplicitRecoveryCannotReenable() async {
+        var conflict: String?
+        let transport = AuthorizationTransport()
+        let client = client(transport, conflict: { conflict })
+        client.authorize(); await settle()
+        transport.autoStatus = false
+        let recovery = Task { @MainActor in await client.recoverAndEnable() }
+        await settle()
+        conflict = "AlDente conflict"
+        transport.statusReplies.last?(true, "ready"); await settle()
+        let recovered = await recovery.value
+        XCTAssertFalse(recovered); XCTAssertFalse(client.enabled)
+        XCTAssertTrue(transport.renewReplies.isEmpty)
+    }
+
+    @MainActor func testLidConflictLeavesOrdinaryKeepingAndModuleEnabled() async throws {
+        var conflict: String?
+        let transport = AuthorizationTransport(); transport.autoRelease = true
+        let lid = client(transport, conflict: { conflict })
+        lid.authorize(); await settle()
+        let name = "KA-LidConflict-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let service = KeepAwakeService(defaults: defaults, root: root, codexAvailability: { false }, lidClient: lid,
+            environmentReader: { .init(hardware: .notebook, battery: 80, onAC: true) })
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: name); try? FileManager.default.removeItem(at: root) }
+        service.manual(minutes: 30)
+        XCTAssertTrue(service.actualHold)
+        transport.renewReplies.last?(true, "applied"); await settle()
+        conflict = "AlDente conflict"; service.tick(); await settle()
+        XCTAssertTrue(service.engine.enabled); XCTAssertTrue(service.actualHold)
+        XCTAssertFalse(lid.enabled); XCTAssertFalse(lid.applied)
+        XCTAssertFalse(lid.releasedForCompletionSleep)
+    }
     @MainActor func testStableDisabledServiceTicksDoNotInvalidateSettingsOrMenus() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("KA-Idle-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -577,10 +704,11 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
                         unregister: @escaping () async throws -> Void = {},
                         readIntent: @escaping () -> Bool = { false }, saveIntent: @escaping (Bool) -> Void = { _ in },
                         status: @escaping () -> SMAppService.Status = { .enabled },
-                        register: @escaping () throws -> Void = {}, settings: @escaping () -> Void = {}) -> KeepAwakeLidClient {
+                        register: @escaping () throws -> Void = {}, settings: @escaping () -> Void = {},
+                        conflict: @escaping () -> String? = { nil }) -> KeepAwakeLidClient {
         KeepAwakeLidClient(readEnabledIntent: readIntent, saveEnabledIntent: saveIntent, serviceStatus: status, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy, requestTimeout: timeout,
-            registerService: register, unregisterService: unregister, openSystemSettings: settings)
+            registerService: register, unregisterService: unregister, openSystemSettings: settings, conflictReader: conflict)
     }
 
     @MainActor

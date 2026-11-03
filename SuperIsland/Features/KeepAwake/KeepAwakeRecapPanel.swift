@@ -20,6 +20,8 @@ import SwiftUI
         @Published private(set) var summary: KeepAwakeRecap.Cycle
         @Published var autoShow: Bool
         @Published var editable: Bool
+        @Published var expandedChats = Set<String>()
+        @Published var expandedMembers = Set<String>()
         @Published var preferenceError: String?
         @Published var persistenceError: String?
         let toggle: (Bool) -> Bool
@@ -94,6 +96,7 @@ import SwiftUI
 private struct KeepAwakeRecapView: View {
     @ObservedObject var model: KeepAwakeRecapPanel.Presentation
     private var summary: KeepAwakeRecap.Cycle { model.summary }
+    private var projection: KeepAwakeChatGrouping.Projection { summary.chatProjection }
     private func time(_ value: Double?) -> String {
         guard let value else { return "时间未记录" }
         return Date(timeIntervalSince1970: value).formatted(date: .omitted, time: .shortened)
@@ -135,9 +138,10 @@ private struct KeepAwakeRecapView: View {
                         metric("保持运行时长", KeepAwakeRecap.durationText(summary.holdDuration), accent: true)
                     }.accessibilityElement(children: .contain).dataAnnotationID("si.ka.recap.metrics")
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(KeepAwakeRecap.State.allCases, id: \.self) { state in
-                            let count = summary.userTasks.filter { $0.state == state }.count
-                            if count > 0 { Text("\(count) 项" + state.title).font(.caption.weight(.semibold)).foregroundStyle(color(state)) }
+                        ForEach(KeepAwakeChatGrouping.State.allCases, id: \.self) { state in
+                            let count = projection.groups.filter { $0.kind == .user && $0.state == state }.count
+                            if count > 0 { Text("\(count) 个主聊天 · " + state.title).font(.caption.weight(.semibold))
+                                .foregroundStyle(state == .ended ? Color.green : Color.orange) }
                         }
                         if summary.tasks.contains(where: { $0.kind == .unclassified }) {
                             Text("部分任务类型待确认，不计入用户任务汇总").font(.caption).foregroundStyle(.orange)
@@ -154,13 +158,28 @@ private struct KeepAwakeRecapView: View {
                             .dataAnnotationID("si.ka.recap.notice")
                     }
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack { Text("本次任务").font(.caption.weight(.semibold)); Spacer(); Text("\(summary.userTasks.count) 项").font(.caption).foregroundStyle(.secondary) }
-                        if summary.userTasks.isEmpty { Text(summary.auxiliary.isEmpty ? "本次没有用户任务" : "尚无分类明确的用户任务，其他记录见下方。").font(.caption).foregroundStyle(.secondary) }
-                        LazyVStack(spacing: 0) { ForEach(summary.userTasks) { task in taskRow(task) } }
+                        let groups = projection.groups.filter { $0.kind == .user }
+                        HStack { Text("主聊天").font(.caption.weight(.semibold)); Spacer()
+                            Text("\(groups.count) 个 · \(groups.reduce(0) { $0 + $1.children.count }) 个子任务").font(.caption2).foregroundStyle(.secondary) }
+                        if groups.isEmpty { Text(summary.auxiliary.isEmpty ? "本次没有已确认归属的用户聊天" : "尚无分类明确的用户聊天，其他记录见下方。")
+                            .font(.caption).foregroundStyle(.secondary) }
+                        LazyVStack(alignment: .leading, spacing: 4) { ForEach(groups) { groupRow($0) } }
+                        let unassigned = projection.unassigned.filter { $0.kind == .user }
+                        if !unassigned.isEmpty {
+                            DisclosureGroup("归属待确认 · \(unassigned.count) 条执行记录") {
+                                ForEach(unassigned) { taskRow($0) }
+                            }.font(.caption)
+                        }
                     }.dataAnnotationID("si.ka.recap.tasks")
                     if !summary.auxiliary.isEmpty {
-                        DisclosureGroup("后台检查 \(summary.auxiliary.filter { $0.kind == .background }.count) 项 · 类型待确认 \(summary.auxiliary.filter { $0.kind == .unclassified }.count) 条") {
-                            LazyVStack(spacing: 0) { ForEach(summary.auxiliary) { task in taskRow(task) } }
+                        DisclosureGroup("后台检查 \(summary.auxiliary.filter { $0.kind == .background }.count) 项 · 类型待确认 \(summary.auxiliary.filter { $0.kind == .unclassified }.count) 条执行记录") {
+                            let groups = projection.groups.filter { $0.kind == .unclassified }
+                            if !groups.isEmpty { Text("\(groups.count) 个主聊天 · \(groups.reduce(0) { $0 + $1.children.count }) 个子任务，不计入用户汇总")
+                                    .font(.caption2).foregroundStyle(.secondary) }
+                            LazyVStack(alignment: .leading, spacing: 4) { ForEach(groups) { groupRow($0) } }
+                            let unassigned = projection.unassigned.filter { $0.kind != .user }
+                            if unassigned.contains(where: { $0.kind == .unclassified }) { Text("以下记录归属待确认").font(.caption2).foregroundStyle(.orange) }
+                            LazyVStack(spacing: 0) { ForEach(unassigned) { taskRow($0) } }
                         }.font(.caption).dataAnnotationID("si.ka.recap.auxiliary")
                     }
                     Divider()
@@ -170,7 +189,7 @@ private struct KeepAwakeRecapView: View {
                         }
                     }.font(.caption).dataAnnotationID("si.ka.recap.timeline")
                     DisclosureGroup("统计说明") {
-                        Text("合盖时长是本次关盖到开盖的时间。保持运行时长只计本功能实际生效的时段，并发只计一次，也包含释放前等待，不代表 CPU 工作时间。\n\n任务按来源和身份去重；后台检查只在有明确分类时分列，其余保留待确认。仅受理休眠请求不算真正睡眠，需睡眠/唤醒和时钟证据。时间点来自本机观察记录，无法确认时不补零。").font(.caption).foregroundStyle(.secondary).padding(.top, 6)
+                        Text("合盖时长是本次关盖到开盖的时间。保持运行时长只计本功能实际生效的时段，并发只计一次，也包含释放前等待，不代表 CPU 工作时间。\n\n主聊天按可信父子身份归并；同名不同聊天不合并。子任务与轮次分别显示；本轮完成不代表主聊天结束，会话未关闭也不等于正在运行。仅已接入且证据完整的本次执行均终结时显示本次执行已结束，不代表长期目标或未监控工作完成。开盖后的新轮不改写本次快照。后台检查只在明确分类时分列，其余保留待确认。仅受理休眠请求不算真正睡眠，需睡眠/唤醒和时钟证据。时间点来自本机观察记录，无法确认时不补零。").font(.caption).foregroundStyle(.secondary).padding(.top, 6)
                     }.font(.caption).dataAnnotationID("si.ka.recap.explanation")
                 }.padding(.horizontal, 12).padding(.bottom, 6)
             }
@@ -193,14 +212,56 @@ private struct KeepAwakeRecapView: View {
     private func fact(_ label: String, _ value: String) -> some View {
         HStack(alignment: .top) { Text(label).foregroundStyle(.secondary); Spacer(); Text(value).multilineTextAlignment(.trailing) }.font(.caption)
     }
+    private func groupRow(_ group: KeepAwakeChatGrouping.Group) -> some View {
+        DisclosureGroup(isExpanded: Binding(get: { model.expandedChats.contains(group.id) }, set: { value in
+            if value { model.expandedChats.insert(group.id) } else { model.expandedChats.remove(group.id) }
+        })) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("主聊天自身：" + group.rootRuntime.title).font(.caption2).foregroundStyle(.secondary)
+                ForEach(group.members) { member in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(alignment: .top) {
+                            Text(member.id == group.root ? "主聊天执行" : "子任务 \(member.ordinal)")
+                            Spacer(); Text(member.runtime.title).foregroundStyle(member.runtime == .idle ? Color.secondary : Color.orange)
+                        }.font(.caption)
+                        Text(member.latest?.availability == "open" ? "会话未关闭" : member.latest?.availability == "closed" ? "会话关系已关闭，不代表成功" : "会话关系状态未提供").font(.caption2).foregroundStyle(.secondary)
+                        DisclosureGroup("\(member.tasks.count) 轮执行记录", isExpanded: Binding(get: { model.expandedMembers.contains(group.id + ":" + member.id) }, set: { value in
+                            let key = group.id + ":" + member.id
+                            if value { model.expandedMembers.insert(key) } else { model.expandedMembers.remove(key) }
+                        })) {
+                            ForEach(Array(member.tasks.enumerated()), id: \.element.id) { index, task in
+                                HStack(alignment: .top) {
+                                    Text("第 \(index + 1) 轮 · " + time(task.changedAt)).foregroundStyle(.secondary)
+                                    Spacer(); Text(KeepAwakeChatGrouping.roundTitle(task.state)).foregroundStyle(color(task.state))
+                                }.font(.caption2).padding(.vertical, 2)
+                            }
+                        }.font(.caption2).dataAnnotationID("si.ka.recap.rounds")
+                    }.padding(.top, 4).dataAnnotationID("si.ka.recap.member")
+                }
+                if group.hasUnknownMembers { Text("部分执行状态待确认，不据此判断全部结束。").font(.caption2).foregroundStyle(.orange) }
+            }.padding(.leading, 3).padding(.vertical, 5)
+        } label: {
+            HStack(alignment: .top, spacing: 5) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(summary.displayTitles[group.titleKey] ?? "主聊天 \(group.ordinal)")
+                        .font(.system(size: 11, weight: .medium)).lineLimit(2)
+                    Text((KeepAwakeSource.all.first { $0.id == group.source }?.name ?? "未知来源") + " · 聊天 \(group.ordinal) · \(group.children.count) 个子任务")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 3)
+                Text(group.state.title).font(.caption2.weight(.medium))
+                    .foregroundStyle(group.state == .ended ? Color.green : Color.orange).multilineTextAlignment(.trailing)
+            }
+        }.padding(.vertical, 4).dataAnnotationID("si.ka.recap.chat")
+    }
     private func taskRow(_ task: KeepAwakeRecap.Task) -> some View {
         HStack(spacing: 8) {
             Image(systemName: task.kind == .background ? "gearshape" : "terminal").frame(width: 22, height: 22).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 1) {
                 Text(KeepAwakeSource.all.first { $0.id == task.source }?.name ?? "未知来源").font(.system(size: 11, weight: .medium))
-                Text("任务 \(task.ordinal) · " + time(task.changedAt)).font(.caption2).foregroundStyle(.secondary)
+                Text("执行记录 \(task.ordinal) · " + time(task.changedAt)).font(.caption2).foregroundStyle(.secondary)
             }
-            Spacer(); Text(task.state.title).font(.caption.weight(.medium)).foregroundStyle(color(task.state))
+            Spacer(); Text(KeepAwakeChatGrouping.roundTitle(task.state)).font(.caption.weight(.medium)).foregroundStyle(color(task.state))
         }.padding(.vertical, 4)
     }
 }
