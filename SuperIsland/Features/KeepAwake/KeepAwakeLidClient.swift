@@ -1,6 +1,56 @@
 import Foundation
 import ServiceManagement
 import Combine
+import AppKit
+import Darwin
+
+/// Metadata only. Do not launch, quit, configure, or read data from a competitor.
+@MainActor
+enum KeepAwakeLidConflict {
+    static let alDenteIDs: Set<String> = ["com.apphousekitchen.aldente-pro", "com.davidwernhart.AlDente"]
+    static let helperPath = "/Library/PrivilegedHelperTools/com.apphousekitchen.aldente-pro.helper"
+    private static var checkedAt: TimeInterval = -.infinity
+    private static var cached: String?
+
+    static func reason(bundleIDs: Set<String>, helperPaths: Set<String>, inventoryComplete: Bool = true) -> String? {
+        if !alDenteIDs.isDisjoint(with: bundleIDs) || helperPaths.contains(helperPath) {
+            return "检测到 AlDente 正在运行，合盖设置存在冲突；请在它退出后手动恢复 SuperIsland 合盖运行。普通防休眠和任务监测不受影响。"
+        }
+        return inventoryComplete ? nil : "无法确认合盖控制冲突状态；请稍后重新检查，暂未启用合盖运行。"
+    }
+
+    static func current() -> String? {
+        let now = KeepAwakeClock.now()
+        if now >= checkedAt && now - checkedAt < 1 { return cached }
+        checkedAt = now
+        let bundleIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        if let reason = reason(bundleIDs: bundleIDs, helperPaths: []) { cached = reason; return reason }
+        // The helper may outlive its UI and resets SleepDisabled during exit.
+        // Only resolve a path for the known helper's process-name prefix.
+        let required = proc_listallpids(nil, 0)
+        guard required > 0, required < 65_536 else {
+            cached = reason(bundleIDs: [], helperPaths: [], inventoryComplete: false); return cached
+        }
+        var pids = [pid_t](repeating: 0, count: Int(required) + 64)
+        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.stride))
+        guard count > 0, Int(count) < pids.count else {
+            cached = reason(bundleIDs: [], helperPaths: [], inventoryComplete: false); return cached
+        }
+        for pid in pids.prefix(Int(count)) where pid > 1 {
+            var name = [CChar](repeating: 0, count: 64)
+            guard proc_name(pid, &name, UInt32(name.count)) > 0,
+                  String(cString: name).hasPrefix("com.apphousekit") else { continue }
+            var path = [CChar](repeating: 0, count: 4_096)
+            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else {
+                cached = reason(bundleIDs: [], helperPaths: [], inventoryComplete: false); return cached
+            }
+            if let reason = reason(bundleIDs: [], helperPaths: [String(cString: path)]) {
+                cached = reason; return reason
+            }
+        }
+        cached = nil; return nil
+    }
+}
 
 @MainActor
 final class KeepAwakeLidClient: ObservableObject {
@@ -28,6 +78,9 @@ final class KeepAwakeLidClient: ObservableObject {
     private var enableIntent = false
     private var intentGeneration: UInt64 = 0
     private var recovering = false
+    private var conflictMessage: String?
+    private let conflictReader: @MainActor () -> String?
+    private var conflictLaunchObserver: AnyCancellable?
     private var preferences = KeepAwakeEngine.Preferences()
     private let serviceStatus: () -> SMAppService.Status
     private let signingRequirement: ([String]) -> String?
@@ -66,7 +119,8 @@ final class KeepAwakeLidClient: ObservableObject {
          remoteProxyFactory: RemoteProxyFactory? = nil, requestTimeout: TimeInterval = 8,
          registerService: @escaping () throws -> Void = { try SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).register() },
          unregisterService: @escaping () async throws -> Void = { try await SMAppService.daemon(plistName: KeepAwakeHelperIdentity.plist).unregister() },
-         openSystemSettings: @escaping () -> Void = { SMAppService.openSystemSettingsLoginItems() }) {
+         openSystemSettings: @escaping () -> Void = { SMAppService.openSystemSettingsLoginItems() },
+         conflictReader: @escaping @MainActor () -> String? = { KeepAwakeLidConflict.current() }) {
         self.serviceStatus = serviceStatus
         self.signingRequirement = signingRequirement
         self.remoteProxyFactory = remoteProxyFactory
@@ -76,13 +130,28 @@ final class KeepAwakeLidClient: ObservableObject {
         self.openSystemSettings = openSystemSettings
         self.readEnabledIntent = readEnabledIntent
         self.saveEnabledIntent = saveEnabledIntent
+        self.conflictReader = conflictReader
         refreshRegistrationStatus()
+        if remoteProxyFactory == nil {
+            conflictLaunchObserver = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)
+                .sink { [weak self] notification in
+                    guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                          let id = application.bundleIdentifier else { return }
+                    Task { @MainActor [weak self] in
+                        // Capture even a short launch/quit between service ticks.
+                        if let reason = KeepAwakeLidConflict.reason(bundleIDs: [id], helperPaths: []) {
+                            self?.recordConflict(reason)
+                        }
+                    }
+                }
+        }
     }
 
     /// Restore only a previously confirmed choice. Starting the App must never
     /// register a daemon, prompt for approval, or treat registration as readiness.
     func restoreAuthorizedIntent() {
         guard readEnabledIntent(), !enabled, !busy, !recovering else { return }
+        guard conflictMessage == nil, !detectConflict() else { return }
         guard readServiceStatus() == .enabled else {
             message = "先前启用的合盖辅助程序尚未获得系统授权，请在设置中检查后重新启用。"
             return
@@ -99,6 +168,11 @@ final class KeepAwakeLidClient: ObservableObject {
 
     func authorize() {
         guard !busy, !recovering else { message = "请等待当前辅助程序检查结束。"; return }
+        guard !detectConflict() else { return }
+        guard conflictMessage == nil || !releaseNeeded else {
+            message = "合盖租约尚待释放确认，请先检查并释放租约。"; return
+        }
+        conflictMessage = nil
         enableIntent = false; intentGeneration &+= 1
         enabled = false; desiredHold = false
         guard signingRequirement([KeepAwakeHelperIdentity.label]) != nil else {
@@ -141,10 +215,16 @@ final class KeepAwakeLidClient: ObservableObject {
     func suspendForShutdown() {
         enableIntent = false; intentGeneration &+= 1
         cancelStatusRequest()
-        enabled = false; apply(hold: false)
+        enabled = false
+        if conflictMessage != nil, releaseNeeded, !busy { perform(.release) }
+        else { apply(hold: false) }
     }
     func apply(hold: Bool, preferences: KeepAwakeEngine.Preferences? = nil) {
         if let preferences, self.preferences != preferences { self.preferences = preferences; lastRenewal = 0 }
+        if enabled || enableIntent || applied || releaseNeeded || busy {
+            if detectConflict() { return }
+        }
+        if conflictMessage != nil { return } // Exit alone must never re-enable keeping.
         desiredHold = hold && enabled && !blocked
         guard !busy else { return }
         if !desiredHold {
@@ -152,6 +232,24 @@ final class KeepAwakeLidClient: ObservableObject {
             return
         }
         if !applied || KeepAwakeClock.now() - lastRenewal >= 30 { perform(.renew) }
+    }
+    @discardableResult private func detectConflict() -> Bool {
+        guard let reason = conflictReader() else { return false }
+        recordConflict(reason)
+        return true
+    }
+    private func recordConflict(_ reason: String) {
+        if conflictMessage == nil {
+            conflictMessage = reason
+            saveEnabledIntent(false) // Relaunch must also require explicit recovery.
+            intentGeneration &+= 1
+            cancelStatusRequest()
+            enabled = false; desiredHold = false; blocked = true
+            message = reason
+            // Do not cancel an in-flight renewal: its reply may reveal a lease
+            // we still own. Release only that owner, once, then retain failure.
+            if releaseNeeded && !busy { perform(.release) }
+        }
     }
     private func proxy(id: UUID) throws -> KeepAwakeHelperProtocol {
         guard readServiceStatus() == .enabled,
@@ -232,6 +330,22 @@ final class KeepAwakeLidClient: ObservableObject {
     private func finish(id: UUID, success: Bool, message: String) {
         guard requestID == id, let kind = requestKind else { return }
         busy = false; requestID = nil; requestKind = nil
+        if case .release = kind {} else { _ = detectConflict() }
+        if let conflictMessage {
+            if case .status = kind {
+                self.message = conflictMessage; return
+            }
+            let renewing: Bool
+            if case .renew = kind { renewing = true } else { renewing = false }
+            if success {
+                applied = renewing
+                if !renewing { releaseNeeded = false }
+            } else { applied = false; invalidateConnection() }
+            enabled = false; desiredHold = false; blocked = true
+            self.message = success ? conflictMessage : conflictMessage + " 租约释放尚未确认，请检查并释放租约。"
+            if renewing && releaseNeeded && !busy { perform(.release) }
+            return
+        }
         if case .status(let generation) = kind {
             guard generation == intentGeneration, enableIntent else { return }
             guard success, readServiceStatus() == .enabled,
@@ -264,12 +378,25 @@ final class KeepAwakeLidClient: ObservableObject {
     func retryRelease() {
         enableIntent = false; intentGeneration &+= 1
         cancelStatusRequest()
-        blocked = false; releaseNeeded = true; enabled = false; apply(hold: false)
+        blocked = false; releaseNeeded = true; enabled = false
+        if conflictMessage != nil { if !busy { perform(.release) }; return }
+        apply(hold: false)
     }
     /// Called only by an explicit user recovery action after the ordinary
     /// protection checks pass. It never registers or requests new authorization.
     /// A user who never enabled lid support can still recover ordinary keeping.
-    func recoverAndEnable() async -> Bool {
+    func recoverAndEnable(allowConflictRecovery: Bool = true) async -> Bool {
+        guard !detectConflict() else { return false }
+        if conflictMessage != nil {
+            guard allowConflictRecovery else { return false }
+            guard !busy else { return false }
+            if releaseNeeded {
+                perform(.release); await waitForRequest()
+                guard !busy, !releaseNeeded else { return false }
+            }
+            guard !detectConflict() else { return false }
+            conflictMessage = nil; blocked = false
+        }
         guard enableIntent else { return true }
         guard !recovering else { return false }
         let generation = intentGeneration
@@ -277,6 +404,7 @@ final class KeepAwakeLidClient: ObservableObject {
         defer { recovering = false }
         enabled = false; desiredHold = false
         await waitForRequest()
+        guard !detectConflict() else { return false }
         guard !Task.isCancelled, !busy, generation == intentGeneration, enableIntent else { return false }
         guard readServiceStatus() == .enabled,
               signingRequirement([KeepAwakeHelperIdentity.label]) != nil else {
@@ -291,6 +419,7 @@ final class KeepAwakeLidClient: ObservableObject {
         blocked = false
         perform(needsRelease ? .release : .status(generation))
         await waitForRequest()
+        guard !detectConflict() else { return false }
         guard !Task.isCancelled, !busy, !releaseNeeded, !blocked,
               generation == intentGeneration, enableIntent else { return false }
         guard readServiceStatus() == .enabled,
@@ -300,6 +429,7 @@ final class KeepAwakeLidClient: ObservableObject {
             return false
         }
         enabled = true; lastRenewal = 0
+        saveEnabledIntent(true)
         message = needsRelease ? "辅助程序恢复已确认；等待重新应用合盖保持。" : "辅助程序连接已确认；本次没有待恢复的合盖租约。"
         return true
     }

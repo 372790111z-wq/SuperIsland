@@ -79,6 +79,173 @@ final class KeepAwakeCodexServiceTests: XCTestCase {
         XCTAssertFalse(service.engine.sessions.values.contains { $0.event.source == "zcode-desktop" })
         assertNoRealHold(service)
     }
+    private actor CodexMetadataGate {
+        var continuation: CheckedContinuation<[KeepAwakeCodexTurnMetadataReader.Terminal], Never>?
+        var requested = Set<KeepAwakeCodexTurnMetadataReader.Identity>()
+        func sample(_ database: URL, _ identities: Set<KeepAwakeCodexTurnMetadataReader.Identity>) async -> [KeepAwakeCodexTurnMetadataReader.Terminal] {
+            requested = identities
+            return await withCheckedContinuation { continuation = $0 }
+        }
+        func waiting() -> Bool { continuation != nil }
+        func identities() -> Set<KeepAwakeCodexTurnMetadataReader.Identity> { requested }
+        func finish(_ results: [KeepAwakeCodexTurnMetadataReader.Terminal]) { continuation?.resume(returning: results); continuation = nil }
+    }
+    @MainActor private func codexMetadataFixture(_ gate: CodexMetadataGate, home: URL? = nil, consent: Bool = true, chatConsent: Bool = false, chatSampler: (@Sendable (URL, Set<String>) async -> KeepAwakeCodexChatMetadata.Snapshot)? = nil) throws -> (UserDefaults, URL, KeepAwakeService) {
+        let name = "KA1CodexMetadata-" + UUID().uuidString, root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defaults.set(consent, forKey: KeepAwakeService.codexTurnMetadataConsentKey)
+        defaults.set(chatConsent, forKey: KeepAwakeService.codexChatMetadataConsentKey)
+        let profile = KeepAwakeCodexEnvironment.Profile(executableURL: root.appendingPathComponent("never-launched-codex"),
+            codexHome: home ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"), socketURL: root.appendingPathComponent("never-used.sock"))
+        let service = KeepAwakeService(defaults: defaults, root: root, codexResolver: { profile },
+            codexHookInstaller: { _, _, _ in }, codexHookUninstaller: { _, _, _ in },
+            codexMetadataSampler: { db, ids in await gate.sample(db, ids) }, chatMetadataSampler: chatSampler)
+        service.start() // No saved real home: startup cannot edit external hooks.
+        let source = try XCTUnwrap(KeepAwakeSource.all.first { $0.id == "codex-desktop" })
+        try service.connect(source, codexConnection: .init(profile: profile, mode: .hooks))
+        return (defaults, root, service)
+    }
+    @MainActor private func submitCodexMetadataTask(_ task: String = "task-a", source: String = "codex-desktop", state: KeepAwakeEngine.TaskState = .running,
+                                                   root: URL, service: KeepAwakeService) throws {
+        let credential = try JSONDecoder().decode(KeepAwakeMailbox.Credential.self,
+            from: Data(contentsOf: root.appendingPathComponent("credentials/" + source + ".json")))
+        var envelope = KeepAwakeMailbox.Envelope(generation: credential.generation,
+            event: .init(source: source, session: KeepAwakeHookContract.anonymousIdentity("fixture-thread"), sequence: mach_continuous_time(),
+                state: state, taskID: KeepAwakeHookContract.isAuxiliaryTask(source: source, taskID: task) ? task : KeepAwakeHookContract.anonymousIdentity(task), startsTask: state == .running),
+            issuedAt: Date().timeIntervalSince1970, mac: "")
+        envelope.mac = Data(HMAC<SHA256>.authenticationCode(for: envelope.authenticatedBytes,
+            using: SymmetricKey(data: Data(base64Encoded: credential.key)!))).base64EncodedString()
+        try JSONEncoder().encode(envelope).write(to: root.appendingPathComponent("inbox/" + UUID().uuidString + ".json")); service.tick()
+    }
+    private func codexIdentity(_ task: String = "task-a") -> KeepAwakeCodexTurnMetadataReader.Identity {
+        .init(sessionHash: KeepAwakeHookContract.anonymousIdentity("fixture-thread"), taskHash: KeepAwakeHookContract.anonymousIdentity(task))
+    }
+    private func waitForCodexMetadata(_ gate: CodexMetadataGate) async {
+        for _ in 0..<100 { if await gate.waiting() { return }; try? await Task.sleep(nanoseconds: 10_000_000) }
+        XCTFail("Metadata query did not begin")
+    }
+    private actor ChatMetadataGate {
+        var calls = 0
+        var requested = Set<String>()
+        var pending: CheckedContinuation<KeepAwakeCodexChatMetadata.Snapshot, Never>?
+        func sample(_ sessions: Set<String>) async -> KeepAwakeCodexChatMetadata.Snapshot {
+            calls += 1; requested = sessions
+            return await withCheckedContinuation { pending = $0 }
+        }
+        func count() -> Int { calls }
+        func waiting() -> Bool { pending != nil }
+        func targets() -> Set<String> { requested }
+        func finish(_ value: KeepAwakeCodexChatMetadata.Snapshot) { pending?.resume(returning: value); pending = nil }
+    }
+    @MainActor func testChatHierarchyIsNeverReadWithoutNewConsent() async throws {
+        let terminal = CodexMetadataGate(), chat = ChatMetadataGate()
+        let (defaults, root, service) = try codexMetadataFixture(terminal, chatSampler: { _, ids in await chat.sample(ids) })
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service); await waitForCodexMetadata(terminal)
+        let calls = await chat.count(); XCTAssertEqual(calls, 0)
+        await terminal.finish([]); assertNoRealHold(service)
+    }
+    @MainActor func testHierarchyMetadataCannotFinishTasksAndRevocationRejectsInFlightResult() async throws {
+        let terminal = CodexMetadataGate(), chat = ChatMetadataGate()
+        let (defaults, root, service) = try codexMetadataFixture(terminal, chatConsent: true, chatSampler: { _, ids in await chat.sample(ids) })
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service)
+        for _ in 0..<100 { if await chat.waiting() { break }; try? await Task.sleep(nanoseconds: 5_000_000) }
+        let targets = await chat.targets(); XCTAssertEqual(targets, [codexIdentity().sessionHash])
+        let before = service.engine.sessions
+        service.setChatMetadataConsent(false)
+        let id = codexIdentity().sessionHash
+        await chat.finish(.init(nodes: [id:.init(session:id,parent:nil,root:id,title:"Private in-flight title")], titles:[id:"Private in-flight title"]))
+        await terminal.finish([])
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(service.engine.sessions, before)
+        XCTAssertTrue(service.engine.sessions.values.allSatisfy { $0.isUnfinished })
+        XCTAssertTrue(service.recap.ledger.current?.displayTitles.isEmpty ?? true)
+        assertNoRealHold(service)
+    }
+    @MainActor func testFailedCodexMetadataEndsExactAdmittedTurnAndRetainsParallelWork() async throws {
+        let gate = CodexMetadataGate(), (defaults, root, service) = try codexMetadataFixture(gate)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service); await waitForCodexMetadata(gate)
+        try submitCodexMetadataTask("task-b", root: root, service: service)
+        await gate.finish([.init(identity: codexIdentity(), state: "failed", startedAt: 1, completedAt: 2),
+                           .init(identity: codexIdentity("task-b"), state: "completed", startedAt: 1, completedAt: 2)])
+        _ = await waitUntil { service.engine.sessions.values.contains { $0.event.taskID == self.codexIdentity().taskHash && $0.event.state == .failed } }
+        XCTAssertTrue(service.engine.sessions.values.first { $0.event.taskID == codexIdentity("task-b").taskHash }?.isUnfinished == true)
+        assertNoRealHold(service)
+    }
+    @MainActor func testCodexMetadataFailureUsesNormalThirtySecondGrace() async throws {
+        let gate = CodexMetadataGate(), (defaults, root, service) = try codexMetadataFixture(gate)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service); await waitForCodexMetadata(gate)
+        await gate.finish([.init(identity: codexIdentity(), state: "failed", startedAt: 1, completedAt: 2)])
+        _ = await waitUntil { service.engine.sessions.values.first?.event.state == .failed }
+        let deadline = try XCTUnwrap(service.engine.sessions.values.first?.releaseAt)
+        var engine = service.engine; engine.setAutomatic(true)
+        let env = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true)
+        XCTAssertTrue(engine.evaluate(now: deadline - 0.001, environment: env).hold)
+        XCTAssertFalse(engine.evaluate(now: deadline, environment: env).hold)
+        assertNoRealHold(service)
+    }
+    @MainActor func testNewHookActivityInvalidatesOldCodexMetadataResult() async throws {
+        let gate = CodexMetadataGate(), (defaults, root, service) = try codexMetadataFixture(gate)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service); await waitForCodexMetadata(gate)
+        try submitCodexMetadataTask(root: root, service: service)
+        await gate.finish([.init(identity: codexIdentity(), state: "failed", startedAt: 1, completedAt: 2)])
+        try? await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertTrue(service.engine.sessions.values.first?.isUnfinished == true); assertNoRealHold(service)
+    }
+    @MainActor func testDisconnectedCodexSourceRejectsLateMetadata() async throws {
+        let gate = CodexMetadataGate(), (defaults, root, service) = try codexMetadataFixture(gate)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service); await waitForCodexMetadata(gate)
+        try service.disconnect(XCTUnwrap(KeepAwakeSource.all.first { $0.id == "codex-desktop" }))
+        await gate.finish([.init(identity: codexIdentity(), state: "failed", startedAt: 1, completedAt: 2)])
+        try? await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertTrue(service.engine.sessions.isEmpty); assertNoRealHold(service)
+    }
+    @MainActor func testMainTurnTerminalDoesNotEndCompactionAuxiliary() async throws {
+        let gate = CodexMetadataGate(), (defaults, root, service) = try codexMetadataFixture(gate)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        let auxiliary = try XCTUnwrap(KeepAwakeHookContract.metadata(source: "codex-desktop", input: ["hook_event_name": "PreCompact", "session_id": "fixture-thread", "turn_id": "fixture-compact"]).taskID)
+        try submitCodexMetadataTask(auxiliary, root: root, service: service)
+        let waiting = await gate.waiting(); XCTAssertFalse(waiting)
+        try submitCodexMetadataTask(root: root, service: service); await waitForCodexMetadata(gate)
+        let sampled = await gate.identities(); XCTAssertEqual(sampled, [codexIdentity()])
+        await gate.finish([.init(identity: codexIdentity(), state: "failed", startedAt: 1, completedAt: 2)])
+        _ = await waitUntil { service.engine.sessions.values.contains { $0.event.taskID == self.codexIdentity().taskHash && $0.event.state == .failed } }
+        XCTAssertTrue(service.engine.sessions.values.first { $0.event.taskID == auxiliary }?.isUnfinished == true); assertNoRealHold(service)
+    }
+    @MainActor func testCodexMetadataQueryDoesNotFallBackFromAnotherHome() async throws {
+        let gate = CodexMetadataGate(), (defaults, root, service) = try codexMetadataFixture(gate, home: URL(fileURLWithPath: "/fixture/other-codex-home"))
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        let waiting = await gate.waiting(); XCTAssertFalse(waiting); XCTAssertTrue(service.engine.sessions.values.first?.isUnfinished == true); assertNoRealHold(service)
+    }
+    @MainActor func testExistingHookConnectionDoesNotImplyMetadataReadConsent() async throws {
+        let gate = CodexMetadataGate(), (defaults, root, service) = try codexMetadataFixture(gate, consent: false)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        let waiting = await gate.waiting(); XCTAssertFalse(waiting)
+        XCTAssertTrue(service.engine.sessions.values.first?.isUnfinished == true); assertNoRealHold(service)
+    }
+    @MainActor func testRevokedConsentDiscardsInflightMetadataResult() async throws {
+        let gate = CodexMetadataGate(), (defaults, root, service) = try codexMetadataFixture(gate)
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: root.lastPathComponent); try? FileManager.default.removeItem(at: root) }
+        try submitCodexMetadataTask(root: root, service: service); await waitForCodexMetadata(gate)
+        defaults.set(false, forKey: KeepAwakeService.codexTurnMetadataConsentKey)
+        await gate.finish([.init(identity: codexIdentity(), state: "failed", startedAt: 1, completedAt: 2)])
+        try? await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertTrue(service.engine.sessions.values.first?.isUnfinished == true); assertNoRealHold(service)
+        defaults.set(true, forKey: KeepAwakeService.codexTurnMetadataConsentKey)
+        try? await Task.sleep(nanoseconds: 5_100_000_000)
+        service.tick(); await waitForCodexMetadata(gate)
+        await gate.finish([])
+    }
+
     @MainActor func testAppOwnedAcceptanceRecorderIsExplicitBoundedAndSurvivesCallerScope() throws {
         let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

@@ -108,8 +108,25 @@ final class KeepAwakeService: ObservableObject {
     private var codexTask: Task<Void, Never>?
     private var codexGeneration: UInt64 = 0
     private var nextCodexPoll: TimeInterval = 0
+    private var lastCodexQuietSampleStartedAt: TimeInterval?
+    private var lastLocalSampleStartedAt: TimeInterval?
     private var codexSequence: UInt64 = 0
     private var codexLedger = KeepAwakeCodexMonitor.Ledger()
+    private var codexMetadataTask: Task<Void, Never>?
+    private var codexMetadataGeneration: UInt64 = 0
+    private var nextCodexMetadataPoll: TimeInterval = 0
+    private var chatMetadataTask: Task<Void, Never>?
+    private var chatMetadataGeneration: UInt64 = 0
+    private var nextChatMetadataPoll: TimeInterval = 0
+    private struct ChatCache {
+        var profile: KeepAwakeCodexEnvironment.Profile
+        var snapshot: KeepAwakeCodexChatMetadata.Snapshot
+        var sampledAt: TimeInterval
+    }
+    private var chatMetadata: [String: ChatCache] = [:]
+    private var chatRuntimes: [String: (scope: String, values: [String: KeepAwakeChatGrouping.Runtime], sampledAt: TimeInterval)] = [:]
+    private let chatMetadataSampler: @Sendable (URL, Set<String>) async -> KeepAwakeCodexChatMetadata.Snapshot
+    private let codexMetadataSampler: @Sendable (URL, Set<KeepAwakeCodexTurnMetadataReader.Identity>) async -> [KeepAwakeCodexTurnMetadataReader.Terminal]
     private var zcodeTask: Task<Void, Never>?
     private var zcodeGeneration: UInt64 = 0
     private var nextZCodePoll: TimeInterval = 0
@@ -133,7 +150,12 @@ final class KeepAwakeService: ObservableObject {
     private var lidObserver: AnyCancellable?
     private let power = KeepAwakePower()
     private var completionSleep = KeepAwakeCompletionSleep()
+    private var lowPowerRecovery = KeepAwakeLowPowerRecovery()
+    private let environmentReader: () -> KeepAwakeEngine.Environment
+    private let policyClock: () -> TimeInterval
+    private let awakeClock: () -> TimeInterval
     private var completionSleepError: String?
+    private var completionSleepDeferral: String?
     private var mailbox: KeepAwakeMailbox
     private let acceptance: KeepAwakeAcceptanceRecorder
     let recap: KeepAwakeRecapController
@@ -146,6 +168,10 @@ final class KeepAwakeService: ObservableObject {
     private static let preferencesKey = "keepAwake.preferences.v1"
     private static let sourcesKey = "keepAwake.sources.v1"
     private static let cleanupKey = "keepAwake.cleanupPending.v1"
+    // Local consent for the new five-field database projection. Existing
+    // connections and installations on another device do not imply consent.
+    static let codexTurnMetadataConsentKey = "keepAwake.codex.turnMetadata.v1"
+    static let codexChatMetadataConsentKey = "keepAwake.codex.chatMetadata.v1"
 
     init(defaults: UserDefaults = .standard, root: URL? = nil,
          localSampler: @escaping @MainActor () async -> KeepAwakeKimiMonitor.Snapshot = { await KeepAwakeKimiMonitor.sample() },
@@ -156,7 +182,14 @@ final class KeepAwakeService: ObservableObject {
          codexHookInstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil,
          codexHookUninstaller: (@MainActor (KeepAwakeSource, URL, KeepAwakeCodexEnvironment.Profile) throws -> Void)? = nil,
          lidClient: KeepAwakeLidClient? = nil,
-         zcodeSampler: (@Sendable (Set<KeepAwakeZCodeTurnMetadataReader.Identity>) async -> [KeepAwakeZCodeTurnMetadataReader.Terminal])? = nil) {
+         zcodeSampler: (@Sendable (Set<KeepAwakeZCodeTurnMetadataReader.Identity>) async -> [KeepAwakeZCodeTurnMetadataReader.Terminal])? = nil,
+         codexMetadataSampler: (@Sendable (URL, Set<KeepAwakeCodexTurnMetadataReader.Identity>) async -> [KeepAwakeCodexTurnMetadataReader.Terminal])? = nil,
+         chatMetadataSampler: (@Sendable (URL, Set<String>) async -> KeepAwakeCodexChatMetadata.Snapshot)? = nil,
+         environmentReader: @escaping () -> KeepAwakeEngine.Environment = KeepAwakePower.environment,
+         policyClock: @escaping () -> TimeInterval = KeepAwakeClock.now,
+         awakeClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.environmentReader = environmentReader; self.policyClock = policyClock
+        self.awakeClock = awakeClock
         self.defaults = defaults
         lid = lidClient ?? KeepAwakeLidClient(
             readEnabledIntent: { defaults.bool(forKey: KeepAwakeLidClient.enabledIntentKey) },
@@ -168,6 +201,14 @@ final class KeepAwakeService: ObservableObject {
         self.codexResolver = codexResolver
         self.codexHookInstaller = codexHookInstaller
         self.codexHookUninstaller = codexHookUninstaller
+        self.chatMetadataSampler = chatMetadataSampler ?? { database, sessions in
+            await Task.detached(priority: .utility) { KeepAwakeCodexChatMetadata.read(database: database, sessions: sessions) }.value
+        }
+        self.codexMetadataSampler = codexMetadataSampler ?? { database, identities in
+            await Task.detached(priority: .utility) {
+                KeepAwakeCodexTurnMetadataReader.read(database: database, identities: identities)
+            }.value
+        }
         self.zcodeSampler = zcodeSampler ?? { identities in
             await Task.detached(priority: .utility) {
                 guard KeepAwakeZCodeTurnMetadataReader.defaultPathIsConfigured() else { return [] }
@@ -236,9 +277,9 @@ final class KeepAwakeService: ObservableObject {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.completionSleep.cancel()
                     self.acceptance.append(notification.name == NSWorkspace.willSleepNotification ? "system-will-sleep" : "system-did-wake")
                     if notification.name == NSWorkspace.willSleepNotification {
+                        self.completionSleep.systemWillSleep()
                         self.recap.willSleep()
                         self.power.apply(hold: false, policy: .system, notebook: self.isNotebook)
                         self.actualHold = self.power.isHolding
@@ -254,6 +295,7 @@ final class KeepAwakeService: ObservableObject {
         completionSleep.cancel()
         cancelResume()
         codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
+        invalidateCodexMetadataRead()
         zcodeGeneration &+= 1; zcodeTask?.cancel(); zcodeTask = nil
         localSourceGeneration += 1; localSourceTask?.cancel(); localSourceTask = nil
         timer?.invalidate(); timer = nil; engine.stop(); lid.suspendForShutdown()
@@ -278,7 +320,7 @@ final class KeepAwakeService: ObservableObject {
     var lidExplanation: String {
         lid.message
     }
-    private func cancelResume() { resumeGeneration &+= 1; recoveryInProgress = false }
+    private func cancelResume() { resumeGeneration &+= 1; recoveryInProgress = false; lowPowerRecovery.reset() }
     var releasePending: Bool { !engine.enabled && (power.hasPendingAssertions || lid.hasPendingRelease) }
     var canEnable: Bool { engine.enabled || (!releasePending && !recoveryInProgress) }
     func setEnabled(_ enabled: Bool) {
@@ -310,22 +352,37 @@ final class KeepAwakeService: ObservableObject {
         tick()
     }
     func resume() {
+        beginResume(automatic: false)
+    }
+    private func beginResume(automatic: Bool) {
         guard engine.enabled, !recoveryInProgress else { return }
-        environment = KeepAwakePower.environment()
+        environment = environmentReader()
+        if automatic && !engine.canAutomaticallyRecoverLowPower(now: policyClock(), environment: environment) { return }
         guard engine.unsafeReason(environment) == nil else {
             record("恢复检查未通过，保护条件仍然存在。"); tick(); return
         }
         resumeGeneration &+= 1
         let generation = resumeGeneration
+        let checkTime = policyClock(), checkAwake = awakeClock()
         recoveryInProgress = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let recovered = await self.lid.recoverAndEnable()
+            let recovered = await self.lid.recoverAndEnable(allowConflictRecovery: !automatic)
             guard generation == self.resumeGeneration else { return }
             self.recoveryInProgress = false
-            self.environment = KeepAwakePower.environment()
+            self.environment = self.environmentReader()
             guard recovered else { self.record("合盖恢复尚未确认，请检查辅助程序提示。"); self.tick(); return }
+            if automatic {
+                let elapsed = self.policyClock() - checkTime, awake = self.awakeClock() - checkAwake
+                if !elapsed.isFinite || !awake.isFinite || elapsed < 0 || awake < 0 || elapsed - awake > 1 {
+                    self.tick(); return
+                }
+            }
+            if automatic && !self.engine.canAutomaticallyRecoverLowPower(now: self.policyClock(), environment: self.environment) {
+                self.tick(); return
+            }
             if !self.engine.resume(environment: self.environment) { self.record("电源条件已变化，恢复检查未通过。") }
+            else { self.lowPowerRecovery.reset() }
             self.tick()
         }
     }
@@ -365,6 +422,7 @@ final class KeepAwakeService: ObservableObject {
             guard codexAvailability(), let codex else { throw KeepAwakeCodexRPC.Failure.unavailable }
             codexConnections[source.id] = codex; saveCodexConnections()
             engine.disconnect(source: source.id); receivedSources.remove(source.id)
+            invalidateCodexMetadataRead()
             codexGeneration &+= 1; codexTask?.cancel(); codexTask = nil
             codexLedger = .init(); codexSequence = 0; nextCodexPoll = 0
             codexStatus = "等待官方本机接口的首次只读检查"
@@ -406,6 +464,7 @@ final class KeepAwakeService: ObservableObject {
             throw error
         }
         engine.disconnect(source: source.id); receivedSources.remove(source.id)
+        if KeepAwakeHookContract.codexSources.contains(source.id) { invalidateCodexMetadataRead() }
         if source.id == "zcode-desktop" {
             zcodeGeneration &+= 1; zcodeTask?.cancel(); zcodeTask = nil; nextZCodePoll = 0
         }
@@ -416,6 +475,7 @@ final class KeepAwakeService: ObservableObject {
     }
     func disconnect(_ source: KeepAwakeSource) throws {
         completionSleep.cancel()
+        if KeepAwakeHookContract.codexSources.contains(source.id) { invalidateCodexMetadataRead() }
         if source.id == "zcode-desktop" {
             zcodeGeneration &+= 1; zcodeTask?.cancel(); zcodeTask = nil
         }
@@ -490,11 +550,24 @@ final class KeepAwakeService: ObservableObject {
     }
     func tick() {
         acceptance.poll()
-        let currentEnvironment = KeepAwakePower.environment()
+        let currentEnvironment = environmentReader()
         if environment != currentEnvironment { environment = currentEnvironment }
         if isNotebook { lid.refreshRegistrationStatus() }
-        let now = KeepAwakeClock.now()
+        let now = policyClock(), awake = awakeClock()
+        if completionSleep.observeClock(continuous: now, awake: awake) {
+            // Refresh passive source snapshots before considering another
+            // request. The grace period gives hooks and new work time to arrive.
+            nextCodexPoll = 0; nextLocalPoll = 0; nextZCodePoll = 0; nextCodexMetadataPoll = 0
+            acceptance.append("completion-sleep-wake-recheck", fields: ["delaySeconds": KeepAwakeCompletionSleep.wakeRecheckDelay])
+        }
         recapPhysical = KeepAwakeSystemSleep.snapshot()
+        if let physical = recapPhysical, completionSleep.observeKernelWake(physical, now: now) {
+            nextCodexPoll = 0; nextLocalPoll = 0; nextZCodePoll = 0; nextCodexMetadataPoll = 0
+            acceptance.append("completion-sleep-kernel-wake-recheck", fields: [
+                "delaySeconds": KeepAwakeCompletionSleep.kernelWakeSettlementDelay,
+                "kernelSleepTime": physical.kernelSleepTime.map { $0 as Any } ?? NSNull(),
+                "kernelWakeTime": physical.kernelWakeTime.map { $0 as Any } ?? NSNull()])
+        }
         defer { recapPhysical = nil }
         updateRecap()
         pollLocalSource(now: now)
@@ -517,11 +590,18 @@ final class KeepAwakeService: ObservableObject {
             }
         }
         pollZCodeSource(now: now)
+        pollCodexMetadata(now: now)
+        pollChatMetadata(now: now)
         // Evaluating an unchanged value through @Published's modifying accessor
         // used to invalidate settings and menus on every timer tick.
         var evaluatedEngine = engine
         let next = evaluatedEngine.evaluate(now: now, environment: environment)
         if evaluatedEngine != engine { engine = evaluatedEngine }
+        if !recoveryInProgress && lowPowerRecovery.shouldAttempt(
+            eligible: engine.canAutomaticallyRecoverLowPower(now: now, environment: environment), now: now, awake: awake) {
+            acceptance.append("low-power-recovery-check", fields: ["attempt": lowPowerRecovery.attempts])
+            beginResume(automatic: true)
+        }
         if sourceFreshness.update(engine: engine, now: now) { objectWillChange.send() }
         power.apply(hold: next.hold, policy: preferences.screen, notebook: isNotebook)
         if actualHold != power.isHolding { actualHold = power.isHolding }
@@ -557,7 +637,16 @@ final class KeepAwakeService: ObservableObject {
                 "lidApplied": lid.applied, "lidReleaseConfirmed": lid.releasedForCompletionSleep,
                 "lidClosed": physical.lidClosed.map { $0 as Any } ?? NSNull(),
                 "sleepDisabled": physical.sleepDisabled.map { $0 as Any } ?? NSNull(),
+                "cpuSleepBlocked": physical.cpuSleepBlocked.map { $0 as Any } ?? NSNull(),
+                "cpuBlockingTypes": physical.cpuBlockingTypes.map { $0 as Any } ?? NSNull(),
+                "kernelSleepTime": physical.kernelSleepTime.map { $0 as Any } ?? NSNull(),
+                "kernelWakeTime": physical.kernelWakeTime.map { $0 as Any } ?? NSNull(),
                 "externalDisplays": physical.externalDisplays.map { $0 as Any } ?? NSNull(),
+                "thermalUnsafe": environment.thermalUnsafe,
+                "thermalLevel": environment.thermalLevel.map { $0 as Any } ?? NSNull(),
+                "thermalProtection": engine.hasThermalProtection,
+                "lowPower": environment.lowPower, "lowPowerProtection": engine.hasLowPowerProtection,
+                "lidEnabled": lid.enabled, "lidReleasePending": lid.hasPendingRelease, "lidReleaseFailed": lid.releaseFailed,
                 "unfinishedCount": pending.count, "pendingTruncated": pending.count > 64,
                 "pending": pending.prefix(64).map { ["source": $0.event.source,
                     "sessionHash": KeepAwakeHookContract.anonymousIdentity($0.event.session),
@@ -584,7 +673,8 @@ final class KeepAwakeService: ObservableObject {
             // Other legacy events do not prove human/background classification.
             let kind: KeepAwakeRecap.Kind = KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) ? .background : .unclassified
             return .init(id: KeepAwakeHookContract.anonymousIdentity(event.storageKey), source: event.source,
-                         kind: kind, state: state, started: session.hasStarted)
+                         kind: kind, state: state, started: session.hasStarted,
+                         chat: kind == .background ? nil : chatIdentity(source: event.source, session: event.session, state: state, now: now))
         }
         recap.observe(.init(stamp: KeepAwakeRecapController.stamp(), notebook: isNotebook,
             closed: physical.lidClosed, enabled: engine.enabled, actualHold: actualHold,
@@ -592,11 +682,15 @@ final class KeepAwakeService: ObservableObject {
             released: !actualHold && !lid.applied && !lid.hasPendingRelease && physical.sleepDisabled == false,
             protection: engine.protection != nil, error: runtimeError != nil || lid.releaseFailed,
             automatic: engine.mode == .automatic, tasks: inputs, completeTasks: complete,
-            paused: engine.pauseDeadline.map { $0 > now } ?? false))
+            paused: engine.pauseDeadline.map { $0 > now } ?? false,
+            thermalProtection: engine.hasThermalProtection, thermalLevel: environment.thermalLevel,
+            lowPowerProtection: engine.hasLowPowerProtection, chatTitles: currentChatTitles(now: now),
+            kernelSleepTime: physical.kernelSleepTime, kernelWakeTime: physical.kernelWakeTime))
     }
     private func finishCompletedLidTasks(now: TimeInterval) {
+        completionSleep.observePhysical(recapPhysical ?? KeepAwakeSystemSleep.snapshot())
         let phase = engine.completionSleepPhase(now: now, environment: environment)
-        if phase == .inactive || phase == .unfinished { completionSleepError = nil }
+        if phase == .inactive || phase == .unfinished { completionSleepError = nil; completionSleepDeferral = nil }
         if phase == .inactive { completionSleep.cancel(); return }
         // A failed/disabled helper must never be interpreted as a release ack.
         guard lid.enabled, !recoveryInProgress, power.error == nil else {
@@ -606,25 +700,55 @@ final class KeepAwakeService: ObservableObject {
             // Arming only needs ownership. Physical/release checks are relevant
             // at ready, and are still re-read immediately before requesting sleep.
             _ = completionSleep.update(phase: phase, ownsLidHold: actualHold && lid.applied,
-                                       releasesConfirmed: false, snapshot: .init())
+                                       releasesConfirmed: false, snapshot: recapPhysical ?? KeepAwakeSystemSleep.snapshot())
             return
         }
         if phase == .grace { return }
+        let physical = KeepAwakeSystemSleep.snapshot()
+        // Seed the kernel baseline before the first synchronous sleep request;
+        // the hold may only have been released during this very tick.
+        _ = completionSleep.observeKernelWake(physical, now: now)
+        guard physical.isClosedWithoutExternalDisplay else { completionSleep.cancel(); return }
         // Let an in-flight source snapshot publish any new task before deciding
         // that a previously completed batch is still the last work.
-        if phase == .ready && (codexTask != nil || localSourceTask != nil) { return }
+        if phase == .ready && (codexTask != nil || localSourceTask != nil || zcodeTask != nil || codexMetadataTask != nil) { return }
+        let recheckAt = completionSleep.wakeRecheckAt ?? (engine.hasThermalProtection ? completionSleep.thermalWakeRecheckAt : nil)
+        let refreshed = recheckAt.map { deadline in
+            let wokeAt = deadline - KeepAwakeCompletionSleep.wakeRecheckDelay
+            let codexReady = !connections.contains("codex-desktop") || codexConnections["codex-desktop"]?.mode != .rpc ||
+                (lastCodexQuietSampleStartedAt.map { $0 >= wokeAt } ?? false)
+            let localReady = !connections.contains(KeepAwakeKimiMonitor.sourceID) ||
+                (lastLocalSampleStartedAt.map { $0 >= wokeAt } ?? false)
+            return codexReady && localReady
+        } ?? true
         let released = !actualHold && power.displayID == 0 && lid.releasedForCompletionSleep
+        if released, completionSleep.armed || completionSleep.waitingForCPU || completionSleep.thermalWakeRecheckAt != nil,
+           physical.cpuSleepBlocked != false {
+            recordCompletionSleepDeferral(physical.cpuSleepBlocked, types: physical.cpuBlockingTypes)
+        } else if released, completionSleep.waitingForCPU, physical.cpuSleepBlocked == false,
+                  completionSleepDeferral != nil {
+            acceptance.append("completion-sleep-cpu-unblocked")
+            completionSleepDeferral = nil
+        }
         guard completionSleep.update(phase: phase, ownsLidHold: actualHold && lid.applied,
-                                     releasesConfirmed: released, snapshot: KeepAwakeSystemSleep.snapshot()) else { return }
-        acceptance.append("completion-sleep-request", fields: ["ownAssertionsReleased": released])
+                                     releasesConfirmed: released, snapshot: physical, now: now, sourcesRefreshed: refreshed,
+                                     thermalProtection: engine.hasThermalProtection) else { return }
+        acceptance.append("completion-sleep-request", fields: ["ownAssertionsReleased": released,
+            "cpuSleepBlocked": physical.cpuSleepBlocked.map { $0 as Any } ?? NSNull(),
+            "thermalProtection": engine.hasThermalProtection])
         // No await between the final policy evaluation and the physical recheck.
         // Newly received work cancels ready before a later tick can request sleep.
-        switch KeepAwakeCompletionSleep.attempt(snapshot: KeepAwakeSystemSleep.snapshot,
-                                               request: KeepAwakeSystemSleep.request) {
+        let result = KeepAwakeCompletionSleep.attempt(snapshot: KeepAwakeSystemSleep.snapshot,
+                                                     request: KeepAwakeSystemSleep.request)
+        completionSleep.requested(result)
+        switch result {
         case .skipped:
             acceptance.append("completion-sleep-skipped")
             break
+        case .deferred:
+            recordCompletionSleepDeferral(nil)
         case .accepted:
+            completionSleepDeferral = nil
             recap.sleepAccepted()
             acceptance.append("completion-sleep-accepted")
             record("全部任务已结束；系统已接受合盖休眠请求，实际休眠仍由系统确认。")
@@ -633,6 +757,17 @@ final class KeepAwakeService: ObservableObject {
             completionSleepError = "保持已释放，但系统未接受合盖休眠请求（\(code)）。"
             runtimeError = completionSleepError
         }
+    }
+    private func recordCompletionSleepDeferral(_ blocked: Bool?, types: [String]? = nil) {
+        let reason = blocked == true ? "cpu-assertion" : "cpu-assertion-unknown"
+        let signature = reason + ":" + (types ?? []).sorted().joined(separator: ",")
+        guard completionSleepDeferral != signature else { return }
+        completionSleepDeferral = signature
+        recap.sleepDeferred(cpuBlocked: blocked, blockingTypes: types)
+        acceptance.append("completion-sleep-deferred", fields: ["reason": reason,
+            "blockingTypes": types.map { $0 as Any } ?? NSNull()])
+        record(blocked == true ? "系统后台仍持有 CPU 保持断言；保留合盖休眠请求，等待它自然释放。" :
+            "系统 CPU 保持状态尚未确认；合盖休眠请求暂缓。")
     }
     private func pollCodexSource(now: TimeInterval) {
         let source = "codex-desktop"
@@ -644,12 +779,14 @@ final class KeepAwakeService: ObservableObject {
             guard let self else { return }
             let snapshot: KeepAwakeCodexMonitor.Snapshot
             let status: String
+            var quietSnapshot = false
             do {
                 if let sampler = self.codexSampler { snapshot = try await sampler() }
                 else if let profile = self.codexConnections[source]?.profile {
                     snapshot = try await Task.detached(priority: .utility) { try KeepAwakeCodexRPC.sample(profile: profile) }.value
                 } else { throw ConnectionFailure.bindingMissing }
                 let active = snapshot.threads.filter { $0.status == "active" }
+                quietSnapshot = snapshot.threads.allSatisfy { $0.status == "idle" && $0.turnsComplete }
                 let waiting = active.filter { !$0.activeFlags.isEmpty }
                 status = active.isEmpty ? "官方本机接口已连接 · 没有已知运行任务" :
                     "本机运行 \(active.count) 个线程，其中 \(waiting.count) 个等待交互或状态确认"
@@ -659,6 +796,20 @@ final class KeepAwakeService: ObservableObject {
                 status = (error as? KeepAwakeCodexRPC.Failure)?.localizedDescription ?? "Codex 状态读取失败；已开始任务继续保持。"
             }
             guard !Task.isCancelled, generation == self.codexGeneration, self.connections.contains(source) else { return }
+            if let profile = self.codexConnections[source]?.profile {
+                var runtimes: [String: KeepAwakeChatGrouping.Runtime] = [:]
+                for thread in snapshot.threads {
+                    let runtime: KeepAwakeChatGrouping.Runtime
+                    if thread.status == "idle" && thread.turnsComplete && thread.turns.allSatisfy({ ["completed", "failed", "interrupted"].contains($0.status) }) { runtime = .idle }
+                    else if thread.status == "active" && thread.activeFlags.contains(where: { ["waitingOnApproval", "waitingOnUserInput"].contains($0) }) { runtime = .waiting }
+                    else if thread.status == "active" && thread.activeFlags.isEmpty && thread.turns.contains(where: { $0.status == "inProgress" }) { runtime = .running }
+                    else { runtime = .unknown }
+                    let id = KeepAwakeHookContract.anonymousIdentity(thread.id)
+                    runtimes[id] = runtimes[id].map { $0 == runtime ? runtime : .unknown } ?? runtime
+                }
+                self.chatRuntimes[source] = (Self.chatScope(profile), runtimes, KeepAwakeClock.now())
+            }
+            self.lastCodexQuietSampleStartedAt = quietSnapshot ? now : nil
             self.codexTask = nil
             let arrived = KeepAwakeClock.now()
             self.nextCodexPoll = arrived + 5
@@ -678,6 +829,131 @@ final class KeepAwakeService: ObservableObject {
             let unknown = self.engine.capacityExceededSources.contains(source) || unfinished.contains { $0.event.state == .idle }
             self.codexStatus = unknown || (!unfinished.isEmpty && snapshot.threads.allSatisfy({ $0.status != "active" })) ?
                 "任务状态待核实 · 继续保持；" + status : status
+            self.tick()
+        }
+    }
+    private func invalidateCodexMetadataRead() {
+        chatMetadataGeneration &+= 1; chatMetadataTask?.cancel(); chatMetadataTask = nil
+        chatMetadata.removeAll(); chatRuntimes.removeAll(); nextChatMetadataPoll = 0
+        codexMetadataGeneration &+= 1
+        codexMetadataTask?.cancel(); codexMetadataTask = nil; nextCodexMetadataPoll = 0
+    }
+    private static func chatScope(_ profile: KeepAwakeCodexEnvironment.Profile) -> String {
+        KeepAwakeHookContract.anonymousIdentity(profile.codexHome.standardizedFileURL.path)
+    }
+    func setChatMetadataConsent(_ enabled: Bool) {
+        defaults.set(enabled, forKey: Self.codexChatMetadataConsentKey)
+        chatMetadataGeneration &+= 1; chatMetadataTask?.cancel(); chatMetadataTask = nil
+        chatMetadata.removeAll(); nextChatMetadataPoll = 0
+        if !enabled { recap.redactChatTitles() }
+    }
+    private func pollChatMetadata(now: TimeInterval) {
+        guard defaults.bool(forKey: Self.codexChatMetadataConsentKey) else {
+            if !chatMetadata.isEmpty || chatMetadataTask != nil {
+                chatMetadataGeneration &+= 1; chatMetadataTask?.cancel(); chatMetadataTask = nil; chatMetadata.removeAll()
+            }
+            recap.redactChatTitles(); return
+        }
+        guard started, chatMetadataTask == nil, now >= nextChatMetadataPoll else { return }
+        var targets: [(String, KeepAwakeCodexEnvironment.Profile, URL, Set<String>)] = []
+        for source in KeepAwakeHookContract.codexSources.sorted() where connections.contains(source) {
+            guard let profile = codexConnections[source]?.profile,
+                  let db = KeepAwakeCodexChatMetadata.databaseURL(home: profile.codexHome) else { continue }
+            let ids = Set(engine.sessions.values.filter { $0.event.source == source && $0.hasStarted &&
+                !KeepAwakeHookContract.isAuxiliaryTask(source: source, taskID: $0.event.taskID) }.map { $0.event.session })
+            if !ids.isEmpty { targets.append((source, profile, db, ids)) }
+        }
+        guard !targets.isEmpty else { return }
+        nextChatMetadataPoll = now + 5
+        let generation = chatMetadataGeneration, sampler = chatMetadataSampler
+        chatMetadataTask = Task { @MainActor [weak self] in
+            for (source, profile, db, ids) in targets {
+                let snapshot = await sampler(db, ids)
+                guard !Task.isCancelled, let self, self.started, generation == self.chatMetadataGeneration,
+                      self.defaults.bool(forKey: Self.codexChatMetadataConsentKey) else { return }
+                guard self.connections.contains(source), self.codexConnections[source]?.profile == profile else { continue }
+                self.chatMetadata[source] = .init(profile: profile, snapshot: snapshot, sampledAt: KeepAwakeClock.now())
+                self.acceptance.append("chat-metadata-sample", fields: ["source": source, "admittedSessionCount": ids.count,
+                    "resolvedSessionCount": snapshot.nodes.count, "rootTitleCount": snapshot.titles.count,
+                    "metadataQuality": snapshot.quality, "metadataIssue": snapshot.issue.map { $0.rawValue as Any } ?? NSNull(),
+                    "unresolvedSessionCount": snapshot.unresolvedCount, "rejectedTitleCount": snapshot.rejectedTitleCount])
+            }
+            guard let self, generation == self.chatMetadataGeneration else { return }
+            self.chatMetadataTask = nil; self.nextChatMetadataPoll = KeepAwakeClock.now() + 5
+            // No tick, no Engine event: hierarchy cannot trigger task/power policy.
+        }
+    }
+    private func chatIdentity(source: String, session: String, state: KeepAwakeRecap.State, now: TimeInterval) -> KeepAwakeChatGrouping.Identity? {
+        guard defaults.bool(forKey: Self.codexChatMetadataConsentKey), connections.contains(source),
+              let cache = chatMetadata[source], codexConnections[source]?.profile == cache.profile,
+              now >= cache.sampledAt, now - cache.sampledAt <= 15, let node = cache.snapshot.nodes[session] else { return nil }
+        let scope = Self.chatScope(cache.profile)
+        let runtimeCache = chatRuntimes[source]
+        let runtimeFresh = runtimeCache.map { $0.scope == scope && now >= $0.sampledAt && now - $0.sampledAt <= 10 } ?? false
+        let sessionRuntime: KeepAwakeChatGrouping.Runtime = state == .running ? .running : state == .waiting ? .waiting :
+            runtimeFresh ? runtimeCache?.values[session] ?? .unknown : .unknown
+        let rootRuntime = node.root == session ? sessionRuntime : runtimeFresh ? runtimeCache?.values[node.root] ?? .unknown : .unknown
+        return .init(scope: scope, session: session, root: node.root, parent: node.parent, availability: node.availability,
+                     sessionRuntime: sessionRuntime, rootRuntime: rootRuntime, observedAt: Date().timeIntervalSince1970)
+    }
+    private func currentChatTitles(now: TimeInterval) -> [String: String] {
+        guard defaults.bool(forKey: Self.codexChatMetadataConsentKey) else { return [:] }
+        var result: [String: String] = [:]
+        for (source, cache) in chatMetadata where connections.contains(source) && codexConnections[source]?.profile == cache.profile && now >= cache.sampledAt && now - cache.sampledAt <= 15 {
+            for (root, title) in cache.snapshot.titles { result[Self.chatScope(cache.profile) + ":" + root] = title }
+        }
+        return result
+    }
+    private func pollCodexMetadata(now: TimeInterval) {
+        guard started, defaults.bool(forKey: Self.codexTurnMetadataConsentKey),
+              codexMetadataTask == nil, now >= nextCodexMetadataPoll else { return }
+        typealias Identity = KeepAwakeCodexTurnMetadataReader.Identity
+        var admitted: [String: [Identity: UInt64]] = [:]
+        var database: URL?
+        for source in KeepAwakeHookContract.codexSources where connections.contains(source) {
+            guard let binding = codexConnections[source], binding.mode == .hooks,
+                  let path = KeepAwakeCodexTurnMetadataReader.databaseURL(codexHome: binding.profile.codexHome) else { continue }
+            database = path
+            for session in engine.sessions.values where session.event.source == source && session.isUnfinished {
+                guard let task = session.event.taskID else { continue }
+                let identity = Identity(sessionHash: session.event.session, taskHash: task)
+                guard KeepAwakeCodexTurnMetadataReader.isMainIdentity(identity) else { continue }
+                admitted[source, default: [:]][identity] = session.event.sequence
+            }
+        }
+        let identities = Set(admitted.values.flatMap { $0.keys })
+        guard let database, !identities.isEmpty else { return }
+        nextCodexMetadataPoll = now + 5
+        let generation = codexMetadataGeneration, sample = codexMetadataSampler
+        let captured = admitted
+        codexMetadataTask = Task { @MainActor [weak self] in
+            let results = await sample(database, identities)
+            guard !Task.isCancelled, let self, self.started,
+                  generation == self.codexMetadataGeneration else { return }
+            self.codexMetadataTask = nil; self.nextCodexMetadataPoll = KeepAwakeClock.now() + 5
+            guard self.defaults.bool(forKey: Self.codexTurnMetadataConsentKey) else { return }
+            for source in captured.keys where self.connections.contains(source) {
+                guard let binding = self.codexConnections[source], binding.mode == .hooks,
+                      KeepAwakeCodexTurnMetadataReader.databaseURL(codexHome: binding.profile.codexHome) == database else { continue }
+                for result in results where identities.contains(result.identity) {
+                    guard let sequence = captured[source]?[result.identity],
+                          let state = KeepAwakeEngine.TaskState(rawValue: result.state),
+                          [.completed, .failed, .cancelled].contains(state) else { continue }
+                    let event = KeepAwakeEngine.Event(source: source, session: result.identity.sessionHash,
+                        sequence: mach_continuous_time(), state: state, taskID: result.identity.taskHash, startsTask: false)
+                    guard let current = self.engine.sessions[event.storageKey], current.isUnfinished,
+                          current.event.sequence == sequence,
+                          self.engine.receive(event, now: KeepAwakeClock.now()) else { continue }
+                    if let session = self.engine.sessions[event.storageKey] { self.updateRecap(sessions: [session], complete: false) }
+                    self.acceptance.append("accepted-task-event", fields: ["source": source,
+                        "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
+                        "taskHash": KeepAwakeHookContract.anonymousIdentity(result.identity.taskHash),
+                        "state": state.rawValue, "startsTask": false, "evidence": "exact-codex-turn-status"])
+                    if state == .completed && self.engine.enabled {
+                        self.notifyCompletion(source: source, session: event.session, sequence: event.sequence)
+                    }
+                }
+            }
             self.tick()
         }
     }
@@ -735,6 +1011,7 @@ final class KeepAwakeService: ObservableObject {
             guard !Task.isCancelled, let self, self.started,
                   generation == self.localSourceGeneration, self.connections.contains(source) else { return }
             self.localSourceStatus = snapshot.message
+            self.lastLocalSampleStartedAt = snapshot.state != nil ? now : nil
             if let state = snapshot.state {
                 let event = KeepAwakeEngine.Event(source: source, session: "desktop-aggregate",
                     sequence: mach_continuous_time(), state: state)

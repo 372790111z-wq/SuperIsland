@@ -3,6 +3,164 @@ import ServiceManagement
 @testable import SuperIsland
 
 final class KeepAwakeHelperRecoveryTests: XCTestCase {
+    func testOwnedLeaseAlreadyAtBaselineDoesNotReportCorruptionOrReapply() throws {
+        let owner = UUID().uuidString
+        var power = 0, writes = 0
+        var saved: KeepAwakeLease.Journal?
+        let lease = KeepAwakeLease(journal: nil, readPower: { power }, writePower: { power = $0; writes += 1 }, save: { saved = $0 })
+        try lease.renew(owner: owner, now: 0)
+        power = 0 // System/another tool already restored the original value.
+        XCTAssertThrowsError(try lease.renew(owner: owner, now: 30))
+        XCTAssertNil(lease.journal)
+        XCTAssertNil(saved)
+        XCTAssertEqual(writes, 1, "Do not overwrite an external restoration")
+        XCTAssertEqual(power, 0)
+    }
+
+    func testExpiryReportsOnlyAConfirmedRestorationAndRejectsUnknownPower() throws {
+        let owner = UUID().uuidString
+        let journal = KeepAwakeLease.Journal(owner: owner, baseline: 0, applied: 1, expires: 10)
+        var value = 2, saved: KeepAwakeLease.Journal? = journal
+        let lease = KeepAwakeLease(journal: journal, readPower: { value }, writePower: { _ in XCTFail("must not overwrite unknown power") }, save: { saved = $0 })
+        XCTAssertThrowsError(try lease.expire(now: 10))
+        XCTAssertNotNil(saved)
+        value = 0 // Read back baseline: already restored, no global write.
+        XCTAssertTrue(try lease.expire(now: 11))
+        XCTAssertNil(saved)
+        XCTAssertFalse(try lease.expire(now: 12))
+    }
+
+    func testMalformedRecoveryRecordCannotWritePowerOrDisappear() throws {
+        for journal in [
+            KeepAwakeLease.Journal(owner: UUID().uuidString, baseline: 1, applied: 1, expires: 10),
+            .init(owner: "invalid", baseline: 0, applied: 1, expires: 10),
+            .init(owner: UUID().uuidString, baseline: 0, applied: 1, expires: .nan),
+            .init(owner: UUID().uuidString, baseline: 0, applied: 0, expires: 10)
+        ] {
+            let lease = KeepAwakeLease(journal: journal, readPower: { 0 }, writePower: { _ in XCTFail("bad record must not write") }, save: { _ in XCTFail("retain unknown recovery intent") })
+            XCTAssertThrowsError(try lease.recover())
+            XCTAssertNotNil(lease.journal)
+        }
+    }
+
+    @MainActor func testServiceAutomaticallyRecoversOnlyAfterSafeTimeAndHelperReply() async throws {
+        let transport = HelperTransport(), lid = client(transport)
+        lid.authorize(); await settle()
+        var environment = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true, lowPower: true)
+        var now = 0.0
+        let name = "KA-LowPower-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let service = KeepAwakeService(defaults: defaults, root: root, lidClient: lid,
+            environmentReader: { environment }, policyClock: { now }, awakeClock: { now })
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: name); try? FileManager.default.removeItem(at: root) }
+        service.setEnabled(true)
+        XCTAssertTrue(service.engine.hasLowPowerProtection)
+        environment.lowPower = false; now = 1; service.tick()
+        now = 30; service.tick(); await settle()
+        XCTAssertTrue(service.engine.hasLowPowerProtection)
+        transport.autoStatus = false
+        now = 31; service.tick(); await settle()
+        XCTAssertTrue(service.recoveryInProgress)
+        XCTAssertTrue(service.engine.hasLowPowerProtection)
+        transport.statusReplies.last?(true, "ready")
+        await settle(); await settle()
+        XCTAssertNil(service.engine.protection)
+        XCTAssertTrue(service.engine.enabled)
+        XCTAssertFalse(service.actualHold, "No task was admitted: recovery must not invent keeping")
+        XCTAssertTrue(transport.releaseReplies.isEmpty, "No owned renewal: do not release a foreign lease")
+    }
+
+    @MainActor func testThermalChangeDuringAutomaticRecoveryCannotClearProtection() async throws {
+        let transport = HelperTransport(), lid = client(transport)
+        lid.authorize(); await settle()
+        var environment = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true, lowPower: true)
+        var now = 0.0
+        let name = "KA-LowPowerRace-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let service = KeepAwakeService(defaults: defaults, root: root, lidClient: lid,
+            environmentReader: { environment }, policyClock: { now }, awakeClock: { now })
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: name); try? FileManager.default.removeItem(at: root) }
+        service.setEnabled(true)
+        environment.lowPower = false; now = 1; service.tick()
+        transport.autoStatus = false; now = 31; service.tick(); await settle()
+        environment.thermalUnsafe = true
+        transport.statusReplies.last?(true, "ready")
+        await settle(); await settle()
+        XCTAssertTrue(service.engine.hasThermalProtection)
+        XCTAssertFalse(service.actualHold)
+        XCTAssertFalse(service.recoveryInProgress)
+    }
+
+    @MainActor func testAutomaticRecoveryFailureIsBoundedAndNeverResumesKeeping() async throws {
+        let transport = HelperTransport(), lid = client(transport)
+        lid.authorize(); await settle()
+        var environment = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true, lowPower: true)
+        var now = 0.0
+        let name = "KA-LowPowerFailure-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let service = KeepAwakeService(defaults: defaults, root: root, lidClient: lid,
+            environmentReader: { environment }, policyClock: { now }, awakeClock: { now })
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: name); try? FileManager.default.removeItem(at: root) }
+        service.setEnabled(true); environment.lowPower = false; now = 1; service.tick()
+        transport.statusSuccess = false
+        for value in [31.0, 91, 151, 1000] {
+            now = value; service.tick(); await settle(); await settle()
+            XCTAssertTrue(service.engine.hasLowPowerProtection)
+            XCTAssertFalse(service.actualHold)
+        }
+        XCTAssertEqual(transport.statusReplies.count, 4, "Authorization plus at most three recovery checks")
+    }
+
+    @MainActor func testManualStopWinsAgainstLateAutomaticRecoveryReply() async throws {
+        let transport = HelperTransport(), lid = client(transport)
+        lid.authorize(); await settle()
+        var environment = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true, lowPower: true)
+        var now = 0.0
+        let name = "KA-LowPowerStop-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let service = KeepAwakeService(defaults: defaults, root: root, lidClient: lid,
+            environmentReader: { environment }, policyClock: { now }, awakeClock: { now })
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: name); try? FileManager.default.removeItem(at: root) }
+        service.setEnabled(true); environment.lowPower = false; now = 1; service.tick()
+        transport.autoStatus = false; now = 31; service.tick(); await settle()
+        service.stop(); transport.statusReplies.last?(true, "late ready")
+        await settle(); await settle()
+        XCTAssertFalse(service.engine.enabled)
+        XCTAssertTrue(service.engine.hasLowPowerProtection)
+        XCTAssertFalse(service.actualHold)
+    }
+
+    @MainActor func testSleepDuringRecoveryNeedsAFreshSafeWindowAfterWaking() async throws {
+        let transport = HelperTransport(), lid = client(transport)
+        lid.authorize(); await settle()
+        var environment = KeepAwakeEngine.Environment(hardware: .notebook, battery: 80, onAC: true, lowPower: true)
+        var now = 0.0, awake = 0.0
+        let name = "KA-LowPowerWake-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        let service = KeepAwakeService(defaults: defaults, root: root, lidClient: lid,
+            environmentReader: { environment }, policyClock: { now }, awakeClock: { awake })
+        defer { service.shutdown(); defaults.removePersistentDomain(forName: name); try? FileManager.default.removeItem(at: root) }
+        service.setEnabled(true); environment.lowPower = false; now = 1; awake = 1; service.tick()
+        transport.autoStatus = false; now = 31; awake = 31; service.tick(); await settle()
+        now = 631; awake = 32
+        transport.statusReplies.last?(true, "reply after sleep")
+        await settle(); await settle()
+        XCTAssertTrue(service.engine.hasLowPowerProtection)
+        XCTAssertFalse(service.actualHold)
+        now = 660; awake = 61; service.tick(); await settle()
+        XCTAssertFalse(service.recoveryInProgress)
+        now = 661; awake = 62; service.tick(); await settle()
+        XCTAssertTrue(service.recoveryInProgress)
+        transport.statusReplies.last?(true, "fresh ready")
+        await settle(); await settle()
+        XCTAssertNil(service.engine.protection)
+    }
+
     func testRejectedOwnerCannotMutateAnActiveLeaseOrItsRecoveryIntent() throws {
         let owner = UUID().uuidString
         var power = 0

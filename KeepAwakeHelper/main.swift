@@ -88,7 +88,11 @@ final class Daemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperProtocol {
                 if let journal = self.lease?.journal,
                    let reason = protectionReason(acOnly: journal.acOnly, minimumBattery: journal.minimumBattery, respectLowPower: journal.respectLowPower) {
                     try self.lease?.recover(); self.failure = reason
-                } else { try self.lease?.expire(now: KeepAwakeClock.now()) }
+                } else if try self.lease?.expire(now: KeepAwakeClock.now()) == true {
+                    // A verified restoration must not leave an earlier conflict
+                    // permanently poisoning subsequent status/renew requests.
+                    self.failure = nil
+                }
             }
             catch { self.failure = error.localizedDescription }
         }
@@ -97,7 +101,7 @@ final class Daemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperProtocol {
         expiry.schedule(deadline: .distantFuture)
         expiry.setEventHandler { [weak self] in
             guard let self else { return }
-            do { try self.lease?.expire(now: KeepAwakeClock.now()) }
+            do { if try self.lease?.expire(now: KeepAwakeClock.now()) == true { self.failure = nil } }
             catch { self.failure = error.localizedDescription }
         }
         expiryTimer = expiry; expiry.resume()

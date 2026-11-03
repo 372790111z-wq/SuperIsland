@@ -100,11 +100,17 @@ import CoreGraphics
         if storageError != nil { ledger.markStorageFailure() }
         if !autoShow || !frame.enabled { ledger.suppressAutomatic() }
         if latest != ledger.latest { latest = ledger.latest; panel?.updateSummary(latest) }
-        if ledger != previousLedger && (oldCurrent != ledger.current?.id || oldLatest != ledger.latest?.id || frame.stamp.continuous >= nextCheckpoint) {
+        if ledger != previousLedger && (oldCurrent != ledger.current?.id || oldLatest != ledger.latest?.id ||
+            previousLedger.current?.firstThermalProtection != ledger.current?.firstThermalProtection ||
+            previousLedger.current?.firstLowPowerProtection != ledger.current?.firstLowPowerProtection || frame.stamp.continuous >= nextCheckpoint) {
             nextCheckpoint = frame.stamp.continuous + 15; persist()
         }
         panel?.updatePreference(autoShow, editable: engineEnabled)
         attemptAutomatic()
+    }
+    func redactChatTitles() {
+        guard ledger.current?.displayTitles.isEmpty == false || ledger.latest?.displayTitles.isEmpty == false else { return }
+        ledger.redactChatTitles(); latest = ledger.latest; panel?.updateSummary(latest)
     }
     func willSleep(_ supplied: KeepAwakeRecap.Stamp? = nil) {
         guard !loading, !stopped else { return }; ledger.willSleep(supplied ?? Self.stamp()); persist()
@@ -114,6 +120,10 @@ import CoreGraphics
     }
     func sleepAccepted(_ supplied: KeepAwakeRecap.Stamp? = nil) {
         guard !loading, !stopped else { return }; ledger.sleepRequestAccepted(supplied ?? Self.stamp()); persist()
+    }
+    func sleepDeferred(cpuBlocked: Bool?, blockingTypes: [String]? = nil, _ supplied: KeepAwakeRecap.Stamp? = nil) {
+        guard !loading, !stopped else { return }
+        ledger.sleepRequestDeferred(supplied ?? Self.stamp(), cpuBlocked: cpuBlocked, blockingTypes: blockingTypes); persist()
     }
     @discardableResult func setAutoShow(_ value: Bool) -> Bool {
         guard engineEnabled, notebook else { return false }
