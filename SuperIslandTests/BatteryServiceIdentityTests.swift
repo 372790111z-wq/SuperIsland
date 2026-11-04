@@ -83,6 +83,17 @@ final class BatteryServiceIdentityTests: XCTestCase {
         XCTAssertEqual(registrar.events, ["retire", "unregister", "register"], "A real receipt for this endpoint must retain stale-build recovery")
         XCTAssertEqual(defaults.string(forKey: newKey), "newer")
     }
+    func testFirstRegistrationWithNotFoundDoesNotTryToUnregisterAnAbsentRecord() async throws {
+        let domain = "BatteryEndpointNotFound.\(UUID())"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        defaults.set("old-host", forKey: "batteryManagement.helperRegistrationBuild")
+        let registrar = Registrar(); registrar.status = .notFound
+        let client = BatteryManagementClient(registrar: registrar, defaults: defaults, buildIdentifier: "new",
+            registrationServiceLabel: BatteryManagementIdentity.unifiedLabel)
+        try await client.register()
+        XCTAssertEqual(registrar.events, ["retire", "register"])
+    }
     private final class Registrar: BatteryHelperRegistering {
         var status = SMAppService.Status.notRegistered
         var events = [String](), failRetirement = false
