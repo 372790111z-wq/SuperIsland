@@ -230,8 +230,10 @@ final class ExtensionJSRuntime {
     private func injectAPI() {
         let superIsland = JSValue(newObjectIn: context)!
         context.setObject(superIsland, forKeyedSubscript: "SuperIsland" as NSString)
+        // Existing bundled extensions use isWE1 as the isolation flag. Keep
+        // the JavaScript key compatible while protecting both review bundles.
         superIsland.setObject(
-            ["isWE1": ExtensionHostEnvironment.isWE1],
+            ["isWE1": ExtensionHostEnvironment.isIsolatedReview],
             forKeyedSubscript: "host" as NSString
         )
 

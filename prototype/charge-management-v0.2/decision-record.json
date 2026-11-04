@@ -1,0 +1,27 @@
+{
+  "requirement": "BM1",
+  "version": "v0.2",
+  "date": "2026-10-29",
+  "userText": "1.自动启用；给用户提示；2.可",
+  "decisions": {
+    "D1": "首次和重启自动检查并启用，提示结果",
+    "D3": "暂停只作用本次，长期限值和低值开关保留",
+    "D2": "未确定，继续调查"
+  },
+  "files": [
+    {
+      "path": "prototype/charge-management-v0.2.html",
+      "sha256": "40ceea36bd0562aa7e70971069b70bd99e52d4399d463df662ebcf5f3e2213b3"
+    },
+    {
+      "path": "prototype/charge-management-v0.2/app.js",
+      "sha256": "bcf53f4f7ff567191029aa0acfeef080208aedb70e5d4f00c6e2912bc86670aa"
+    },
+    {
+      "path": "prototype/charge-management-v0.2/style.css",
+      "sha256": "eb56c53afdb38105799b96ebbfbcc04f3a1707505c40286cd7af06eb9eaa12e2"
+    }
+  ],
+  "prdConfirmed": false,
+  "nativeImplementationAuthorized": false
+}

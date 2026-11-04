@@ -75,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var terminationSignalSource: DispatchSourceSignal?
     private let terminationSignalScheduler = WE1TerminationSignalScheduler()
     private var didBootstrapApp = false
+    private var batteryAutomaticallyEnableOnStartup = false
     private var didInitializeNowPlayingManager = false
     private static var fallbackSettingsWindowController: NSWindowController?
     private static let settingsInitialContentSize = NSSize(width: 960, height: 680)
@@ -92,6 +93,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Bundle.main.bundleIdentifier == "com.workview.SuperIsland.WE1Debug"
     }
 
+    private static var isBM1ReviewBundle: Bool {
+        !isBM1FullApplicationReview && ["com.workview.SuperIsland.BM1Debug", BatteryManagementClient.readOnlyPreviewIdentifier].contains(Bundle.main.bundleIdentifier ?? "")
+    }
+
+    private static var isBM1FullApplicationReview: Bool {
+        Bundle.main.bundleIdentifier == "com.workview.SuperIsland.BM1Debug"
+            && Bundle.main.object(forInfoDictionaryKey: "BM1FullApplicationReview") as? Bool == true
+            && !BatteryStartupContext.currentProcessIsDiagnostic
+    }
+
     private static var isScreenshotLineQAMode: Bool {
         isWE1DebugBundle && ProcessInfo.processInfo.environment["SCREENSHOT_LINE_QA_MODE"] == "1"
     }
@@ -107,6 +118,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !Self.isRunningUnitTests else { return }
+        batteryAutomaticallyEnableOnStartup = BatteryStartupContext.automaticallyEnables(
+            defaultLaunch: notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool,
+            bundleIdentifier: Bundle.main.bundleIdentifier, arguments: ProcessInfo.processInfo.arguments,
+            packageFlag: Bundle.main.object(forInfoDictionaryKey: "BM1DiagnosticsOnly") as? Bool == true
+        )
+        if Self.isBM1ReviewBundle {
+            if BatteryStartupContext.currentProcessIsDiagnostic {
+                NSApp.setActivationPolicy(.regular)
+                startBatteryManagement(automaticallyEnable: false)
+                Self.showSettingsWindow(initialPane: .batteryManagement)
+                return
+            }
+            guard batteryAutomaticallyEnableOnStartup || Bundle.main.bundleIdentifier == BatteryManagementClient.readOnlyPreviewIdentifier else {
+                startBatteryManagement(automaticallyEnable: false)
+                return
+            }
+            NSApp.setActivationPolicy(.regular)
+            setupIslandWindow()
+            _ = BatteryManager.shared
+            startBatteryManagement(automaticallyEnable: Bundle.main.bundleIdentifier == BatteryManagementClient.readOnlyPreviewIdentifier ? true : nil)
+            Self.showSettingsWindow(initialPane: .batteryManagement)
+            AppState.shared.selectFullExpandedTab(.module(.builtIn(.battery)))
+            if !AppState.shared.lockFullExpandedInPlace { AppState.shared.toggleFullExpandedLock() }
+            AppState.shared.fullyExpand()
+            return
+        }
+        if Self.isBM1FullApplicationReview && !batteryAutomaticallyEnableOnStartup {
+            // A background Shortcut query must not start unrelated module,
+            // extension, window-control or Keep Awake work. Explicit reopen
+            // below can finish the complete UI bootstrap later.
+            startBatteryManagement(automaticallyEnable: false)
+            return
+        }
         if Self.isFullScreenProbe {
             NSApp.setActivationPolicy(.accessory)
             fullScreenProbe = ChromeFullScreenProbe()
@@ -126,18 +170,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The WE1 package is an isolated local test harness. It must not report
         // production analytics or claim the production superisland:// URL
         // handler while both builds are installed side by side.
-        if !Self.isWE1DebugBundle {
+        if !Self.isWE1DebugBundle && !Self.isBM1FullApplicationReview {
             Analytics.start()
             Analytics.track("app_launched", properties: [
                 "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
                 "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
             ])
             registerURLHandler()
-        } else {
+        } else if Self.isWE1DebugBundle {
             WindowTerminationDiagnostics.shared.record(.launched)
             installWE1TerminationSignalHandler()
         }
         installQuitHotkeyMonitor()
+
+        // Whole-product review uses the normal module and termination lifecycle,
+        // with isolated preferences and without production analytics/deep links.
+        // The old fixed battery/diagnostic harness remains independently usable.
+        if Self.isBM1FullApplicationReview {
+            bootstrapApp()
+            if batteryAutomaticallyEnableOnStartup { Self.showSettingsWindow(initialPane: .batteryManagement) }
+            return
+        }
 
         // Do not inherit or present production onboarding in the isolated
         // window-enhancement test bundle. Its only startup surface is the WE1
@@ -158,10 +211,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !Self.isRunningUnitTests, !Self.isFullScreenProbe else { return }
+        if Self.isBM1ReviewBundle || (Self.isBM1FullApplicationReview && !didBootstrapApp) {
+            BatteryManagementService.shared.shutdown()
+            NowPlayingManager.shutdownIfInitialized()
+            return
+        }
         defer { WindowTerminationDiagnostics.shared.flushBeforeExit() }
         WindowEnhancementController.shared.recordTerminationDiagnostics(
             .willTerminate, attemptID: acceptedTerminationAttemptID ?? terminationAttemptSequence
         )
+        BatteryManagementService.shared.shutdown()
         KeepAwakeService.shared.shutdown()
         if Self.isKeepAwakePreview { return }
         ScreenshotLineFeature.shared.stop()
@@ -178,6 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !Self.isRunningUnitTests else { return .terminateNow }
+        if (Self.isBM1ReviewBundle || (Self.isBM1FullApplicationReview && !didBootstrapApp)) && !BatteryManagementService.shared.shouldPrepareForTermination { return .terminateNow }
         if Self.isKeepAwakePreview { KeepAwakeService.shared.shutdown(); return .terminateNow }
         terminationAttemptSequence &+= 1
         let attempt = terminationAttemptSequence
@@ -195,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ])
             return .terminateLater
         }
-        guard WindowEnhancementController.shared.requiresTerminationPreparation || KeepAwakeService.shared.lid.shouldPrepareForTermination || ScreenshotLineFeature.shared.clearInProgress || KeepAwakeService.shared.recap.hasPendingPersistence else {
+        guard WindowEnhancementController.shared.requiresTerminationPreparation || KeepAwakeService.shared.lid.shouldPrepareForTermination || ScreenshotLineFeature.shared.clearInProgress || KeepAwakeService.shared.recap.hasPendingPersistence || BatteryManagementService.shared.shouldPrepareForTermination else {
             acceptedTerminationAttemptID = attempt
             WindowTerminationDiagnostics.shared.record(.requestAllowedImmediately, metadata: [
                 "attempt": .integer(Int64(clamping: attempt))
@@ -211,12 +271,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             WindowTerminationDiagnostics.shared.record(.deferredTaskStarted, metadata: [
                 "attempt": .integer(Int64(clamping: attempt))
             ])
+            let batteryRecovered = await BatteryManagementService.shared.prepareForTermination()
+            guard batteryRecovered else {
+                self?.deferredTerminationTask = nil
+                self?.deferredTerminationAttemptID = nil
+                self?.acceptedTerminationAttemptID = nil
+                WindowTerminationDiagnostics.shared.record(.deferredTaskFinished, metadata: [
+                    "attempt": .integer(Int64(clamping: attempt)), "allowed": .flag(false)
+                ])
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
             await ScreenshotLineFeature.shared.prepareClearForTermination()
             await KeepAwakeService.shared.lid.prepareForTermination()
             await KeepAwakeService.shared.recap.prepareForTermination()
-            let safeToTerminate = await WindowEnhancementController.shared.prepareForTermination(
+            let windowsRecovered = await WindowEnhancementController.shared.prepareForTermination(
                 diagnosticAttemptID: attempt
             )
+            let safeToTerminate = windowsRecovered
+            if !safeToTerminate { await BatteryManagementService.shared.cancelPreparedTermination() }
             self?.deferredTerminationTask = nil
             self?.deferredTerminationAttemptID = nil
             self?.acceptedTerminationAttemptID = safeToTerminate ? attempt : nil
@@ -231,13 +304,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard !Self.isRunningUnitTests, !Self.isKeepAwakePreview, !Self.isFullScreenProbe else { return }
+        guard !Self.isRunningUnitTests, !Self.isKeepAwakePreview, !Self.isFullScreenProbe, !Self.isBM1ReviewBundle else { return }
+        guard !Self.isBM1FullApplicationReview || didBootstrapApp else { return }
+        if didBootstrapApp { startBatteryManagement(automaticallyEnable: true) }
         AppState.shared.setAppActive(true)
         WindowEnhancementController.shared.refreshSystemIntegrations()
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !Self.isRunningUnitTests, !Self.isKeepAwakePreview, !Self.isFullScreenProbe else { return true }
+        if Self.isBM1FullApplicationReview && !didBootstrapApp {
+            installQuitHotkeyMonitor()
+            bootstrapApp()
+            Self.showSettingsWindow(initialPane: .batteryManagement)
+        }
+        // An explicit Dock/Finder reopen can finish deferred automatic startup.
+        // The service preserves an on/off choice already made in this process.
+        startBatteryManagement(automaticallyEnable: true)
+        if Self.isBM1ReviewBundle, islandWindowController == nil {
+            NSApp.setActivationPolicy(.regular)
+            setupIslandWindow()
+            _ = BatteryManager.shared
+            Self.showSettingsWindow(initialPane: .batteryManagement)
+            AppState.shared.selectFullExpandedTab(.module(.builtIn(.battery)))
+            if !AppState.shared.lockFullExpandedInPlace { AppState.shared.toggleFullExpandedLock() }
+            AppState.shared.fullyExpand()
+        }
+        return true
+    }
+
     func applicationDidResignActive(_ notification: Notification) {
-        guard !Self.isRunningUnitTests, !Self.isKeepAwakePreview, !Self.isFullScreenProbe else { return }
+        guard !Self.isRunningUnitTests, !Self.isKeepAwakePreview, !Self.isFullScreenProbe, !Self.isBM1ReviewBundle else { return }
+        guard !Self.isBM1FullApplicationReview || didBootstrapApp else { return }
         AppState.shared.setAppActive(false)
     }
 
@@ -325,8 +423,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeMenuBarSetting()
         observePowerState()
         initializeManagers()
+        startBatteryManagement()
         ScreenshotLineFeature.shared.openSettings = { Self.showSettingsWindow(initialPane: .screenshotLine) }
-        ScreenshotLineFeature.shared.start(appName: "SuperIsland")
+        ScreenshotLineFeature.shared.start(appName: Self.isBM1FullApplicationReview ? "SuperIsland-BM1-Review" : "SuperIsland")
+    }
+
+    private func startBatteryManagement(automaticallyEnable: Bool? = nil) {
+        let service = BatteryManagementService.shared
+        service.openSettings = { Self.showSettingsWindow(initialPane: .batteryManagement) }
+        service.presentNotice = {
+            service.dismissNotice = AppState.shared.presentBatteryManagementNotice()
+        }
+        service.start(automaticallyEnable: !BatteryStartupContext.currentProcessIsDiagnostic
+            && (automaticallyEnable ?? batteryAutomaticallyEnableOnStartup))
     }
 
     private func startZilanSuppressionReceiver() {

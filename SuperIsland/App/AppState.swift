@@ -797,6 +797,25 @@ final class AppState: ObservableObject {
         showHUD(module: .builtIn(module), autoDismiss: autoDismiss, autoDismissDelay: autoDismissDelay)
     }
 
+    /// A transient battery result reuses the existing island. The returned
+    /// closure restores the prior presentation only if it still owns the view.
+    func presentBatteryManagementNotice() -> () -> Void {
+        guard !isZilanInteractionSuppressed, batteryEnabled, presentationHoldModule == nil else { return {} }
+        let previousState = currentState, previousModule = activeModule, previousTab = fullExpandedSelectedTab
+        holdPresentation(for: .builtIn(.battery))
+        if previousState == .fullExpanded { selectFullExpandedTab(.module(.builtIn(.battery))) }
+        else { showHUD(module: .battery, autoDismiss: false) }
+        return { [weak self] in
+            guard let self else { return }
+            self.releasePresentationHold(for: .builtIn(.battery))
+            guard self.activeModule == .builtIn(.battery), self.currentState != .compact else { return }
+            if self.currentState == .fullExpanded && self.fullExpandedSelectedTab != .module(.builtIn(.battery)) { return }
+            self.activeModule = previousModule
+            self.fullExpandedSelectedTab = previousTab
+            self.currentState = previousState
+        }
+    }
+
     func showHUD(module: ActiveModule, autoDismiss: Bool = true, autoDismissDelay: TimeInterval? = nil) {
         guard !isZilanInteractionSuppressed else { return }
         if case .builtIn(let builtIn) = module, !isModuleEnabled(builtIn) {

@@ -33,6 +33,12 @@ final class UpdateChecker: ObservableObject {
 
     private func performCheck() async {
         if case .checking = checkState { return }
+        // Local battery candidates have no release/update channel. Never offer
+        // a production download that would replace this isolated test build.
+        guard Bundle.main.bundleIdentifier != "com.workview.SuperIsland.BM1Debug" else {
+            checkState = .noCompatibleRelease
+            return
+        }
         checkState = .checking
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastCheckedKey)
         let policy = UpdateReleasePolicy.current

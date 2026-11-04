@@ -4,7 +4,7 @@
 <key>Label</key><string>com.workview.SuperIsland.KeepAwakeHelper</string>
 <key>BundleProgram</key><string>Contents/MacOS/KeepAwakeHelper</string>
 <key>MachServices</key><dict><key>com.workview.SuperIsland.KeepAwakeHelper</key><true/></dict>
-<key>AssociatedBundleIdentifiers</key><array><string>com.workview.SuperIsland</string><string>com.workview.SuperIsland.WE1Debug</string></array>
+<key>AssociatedBundleIdentifiers</key><array><string>com.workview.SuperIsland</string><string>com.workview.SuperIsland.WE1Debug</string><string>com.workview.SuperIsland.BM1Debug</string></array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
 <key>ThrottleInterval</key><integer>10</integer>

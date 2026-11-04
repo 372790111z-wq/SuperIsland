@@ -14,6 +14,14 @@ packages:
   Aptabase:
     url: https://github.com/aptabase/aptabase-swift
     from: "0.3.0"
+schemes:
+  SuperIsland:
+    build:
+      targets:
+        SuperIsland: all
+    test:
+      targets:
+        - SuperIslandWindowEnhancementTests
 targets:
   SuperIsland:
     type: application
@@ -23,6 +31,7 @@ targets:
         excludes:
           - "**/.DS_Store"
       - path: KeepAwakeShared
+      - path: BatteryManagementShared
       - path: ExtensionHost
         excludes:
           - "**/.DS_Store"
@@ -39,6 +48,9 @@ targets:
       - target: KeepAwakeHelper
         link: false
         embed: false
+      - target: BatteryManagementHelper
+        link: false
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.workview.SuperIsland
@@ -51,6 +63,14 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
         ENABLE_HARDENED_RUNTIME: true
+      configs:
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+          # Preserve the external dSYM; remove local/debug symbol-table entries
+          # from the distributed application, as already done for the helper.
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: non-global
     entitlements:
       path: SuperIsland/SuperIsland.entitlements
       properties:
@@ -66,10 +86,18 @@ targets:
           mkdir -p "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}"
           cp "${BUILT_PRODUCTS_DIR}/KeepAwakeEventTool" "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/KeepAwakeEventTool"
           cp "${BUILT_PRODUCTS_DIR}/KeepAwakeHelper" "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/KeepAwakeHelper"
+          cp "${BUILT_PRODUCTS_DIR}/BatteryManagementHelper" "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/BatteryManagementHelper"
+          # Keep the target's external dSYM for symbolication. Only remove
+          # local/debug symbol-table entries from the shipped Release helper.
+          if [ "${CONFIGURATION}" = "Release" ]; then
+            /usr/bin/strip -S -x "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/BatteryManagementHelper" || exit 1
+          fi
           mkdir -p "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons"
           cp "${SRCROOT}/KeepAwakeHelper/com.workview.SuperIsland.KeepAwakeHelper.plist" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons/"
+          cp "${SRCROOT}/BatteryManagementHelper/com.workview.SuperIsland.BatteryManagementHelper.plist" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons/"
           if [ "${CODE_SIGNING_ALLOWED}" != "NO" ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY}" ]; then
             /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.workview.SuperIsland.KeepAwakeHelper --options runtime "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/KeepAwakeHelper"
+            /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.workview.SuperIsland.BatteryManagementHelper --options runtime "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/BatteryManagementHelper"
           fi
       - name: "Copy Built-in Extensions"
         basedOnDependencyAnalysis: false
@@ -140,6 +168,25 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.workview.SuperIsland.KeepAwakeEventTool
         SKIP_INSTALL: YES
         ENABLE_HARDENED_RUNTIME: true
+
+  BatteryManagementHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: BatteryManagementHelper
+        excludes:
+          - "*.plist"
+      - path: BatteryManagementShared
+      - path: KeepAwakeShared/KeepAwakeHelperProtocol.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.workview.SuperIsland.BatteryManagementHelper
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) BATTERY_HELPER $(BM1_REVIEW_SWIFT_CONDITIONS)"
+        SKIP_INSTALL: YES
+        ENABLE_HARDENED_RUNTIME: true
+      configs:
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: "-Osize"
 
   KeepAwakeHelper:
     type: tool

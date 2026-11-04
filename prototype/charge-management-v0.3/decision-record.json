@@ -1,0 +1,34 @@
+{
+  "requirement": "BM1",
+  "version": "v0.3",
+  "date": "2026-10-29",
+  "userText": "可以。继续吧",
+  "confirmedScope": "自动启用提醒在灵动岛内短暂展开，随后收起，详细状态留在电池模块；点击进入电池设置",
+  "otherIncrementStatus": "交互与需求范围已确认，原生能力尚未实现",
+  "files": [
+    {
+      "path": "prototype/charge-management-v0.3.html",
+      "sha256": "d8377b63d1a558757ef68e8ac71ca73c2d9b71065041934367aa6a79da17b03d"
+    },
+    {
+      "path": "prototype/charge-management-v0.3/app.js",
+      "sha256": "9fe1efe44a107d2e1911a2c0dc909b54d30823767e01b1316afa63460fffd28e"
+    },
+    {
+      "path": "prototype/charge-management-v0.3/style.css",
+      "sha256": "89b89047a5758c8397c6f7449939504f523936fae928fd4d147013e847d830d5"
+    }
+  ],
+  "prdConfirmed": true,
+  "nativeImplementationAuthorized": false,
+  "acceptance": {
+    "date": "2026-10-29",
+    "userText": "确认",
+    "htmlConfirmed": true,
+    "prdScopeConfirmed": true,
+    "technicalUnknownsRemain": [
+      "D2校准保持阶段与时长、真实硬件机制及支持矩阵"
+    ],
+    "nativeImplementationAuthorized": false
+  }
+}
