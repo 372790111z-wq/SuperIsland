@@ -82,7 +82,7 @@ final class BatteryPreferences79JournalStore {
 
     convenience init(mutating: Bool) throws {
         guard getuid() == 0, geteuid() == 0 else { throw Self.failure("试验恢复记录只能由系统辅助程序访问。") }
-        try self.init(components: ["private", "var", "root", "Library", "Application Support", BatteryManagementIdentity.label, "preferences79"],
+        try self.init(components: ["private", "var", "root", "Library", "Application Support", BatteryManagementIdentity.storageIdentifier, "preferences79"],
                       owner: 0, mutating: mutating, createFrom: 3)
     }
 

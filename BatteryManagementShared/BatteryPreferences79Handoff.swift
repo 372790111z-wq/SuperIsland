@@ -132,7 +132,7 @@ enum BatteryPreferences79HandoffRead {
         // Finishing this independent trial must not awaken an unrelated
         // ordinary recovery that could overwrite the accepted external value.
         for name in ["lease.json", "cutoff.json", "calibration.json"] {
-            let path = "/Library/Application Support/" + BatteryManagementIdentity.label + "/" + name
+            let path = "/Library/Application Support/" + BatteryManagementIdentity.storageIdentifier + "/" + name
             var info = stat()
             guard lstat(path, &info) == -1 && errno == ENOENT else {
                 throw BatteryPreferences79IO.failure("仍有普通控制恢复记录，未交接。")

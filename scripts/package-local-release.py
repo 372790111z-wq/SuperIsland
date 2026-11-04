@@ -144,6 +144,13 @@ def main():
     for helper in ('KeepAwakeHelper', 'BatteryManagementHelper'):
         assert (source / 'Contents/Library/LaunchDaemons' / ('com.workview.SuperIsland.' + helper + '.plist')).is_file(), 'Missing launch declaration: ' + helper
     assert info['CFBundleIdentifier'] == 'com.workview.SuperIsland.WE1Debug'
+    battery_plist = source / 'Contents/Library/LaunchDaemons/com.workview.SuperIsland.WE1Debug.BatteryControl.plist'
+    battery_launch = plistlib.loads(battery_plist.read_bytes())
+    assert battery_launch['Label'] == 'com.workview.SuperIsland.WE1Debug.BatteryControl'
+    assert set(battery_launch['MachServices']) == {battery_launch['Label']}
+    assert battery_launch['BundleProgram'] == 'Contents/MacOS/BatteryManagementHelper'
+    assert battery_launch['AssociatedBundleIdentifiers'] == [info['CFBundleIdentifier']]
+
     assert not (source / 'Contents/MacOS/SuperIsland.debug.dylib').exists(), 'Use a Release build'
     assert not list(source.rglob('*.xctest')), 'Do not ship test bundles'
     for pattern in ['XCTest*.framework', 'Testing.framework', 'XCUnit.framework',

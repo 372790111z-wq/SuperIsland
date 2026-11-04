@@ -84,7 +84,7 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
                 return // No recovery-directory I/O, lease, watchdog or hardware writes.
             }
             let fm = FileManager.default
-            let directory = URL(fileURLWithPath: "/Library/Application Support/\(BatteryManagementIdentity.label)", isDirectory: true)
+            let directory = URL(fileURLWithPath: "/Library/Application Support/\(BatteryManagementIdentity.storageIdentifier)", isDirectory: true)
             try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let attrs = try fm.attributesOfItem(atPath: directory.path)
             guard attrs[.type] as? FileAttributeType == .typeDirectory, (attrs[.ownerAccountID] as? NSNumber)?.uint32Value == 0 else {
