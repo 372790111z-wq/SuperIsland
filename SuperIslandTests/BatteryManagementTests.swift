@@ -1064,6 +1064,9 @@ final class BatteryManagementServiceTests: XCTestCase {
             }
             try probe.press(identifier: "battery-section-trend")
             try await probe.wait { probe.text.contains("真实电量") }
+            XCTAssertEqual(probe.nodes().filter {
+                probe.string($0, "accessibilityLabel")?.hasPrefix("电池真实历史") == true
+            }.count, 1, "The chart must expose one summary, not repeat it for every axis label")
             try capture("trend")
             try probe.press(identifier: "battery-section-overview")
             try await probe.wait { probe.text.contains("当前未充电") }
