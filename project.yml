@@ -95,6 +95,7 @@ targets:
           mkdir -p "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons"
           cp "${SRCROOT}/KeepAwakeHelper/com.workview.SuperIsland.KeepAwakeHelper.plist" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons/"
           cp "${SRCROOT}/BatteryManagementHelper/com.workview.SuperIsland.BatteryManagementHelper.plist" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons/"
+          cp "${SRCROOT}/BatteryManagementHelper/com.workview.SuperIsland.WE1Debug.BatteryControl.plist" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons/"
           if [ "${CODE_SIGNING_ALLOWED}" != "NO" ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY}" ]; then
             /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.workview.SuperIsland.KeepAwakeHelper --options runtime "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/KeepAwakeHelper"
             /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.workview.SuperIsland.BatteryManagementHelper --options runtime "${BUILT_PRODUCTS_DIR}/${EXECUTABLE_FOLDER_PATH}/BatteryManagementHelper"

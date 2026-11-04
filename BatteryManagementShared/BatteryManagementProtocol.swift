@@ -26,8 +26,28 @@ struct BatteryNativeReadDiagnostic: Codable, Equatable {
 #endif
 
 enum BatteryManagementIdentity {
-    static let label = "com.workview.SuperIsland.BatteryManagementHelper"
+    // launchd owns a service by label, not by the displayed application name.
+    // Never reuse the retired Review record for the installed local application.
+    static let signingIdentifier = "com.workview.SuperIsland.BatteryManagementHelper"
+    static let storageIdentifier = signingIdentifier
+    static let legacyLabel = signingIdentifier
+    static let unifiedLabel = "com.workview.SuperIsland.WE1Debug.BatteryControl"
+    static func serviceLabel(bundleIdentifier: String?, executableURL: URL?) -> String {
+        var host = bundleIdentifier
+        if let executableURL, executableURL.lastPathComponent == "BatteryManagementHelper" {
+            let url = executableURL.resolvingSymlinksInPath().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("Info.plist")
+            host = nil
+            if let data = try? Data(contentsOf: url), data.count < 65_536,
+               let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
+                host = info["CFBundleIdentifier"] as? String
+            }
+        }
+        return host == "com.workview.SuperIsland.WE1Debug" ? unifiedLabel : legacyLabel
+    }
+    static let label = serviceLabel(bundleIdentifier: Bundle.main.bundleIdentifier, executableURL: Bundle.main.executableURL)
     static let plist = label + ".plist"
+    static let legacyPlist = legacyLabel + ".plist"
     static func diagnosticHelper(arguments: [String], packageFlag: Bool? = false) -> Bool {
         packageFlag != false || arguments.contains("--bm1-helper-diagnostics")
     }

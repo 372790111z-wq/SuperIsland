@@ -40,7 +40,7 @@ enum BatteryReadWorkerExecutable {
         let directory = try openProtectedDirectory(hash: hex)
         defer { _ = close(directory) }
         let url = URL(fileURLWithPath: "/private/var/root/Library/Caches", isDirectory: true)
-            .appendingPathComponent(BatteryManagementIdentity.label, isDirectory: true)
+            .appendingPathComponent(BatteryManagementIdentity.storageIdentifier, isDirectory: true)
             .appendingPathComponent("read-workers", isDirectory: true).appendingPathComponent(hex, isDirectory: true)
             .appendingPathComponent(name)
         let existing = openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
@@ -108,7 +108,7 @@ enum BatteryReadWorkerExecutable {
         guard descriptor >= 0 else { throw failure("无法打开固定系统根目录。") }
         do {
             try validateDirectory(descriptor)
-            let components = ["private", "var", "root", "Library", "Caches", BatteryManagementIdentity.label, "read-workers", hash]
+            let components = ["private", "var", "root", "Library", "Caches", BatteryManagementIdentity.storageIdentifier, "read-workers", hash]
             for (index, component) in components.enumerated() {
                 guard !component.isEmpty, component != ".", component != "..", !component.contains("/"), !component.utf8.contains(0) else {
                     throw failure("执行缓存目录分量无效。")

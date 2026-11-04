@@ -7,10 +7,12 @@ protocol BatteryHelperRegistering {
     func register() throws
     func unregister() async throws
     func failedLaunchNeedsRebind() async -> Bool
+    func retireLegacyServiceIfNeeded() async throws
 }
 
 extension BatteryHelperRegistering {
     func failedLaunchNeedsRebind() async -> Bool { false }
+    func retireLegacyServiceIfNeeded() async throws {}
 }
 
 @MainActor
@@ -19,6 +21,19 @@ private struct SystemBatteryHelperRegistration: BatteryHelperRegistering {
     var status: SMAppService.Status { service.status }
     func register() throws { try service.register() }
     func unregister() async throws { try await service.unregister() }
+    func retireLegacyServiceIfNeeded() async throws {
+        guard BatteryManagementIdentity.label == BatteryManagementIdentity.unifiedLabel else { return }
+        let legacy = SMAppService.daemon(plistName: BatteryManagementIdentity.legacyPlist)
+        guard legacy.status != .notRegistered && legacy.status != .notFound else { return }
+        do { try await legacy.unregister() }
+        catch {
+            let failure = error as NSError
+            guard legacy.status == .notRegistered, failure.domain == "SMAppServiceErrorDomain",
+                  failure.code == Int(kSMErrorJobNotFound) else { throw error }
+        }
+        // Both generations use the same root-owned control.lock and journals.
+        // The new helper cannot take control while the old process still owns it.
+    }
     func failedLaunchNeedsRebind() async -> Bool {
         await BatteryHelperLaunchFailure.probe(bundle: Bundle.main.bundleURL,
             parent: Bundle.main.bundleIdentifier ?? "", build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown")
@@ -74,6 +89,8 @@ final class BatteryManagementClient: BatteryManagementTransport {
     func register() async throws {
         guard !registering else { throw BatteryControlError.unavailable("辅助程序登记正在进行，请等待结果。") }
         registering = true; defer { registering = false }
+        try await registrar.retireLegacyServiceIfNeeded()
+        try Task.checkCancellation()
         // A replaced bundle can retain an unresolvable BTM record even while
         // SMAppService temporarily reports notRegistered. A prior build receipt
         // still requires one refresh before registering changed executable code.
@@ -146,7 +163,7 @@ final class BatteryManagementClient: BatteryManagementTransport {
             }
         }
         guard authorization == .enabled else { throw BatteryControlError.unavailable("电池辅助程序尚未获系统授权。") }
-        guard let requirement = KeepAwakeHelperIdentity.requirement(identifiers: [BatteryManagementIdentity.label]) else {
+        guard let requirement = KeepAwakeHelperIdentity.requirement(identifiers: [BatteryManagementIdentity.signingIdentifier]) else {
             throw BatteryControlError.unavailable("当前构建没有可信签名，不能连接充电辅助程序。")
         }
         if connection == nil {

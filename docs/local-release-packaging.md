@@ -47,3 +47,9 @@ python3 scripts/package-local-release.py \
 
 新本地安装包不自动成为远端更新。现有更新渠道的 `we1-` tag 和
 `SuperIsland-WE1-*.dmg` 文件名保持兼容；本次没有发布或迁移远端更新协议。
+
+统一 WE1 包的电池 launchd/Mach service 使用 `com.workview.SuperIsland.WE1Debug.BatteryControl`，
+区别于旧 Review 的服务标识。两份启动声明都必须打入：新的用于登记，旧的仅用于注销移交。
+helper 二进制签名仍为 `com.workview.SuperIsland.BatteryManagementHelper`；不能把服务名替换进
+签名验证、持久恢复目录或控制锁路径。打包器独立核对新 plist 的 Label、MachServices、
+BundleProgram 及只关联 WE1 的声明。安装后以进程路径和内核 CDHash 核对，不以登记表版本代替。

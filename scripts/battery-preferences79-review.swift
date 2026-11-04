@@ -48,7 +48,7 @@ private final class ReviewReply: @unchecked Sendable {
             guard let id = UUID(uuidString: arguments[2]) else { throw ReviewClientError(message: "A valid explicit owner UUID is required.") }
             owner = id.uuidString
         }
-        guard let requirement = KeepAwakeHelperIdentity.requirement(identifiers: [BatteryManagementIdentity.label]) else {
+        guard let requirement = KeepAwakeHelperIdentity.requirement(identifiers: [BatteryManagementIdentity.signingIdentifier]) else {
             throw ReviewClientError(message: "Existing signing leaf is unavailable; no connection made.")
         }
         let connection = NSXPCConnection(machServiceName: BatteryManagementIdentity.label, options: .privileged)

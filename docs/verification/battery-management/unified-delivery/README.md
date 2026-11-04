@@ -24,3 +24,9 @@
 - 新 helper 的注册/系统允许、真实运行二进制和实际充放电结果须分别核验。已有单元测试不能代替设备验收。
 
 构建、打包及安装证据保存在本次 checkout 的 `build/unified-delivery/`。当前仍在验证，完成结果另行记录。
+
+## 后台标识迁移修正
+
+用户批准后，旧 label 的 launchd `Executable` 仍指向退役的 Review，`EX_CONFIG 78`；先前登记表的 parent version 不能证明运行文件已切换。统一 WE1 宿主改用 `com.workview.SuperIsland.WE1Debug.BatteryControl`，其独立 plist 仅关联 WE1；生产与 Review 保持旧入口。客户端注册前只注销旧服务，后续批准重试不会因此注销新服务。
+
+代码签名标识继续为 `com.workview.SuperIsland.BatteryManagementHelper`。恢复目录、manual-retry、control.lock、独立 Review journal 和 root worker cache 均保持原路径。不能用改服务标识跳过恢复状态；两个版本仍受同一控制锁约束。迁移代码测试包括宿主/辅助程序路由、两个 plist 的端点隔离、稳定存储/签名契约、旧服务注销失败阻断和批准重试。
