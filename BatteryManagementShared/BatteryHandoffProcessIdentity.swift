@@ -50,6 +50,42 @@ enum BatteryHandoffProcessIdentity {
         guard proc_pidpath(pid, &path, UInt32(path.count)) <= 0, errno == ESRCH else { return false }
         return confirmsExit(before: before, after: lifecycle(pid: pid))
     }
+    enum PathResolution: Equatable {
+        case path(String), exited, unrelatedSigned, unresolved(String)
+    }
+    /// A process can exit between listallpids, pidpath and the kernel snapshot.
+    /// Retry complete observations, never turn ESRCH or an unknown snapshot into
+    /// permission to proceed. A reappearing path goes through the worker fence.
+    static func resolvePath(attempts: Int = 3, observe: () -> PathResolution,
+                            pause: () -> Void = { usleep(5_000) }) -> PathResolution {
+        guard (1...3).contains(attempts) else { return .unresolved("invalid-attempts") }
+        var diagnostics = [String]()
+        for index in 0..<attempts {
+            let result = observe()
+            if case .unresolved(let detail) = result { diagnostics.append(detail) }
+            else { return result }
+            if index + 1 < attempts { pause() }
+        }
+        return .unresolved(diagnostics.joined(separator: ";"))
+    }
+    static func observePath(pid: pid_t) -> PathResolution {
+        var bytes = [CChar](repeating: 0, count: 4096)
+        errno = 0
+        let rc = proc_pidpath(pid, &bytes, UInt32(bytes.count)), pathError = errno
+        if rc > 0 { return .path(String(cString: bytes)) }
+        if confirmsExitedProcess(pid: pid) { return .exited }
+        if pathError == ENOENT && confirmsUnrelatedMissingPath(pid: pid) { return .unrelatedSigned }
+        // Capture raw syscall results, not the misleading assertion "live".
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc(), size = MemoryLayout<kinfo_proc>.size
+        errno = 0
+        let status = sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0), systemError = errno
+        let detail = "path=\(rc)/\(pathError),kernel=\(status)/\(systemError)/\(size)"
+        if status == 0 && size == MemoryLayout<kinfo_proc>.size {
+            return .unresolved(detail + ",pid=\(info.kp_proc.p_pid),state=\(info.kp_proc.p_stat),birth=\(info.kp_proc.p_un.__p_starttime.tv_sec).\(info.kp_proc.p_un.__p_starttime.tv_usec)")
+        }
+        return .unresolved(detail)
+    }
     struct Snapshot: Equatable {
         var pid: pid_t
         var birthSeconds: UInt64

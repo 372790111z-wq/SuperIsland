@@ -40,7 +40,7 @@ enum BatteryManagementIdentity {
         guard let data = try? Data(contentsOf: infoURL), data.count < 65_536,
               let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let identifier = info["CFBundleIdentifier"] as? String,
-              ["com.workview.SuperIsland", "com.workview.SuperIsland.BM1Debug"].contains(identifier) else { return nil }
+              ["com.workview.SuperIsland", "com.workview.SuperIsland.WE1Debug", "com.workview.SuperIsland.BM1Debug"].contains(identifier) else { return nil }
         return identifier == "com.workview.SuperIsland.BM1Debug" && info["BM1DiagnosticsOnly"] as? Bool == true
     }
     static func packagePauseRefreshTrial(executableURL: URL?) -> Bool {

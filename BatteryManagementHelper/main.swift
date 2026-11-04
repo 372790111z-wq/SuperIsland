@@ -959,7 +959,7 @@ if CommandLine.arguments.dropFirst().first == "--bm1-native-read" {
 // Unsigned/ad-hoc helpers cannot even start their hardware or journal paths.
 let startupLog = Logger(subsystem: BatteryManagementIdentity.label, category: "startup")
 let permittedClients = BatteryManagementIdentity.packagePauseRefreshTrial(executableURL: Bundle.main.executableURL)
-    ? ["com.workview.SuperIsland.BM1Debug"] : ["com.workview.SuperIsland", "com.workview.SuperIsland.BM1Debug"]
+    ? ["com.workview.SuperIsland.BM1Debug"] : ["com.workview.SuperIsland", "com.workview.SuperIsland.WE1Debug", "com.workview.SuperIsland.BM1Debug"]
 guard let requirement = KeepAwakeHelperIdentity.requirement(identifiers: permittedClients, diagnostic: {
     startupLog.error("Signing identity unavailable: \($0, privacy: .public)")
 }) else { exit(78) }

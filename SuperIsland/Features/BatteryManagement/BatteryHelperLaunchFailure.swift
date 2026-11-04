@@ -9,7 +9,7 @@ enum BatteryHelperLaunchFailure {
         return false
     }
     static func state(_ text: String, parent: String, build: String) -> State? {
-        guard ["com.workview.SuperIsland", "com.workview.SuperIsland.BM1Debug"].contains(parent),
+        guard ["com.workview.SuperIsland", "com.workview.SuperIsland.WE1Debug", "com.workview.SuperIsland.BM1Debug"].contains(parent),
               !build.isEmpty, build != "unknown", !build.contains(where: \.isNewline),
               text.utf8.count <= 16_384 else { return nil }
         let lines = text.components(separatedBy: .newlines)

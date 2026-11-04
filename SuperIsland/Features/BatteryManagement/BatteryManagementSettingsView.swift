@@ -224,7 +224,7 @@ struct BatteryManagementSettingsView: View {
                                 .switch
                             ).disabled(service.busy || service.authorizing).dataAnnotationID("si.bm.master-toggle"))
                         ])),
-                    AnyView(Text(service.report.message).font(.callout).textSelection(.enabled)),
+                    AnyView(BatteryStatusText(text: service.report.message)),
                     failureRecord,
                     AnyView(Group {
                         if service.exitPreparationInProgress {
@@ -262,8 +262,7 @@ struct BatteryManagementSettingsView: View {
     private var failureRecord: AnyView {
         guard let failure = service.report.lastFailure else { return AnyView(EmptyView()) }
         return AnyView(
-            Text("失败记录：" + failure).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
-                .accessibilityLabel("独立失败记录：" + failure))
+            BatteryStatusText(text: "失败记录：" + failure, failure: true))
     }
     // Keep the eight heterogeneous settings sections behind one view boundary.
     // Editing state lives on this parent, so switching sections preserves it

@@ -466,6 +466,11 @@ final class BatterySMCDiscoveryTests: XCTestCase {
         XCTAssertEqual(BatteryManagementIdentity.packageDiagnosticsOnly(executableURL: executable), false)
         try write("com.workview.SuperIsland", diagnostic: true)
         XCTAssertEqual(BatteryManagementIdentity.packageDiagnosticsOnly(executableURL: executable), false)
+        try write("com.workview.SuperIsland.WE1Debug", diagnostic: true)
+        XCTAssertEqual(BatteryManagementIdentity.packageDiagnosticsOnly(executableURL: executable), false)
+        XCTAssertFalse(BatteryManagementIdentity.packagePauseRefreshTrial(executableURL: executable))
+        try write("other", diagnostic: false)
+        XCTAssertNil(BatteryManagementIdentity.packageDiagnosticsOnly(executableURL: executable))
     }
     func testUnknownHelperParentPackageCannotEnableControl() {
         XCTAssertNil(BatteryManagementIdentity.packageDiagnosticsOnly(executableURL: nil))

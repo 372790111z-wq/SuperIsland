@@ -77,6 +77,29 @@ final class BatteryPreferences79HandoffTests: XCTestCase {
         XCTAssertEqual(BatteryHandoffProcessIdentity.lifecycle(pid: pid), .absent)
         XCTAssertTrue(BatteryHandoffProcessIdentity.confirmsExitedProcess(pid: pid))
     }
+    func testTransientUnknownIsResampledButNeverAcceptedAsAbsence() {
+        typealias Result = BatteryHandoffProcessIdentity.PathResolution
+        for accepted: Result in [.exited, .path("/tmp/BatteryManagementHelper"), .unrelatedSigned] {
+            var samples = [Result.unresolved("racing"), accepted], pauses = 0
+            XCTAssertEqual(BatteryHandoffProcessIdentity.resolvePath(observe: { samples.removeFirst() },
+                pause: { pauses += 1 }), accepted)
+            XCTAssertEqual(pauses, 1)
+        }
+        var reads = 0, pauses = 0
+        XCTAssertEqual(BatteryHandoffProcessIdentity.resolvePath(observe: {
+            reads += 1; return .unresolved("live-unknown")
+        }, pause: { pauses += 1 }), .unresolved("live-unknown;live-unknown;live-unknown"))
+        XCTAssertEqual(reads, 3); XCTAssertEqual(pauses, 2)
+        XCTAssertEqual(BatteryHandoffProcessIdentity.resolvePath(attempts: 0, observe: {
+            XCTFail("Invalid bounds must not sample"); return .exited
+        }), .unresolved("invalid-attempts"))
+    }
+    func testCurrentLiveProcessRetainsItsPathForWorkerFence() {
+        guard case .path(let path) = BatteryHandoffProcessIdentity.observePath(pid: getpid()) else {
+            return XCTFail("The test process must not be classified as exited")
+        }
+        XCTAssertFalse(path.isEmpty)
+    }
     private func unrelatedProcess() -> BatteryHandoffProcessIdentity.Snapshot {
         .init(pid: 12, birthSeconds: 50, birthMicroseconds: 20, uid: 501,
               flags: 1, identifier: "io.example.editor", team: "ABCDE12345", hash: Data(repeating: 7, count: 20))
