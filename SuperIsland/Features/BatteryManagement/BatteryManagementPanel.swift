@@ -15,7 +15,10 @@ struct BatteryManagementPanel: View {
 
     var body: some View {
         let surface = AnyView(
-            BatterySettingsStack(spacing: 7, rows: [header, sectionContent, failureLine], alignment: .center))
+            BatterySettingsStack(spacing: 8, rows: [header, sectionContent, failureLine], alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.top, 3)
+                .frame(maxWidth: 600))
         let presentation0 = AnyView(
             surface
                 .foregroundStyle(.white)
@@ -49,17 +52,17 @@ struct BatteryManagementPanel: View {
                         symbol: manager.batteryIconName)
                     if service.display.showPercentage && service.display.popupFields.contains(.percentage) {
                         Text(service.telemetry.level.map { "\($0)%" } ?? "—")
-                            .font(.system(size: 17, weight: .semibold, design: .rounded)).monospacedDigit()
+                            .font(.system(size: 19, weight: .semibold, design: .rounded)).monospacedDigit()
                     }
-                }),
+                }.frame(width: 94, alignment: .leading)),
                 AnyView(Spacer(minLength: 4)),
                 AnyView(AnyView(BatterySettingsRow(spacing: 2, rows: [
                     sectionButton("概览", value: 0, identifier: "battery-section-overview"),
                     sectionButton("充电", value: 1, identifier: "battery-section-control"),
                     sectionButton("趋势", value: 2, identifier: "battery-section-trend"),
                 ]))
-                .padding(2).frame(width: 192)
-                .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.06)))
+                .padding(3).frame(width: 174)
+                .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.055)))
                 .accessibilityElement(children: .contain).accessibilityLabel("电池分区")
                 .dataAnnotationID("si.bm.sections")),
                 AnyView(Spacer(minLength: 4)),
@@ -68,8 +71,10 @@ struct BatteryManagementPanel: View {
                 } label: {
                     Label("电池设置", systemImage: "gearshape")
                 }
-                .font(.system(size: 10)).buttonStyle(.plain).dataAnnotationID("si.bm.settings-entry")),
-            ]))
+                .font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                .buttonStyle(.plain).frame(width: 94, alignment: .trailing)
+                .dataAnnotationID("si.bm.settings-entry")),
+            ]).padding(.bottom, 1))
     }
     private func sectionButton(_ title: String, value: Int, identifier: String) -> AnyView {
         AnyView(AnyView(Button {
@@ -77,11 +82,11 @@ struct BatteryManagementPanel: View {
         } label: {
             AnyView(Text(title).font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.white.opacity(section == value ? 1 : 0.7))
-                .frame(maxWidth: .infinity, minHeight: 23)
+                .frame(maxWidth: .infinity, minHeight: 22)
                 .contentShape(Rectangle()))
         }
         .buttonStyle(.plain))
-        .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(section == value ? 0.14 : 0)))
+        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(section == value ? 0.13 : 0)))
         .accessibilityLabel(title).accessibilityIdentifier(identifier)
         .accessibilityAddTraits(section == value ? .isSelected : []))
     }
@@ -92,7 +97,7 @@ struct BatteryManagementPanel: View {
                     Text(batterySupplyDescription(service.telemetry))
                     Spacer()
                     Text(batteryChargingDescription(service.telemetry))
-                }.font(.system(size: 10)).foregroundStyle(.white.opacity(0.65))
+                }.font(.system(size: 10)).foregroundStyle(.white.opacity(0.55))
             }
             if service.display.metrics.isEmpty {
                 Text("可在电池设置中选择仪表指标").font(.caption).frame(maxHeight: .infinity)
@@ -109,32 +114,43 @@ struct BatteryManagementPanel: View {
         }.frame(maxHeight: .infinity)
     }
     private var controls: some View {
-        BatterySettingsStack(spacing: 7, rows: [AnyView(BatteryChargeLimitSlider(service: service)), AnyView(BatteryManualControls(service: service)), statusLine])
+        BatterySettingsStack(spacing: 10, rows: [
+            AnyView(BatteryChargeLimitSlider(service: service)
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 9))),
+            AnyView(BatteryManualControls(service: service)), statusLine])
             .dataAnnotationID("si.bm.control")
     }
     private var trend: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: 5) {
             trendHeader
             BatteryTrendChart(samples: manager.batteryHistory, hours: hours, limit: service.preferences.limit)
-                .frame(maxHeight: .infinity)
+                .frame(minHeight: 65, maxHeight: 106)
         }.dataAnnotationID("si.bm.history")
     }
     private var trendHeader: AnyView {
         AnyView(
             HStack {
-                Text("真实电量 · 上限\(service.preferences.limit)%").font(.system(size: 10))
+                HStack(spacing: 5) {
+                    Circle().fill(.green).frame(width: 4, height: 4)
+                    Text("真实电量")
+                    Text("·").foregroundStyle(.white.opacity(0.25))
+                    Text("设定上限 \(service.preferences.limit)%").foregroundStyle(.white.opacity(0.55))
+                }.font(.system(size: 10))
                 Spacer()
                 Picker("趋势时间范围", selection: $hours) {
-                    Text("6小时").tag(6)
-                    Text("12小时").tag(12)
-                    Text("24小时").tag(24)
+                    Text("近6小时").tag(6)
+                    Text("近12小时").tag(12)
+                    Text("近24小时").tag(24)
                 }
-                .labelsHidden().frame(width: 100).controlSize(.mini).dataAnnotationID("si.bm.history-range")
+                .labelsHidden().frame(width: 84).controlSize(.mini).dataAnnotationID("si.bm.history-range")
             })
     }
     private var statusLine: AnyView {
         let summary = service.report.message + " · " + batteryDischargeRouteDescription(service)
-        return AnyView(Text(summary).font(.system(size: 9)).foregroundStyle(service.enabled ? .white.opacity(0.6) : .orange)
+        return AnyView(Text(service.report.message).font(.system(size: 9))
+            .foregroundStyle(service.enabled ? .white.opacity(0.55) : .orange.opacity(0.85))
+            .frame(maxWidth: .infinity, alignment: .leading)
             .lineLimit(2).fixedSize(horizontal: false, vertical: true).help(summary).accessibilityLabel("控制状态：" + summary))
     }
     private var failureLine: AnyView {
@@ -386,46 +402,80 @@ struct BatteryTrendChart: View {
     let samples: [BatteryHistorySample]
     let hours: Int
     let limit: Int
-    private var filtered: [BatteryHistorySample] { samples.filter { $0.timestamp >= Date().addingTimeInterval(-Double(hours) * 3600) } }
     var body: some View {
-        VStack(spacing: 2) {
-            GeometryReader { proxy -> AnyView in
-                if filtered.count < 2 {
-                    return AnyView(
-                        Text("样本不足；不补造历史电量").font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity))
-                } else {
-                    return AnyView(
-                        ZStack {
-                            Path { p in
-                                let y = proxy.size.height * (1 - Double(limit) / 100)
+        let end = Date()
+        let duration = Double(hours) * 3600
+        let start = end.addingTimeInterval(-duration)
+        let filtered = samples.filter { $0.timestamp >= start && $0.timestamp <= end }
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 7) {
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text("100%")
+                    Spacer(minLength: 0)
+                    Text("50%")
+                    Spacer(minLength: 0)
+                    Text("0%")
+                }
+                .font(.system(size: 8)).monospacedDigit().foregroundStyle(.white.opacity(0.35))
+                .frame(width: 25)
+                GeometryReader { proxy in
+                    ZStack {
+                        Path { p in
+                            for fraction in [0.0, 0.5, 1.0] {
+                                let y = proxy.size.height * fraction
                                 p.move(to: CGPoint(x: 0, y: y))
                                 p.addLine(to: CGPoint(x: proxy.size.width, y: y))
-                            }.stroke(.orange.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                            Path { p in
-                                let start = Date().addingTimeInterval(-Double(hours) * 3600)
-                                var previous: BatteryHistorySample?
-                                for sample in filtered {
-                                    let x = sample.timestamp.timeIntervalSince(start) / (Double(hours) * 3600) * proxy.size.width
-                                    let y = (1 - Double(sample.level) / 100) * proxy.size.height
-                                    let point = CGPoint(x: max(0, min(proxy.size.width, x)), y: y)
-                                    if let previous, sample.sessionID == previous.sessionID,
-                                        sample.timestamp.timeIntervalSince(previous.timestamp) <= 660
-                                    {
-                                        p.addLine(to: point)
-                                    } else {
-                                        p.move(to: point)
-                                    }
-                                    previous = sample
+                            }
+                        }.stroke(.white.opacity(0.07), lineWidth: 0.5)
+                        Path { p in
+                            let y = proxy.size.height * (1 - Double(limit) / 100)
+                            p.move(to: CGPoint(x: 0, y: y))
+                            p.addLine(to: CGPoint(x: proxy.size.width, y: y))
+                        }.stroke(.orange.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        Path { p in
+                            var previous: BatteryHistorySample?
+                            for sample in filtered {
+                                let x = sample.timestamp.timeIntervalSince(start) / duration * proxy.size.width
+                                let y = (1 - Double(sample.level) / 100) * proxy.size.height
+                                let point = CGPoint(x: max(0, min(proxy.size.width, x)), y: y)
+                                if let previous, sample.sessionID == previous.sessionID,
+                                    sample.timestamp.timeIntervalSince(previous.timestamp) <= 660
+                                {
+                                    p.addLine(to: point)
+                                } else {
+                                    p.move(to: point)
                                 }
-                            }.stroke(.green, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                        })
+                                previous = sample
+                            }
+                        }.stroke(.green, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        // Keep isolated observations visible without joining missing intervals.
+                        Path { p in
+                            for sample in filtered {
+                                let x = sample.timestamp.timeIntervalSince(start) / duration * proxy.size.width
+                                let y = (1 - Double(sample.level) / 100) * proxy.size.height
+                                p.addEllipse(in: CGRect(x: x - 1.25, y: y - 1.25, width: 2.5, height: 2.5))
+                            }
+                        }.fill(.green)
+                        if filtered.count < 2 {
+                            Text("样本不足，等待记录")
+                                .font(.system(size: 10)).foregroundStyle(.white.opacity(0.55))
+                                .padding(.horizontal, 8).padding(.vertical, 3).background(.black)
+                        }
+                    }
                 }
             }
+            HStack {
+                Text(start.formatted(date: .omitted, time: .shortened))
+                Spacer()
+                Text(start.addingTimeInterval(duration / 2).formatted(date: .omitted, time: .shortened))
+                Spacer()
+                Text("现在")
+            }.font(.system(size: 8)).monospacedDigit().foregroundStyle(.white.opacity(0.4)).padding(.leading, 32)
             Text(
-                filtered.first.map { "已有样本从\($0.timestamp.formatted(date: .omitted, time: .shortened))开始 · 间断处不连线" } ?? "每5分钟保存一次；保留最近48小时"
+                filtered.first.map { "记录始于 \($0.timestamp.formatted(date: .omitted, time: .shortened)) · 缺失时段留空" } ?? "每5分钟记录 · 保留48小时"
             )
-            .font(.system(size: 9)).foregroundStyle(.secondary)
-        }.accessibilityLabel("电池真实历史，\(filtered.count)个样本，目标上限\(limit)%")
+            .font(.system(size: 8)).foregroundStyle(.white.opacity(0.4)).padding(.leading, 32)
+        }.accessibilityLabel("电池真实历史，\(filtered.count)个样本，设定上限\(limit)%")
     }
 }
 
@@ -484,7 +534,7 @@ struct BatteryMetricGrid: View {
     let compact: Bool
     var body: some View {
         LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3), alignment: .leading, spacing: compact ? 7 : 12
+            columns: Array(repeating: GridItem(.flexible(), spacing: compact ? 6 : nil, alignment: .leading), count: 3), alignment: .leading, spacing: compact ? 6 : 12
         ) {
             ForEach(service.display.metrics) { metric in
                 BatteryMetricReadout(
@@ -509,8 +559,9 @@ private struct BatteryMetricReadout: View {
         let content: AnyView =
             compact
             ? AnyView(
-                HStack(spacing: 7) {
+                HStack(spacing: 5) {
                     caption
+                    Spacer(minLength: 0)
                     number
                 }.lineLimit(1).minimumScaleFactor(0.8))
             : AnyView(
@@ -518,8 +569,9 @@ private struct BatteryMetricReadout: View {
                     caption
                     number
                 })
-        return content.frame(maxWidth: .infinity, alignment: .leading).padding(compact ? 0 : 10)
-            .background(.white.opacity(compact ? 0 : 0.04), in: RoundedRectangle(cornerRadius: 8))
+        return content.frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, compact ? 9 : 10).padding(.vertical, compact ? 7 : 10)
+            .background(.white.opacity(compact ? 0.055 : 0.04), in: RoundedRectangle(cornerRadius: compact ? 7 : 8))
     }
 }
 
