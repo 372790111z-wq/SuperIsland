@@ -475,7 +475,9 @@ struct BatteryTrendChart: View {
                 filtered.first.map { "记录始于 \($0.timestamp.formatted(date: .omitted, time: .shortened)) · 缺失时段留空" } ?? "每5分钟记录 · 保留48小时"
             )
             .font(.system(size: 8)).foregroundStyle(.white.opacity(0.4)).padding(.leading, 32)
-        }.accessibilityLabel("电池真实历史，\(filtered.count)个样本，设定上限\(limit)%")
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("电池真实历史，近\(hours)小时，\(filtered.count)个样本，设定上限\(limit)%，缺失时段留空")
     }
 }
 
