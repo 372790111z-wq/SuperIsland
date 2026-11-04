@@ -1031,7 +1031,7 @@ final class BatteryManagementServiceTests: XCTestCase {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let host = NSHostingView(rootView: BatteryManagementPanel(service: s).padding(16).background(Color.black))
             host.appearance = NSAppearance(named: appearance)
-            let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 624, height: 216), styleMask: [.titled], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 624, height: 180), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.contentView = host
             defer { window.close() }
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -1040,16 +1040,20 @@ final class BatteryManagementServiceTests: XCTestCase {
             for title in ["概览", "充电", "趋势"] {
                 XCTAssertNotNil(probe.button(title: title), "All three labels must exist in both system appearances")
             }
-            host.layoutSubtreeIfNeeded(); window.displayIfNeeded()
-            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-            let image = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-            let output = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("build/bm1-battery-sections/\(appearance.rawValue)-overview.png")
-            try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try image.write(to: output)
+            func capture(_ section: String) throws {
+                host.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                let image = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                let output = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                    .appendingPathComponent("build/bm1-battery-sections/\(appearance.rawValue)-\(section).png")
+                try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try image.write(to: output)
+            }
+            try capture("overview")
             try probe.press(identifier: "battery-section-control")
             try await probe.wait { probe.text.contains("充电上限") && probe.button(title: "放电…") != nil }
+            try capture("controls")
             if appearance == .aqua {
                 let renewals = transport.renewals.count
                 try probe.press(title: "放电…")
@@ -1060,6 +1064,7 @@ final class BatteryManagementServiceTests: XCTestCase {
             }
             try probe.press(identifier: "battery-section-trend")
             try await probe.wait { probe.text.contains("真实电量") }
+            try capture("trend")
             try probe.press(identifier: "battery-section-overview")
             try await probe.wait { probe.text.contains("当前未充电") }
             try probe.press(title: "电池设置")
