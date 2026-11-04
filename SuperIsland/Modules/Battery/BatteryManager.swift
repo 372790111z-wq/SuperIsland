@@ -3,8 +3,12 @@ import IOKit.ps
 import Combine
 import AppKit
 
-struct BatteryHistorySample: Identifiable, Equatable {
-    let id = UUID()
+struct BatteryHistorySample: Identifiable, Equatable, Codable {
+    let id: UUID
+    let sessionID: UUID
+    init(timestamp: Date, level: Int, sessionID: UUID) {
+        self.id = UUID(); self.timestamp = timestamp; self.level = level; self.sessionID = sessionID
+    }
     let timestamp: Date
     let level: Int
 }
@@ -24,7 +28,8 @@ struct BatteryConsumerApp: Identifiable, Equatable {
 final class BatteryManager: ObservableObject {
     static let shared = BatteryManager()
 
-    @Published var batteryLevel: Int = 100
+    @Published var batteryLevel: Int = 0
+    @Published private(set) var hasBattery = false
     @Published var isCharging: Bool = false
     @Published var isPluggedIn: Bool = false
     @Published var timeRemaining: String = ""
@@ -40,9 +45,14 @@ final class BatteryManager: ObservableObject {
     private var historyRefreshToken: ModuleRefreshToken?
     private var consumerRefreshToken: ModuleRefreshToken?
     private let historySampleInterval: TimeInterval = 300
-    private let maxHistorySamples = 72
+    private let maxHistorySamples = 576
+    private let historySession = UUID()
 
     private init() {
+        if let data = UserDefaults.standard.data(forKey: "batteryManagement.history"),
+           let stored = try? JSONDecoder().decode([BatteryHistorySample].self, from: data) {
+            batteryHistory = stored.filter { Date().timeIntervalSince($0.timestamp) <= 172_800 && $0.timestamp <= Date() }.suffix(maxHistorySamples)
+        }
         updateBatteryInfo()
         startMonitoring()
         startInsightsMonitoring()
@@ -94,16 +104,23 @@ final class BatteryManager: ObservableObject {
 
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [Any],
-              let first = sources.first,
+              let first = sources.first(where: { source in
+                  let description = IOPSGetPowerSourceDescription(snapshot, source as CFTypeRef)?.takeUnretainedValue() as? [String: Any]
+                  return description?[kIOPSTypeKey] as? String == kIOPSInternalBatteryType
+              }),
               let info = IOPSGetPowerSourceDescription(snapshot, first as CFTypeRef)?.takeUnretainedValue() as? [String: Any]
-        else { return }
+        else { hasBattery = false; isCharging = false; isLowBattery = false; timeRemaining = ""; return }
+        hasBattery = true
+        cycleCount = BatteryTelemetry.read().cycles ?? 0
 
         if let capacity = info[kIOPSCurrentCapacityKey] as? Int {
             let oldLevel = batteryLevel
-            batteryLevel = capacity
-            isLowBattery = capacity <= 20
+            let maximum = info[kIOPSMaxCapacityKey] as? Int ?? 100
+            guard maximum > 0 else { hasBattery = false; return }
+            batteryLevel = max(0, min(100, Int((Double(capacity) / Double(maximum) * 100).rounded())))
+            isLowBattery = batteryLevel <= 20
 
-            if hasLoadedInitialSnapshot && (abs(oldLevel - capacity) >= 5 || (oldLevel > 20 && capacity <= 20)) {
+            if hasLoadedInitialSnapshot && (abs(oldLevel - batteryLevel) >= 5 || (oldLevel > 20 && batteryLevel <= 20)) {
                 AppState.shared.showHUD(module: .battery)
             }
         }
@@ -142,31 +159,28 @@ final class BatteryManager: ObservableObject {
     }
 
     private func appendHistorySample(force: Bool) {
+        guard hasBattery else { return }
         let now = Date()
+        if let last = batteryHistory.last, now.timeIntervalSince(last.timestamp) < historySampleInterval,
+           last.sessionID == historySession { return }
+        batteryHistory.append(BatteryHistorySample(timestamp: now, level: batteryLevel, sessionID: historySession))
+        batteryHistory = Array(batteryHistory.filter { now.timeIntervalSince($0.timestamp) <= 172_800 }.suffix(maxHistorySamples))
+        UserDefaults.standard.set(try? JSONEncoder().encode(batteryHistory), forKey: "batteryManagement.history")
+    }
 
-        guard force || batteryHistory.isEmpty else {
-            if let last = batteryHistory.last,
-               now.timeIntervalSince(last.timestamp) < historySampleInterval,
-               last.level == batteryLevel {
-                return
-            }
-            batteryHistory.append(BatteryHistorySample(timestamp: now, level: batteryLevel))
-            if batteryHistory.count > maxHistorySamples {
-                batteryHistory.removeFirst(batteryHistory.count - maxHistorySamples)
-            }
-            return
+    func application(for consumer: BatteryConsumerApp) -> NSRunningApplication? {
+        let matches = NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier &&
+            $0.localizedName.map(Self.normalizeHumanAppName) == consumer.appName
         }
-
-        batteryHistory.append(BatteryHistorySample(timestamp: now, level: batteryLevel))
-        if batteryHistory.count > maxHistorySamples {
-            batteryHistory.removeFirst(batteryHistory.count - maxHistorySamples)
-        }
+        return matches.count == 1 ? matches.first : nil
     }
 
     func refreshTopBatteryConsumers() {
+        let includeBackground = BatteryManagementService.shared.display.includeBackgroundProcesses
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let apps = Self.fetchTopBatteryConsumers()
+            let apps = Self.fetchTopBatteryConsumers(includeBackground: includeBackground)
             DispatchQueue.main.async {
                 if self.topBatteryConsumers != apps {
                     self.topBatteryConsumers = apps
@@ -176,27 +190,23 @@ final class BatteryManager: ObservableObject {
         }
     }
 
-    nonisolated private static func fetchTopBatteryConsumers() -> [BatteryConsumerApp] {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/top")
-        task.arguments = ["-l", "1", "-o", "power", "-stats", "pid,command,power,cpu"]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe()
-
-        do {
-            try task.run()
-        } catch {
-            return fallbackRunningApps()
+    nonisolated private static func fetchTopBatteryConsumers(includeBackground: Bool) -> [BatteryConsumerApp] {
+        func run(_ arguments: [String]) -> String? {
+            let task = Process(), pipe = Pipe()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/top")
+            task.arguments = arguments; task.standardOutput = pipe; task.standardError = FileHandle.nullDevice
+            do { try task.run() } catch { return nil }
+            let timeout = DispatchWorkItem { if task.isRunning { kill(task.processIdentifier, SIGKILL) } }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4, execute: timeout)
+            // Drain while the child runs: waiting before reading can deadlock
+            // when top's output fills its pipe on a process-heavy machine.
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit(); timeout.cancel()
+            guard task.terminationStatus == 0, data.count < 2_000_000 else { return nil }
+            return String(data: data, encoding: .utf8)
         }
-        task.waitUntilExit()
-
-        guard let outputData = try? pipe.fileHandleForReading.readToEnd(),
-              let output = String(data: outputData, encoding: .utf8),
-              !output.isEmpty else {
-            return fallbackRunningApps()
-        }
+        guard let output = run(["-l", "1", "-o", "power", "-stats", "pid,command,power,cpu"])
+                ?? run(["-l", "1", "-o", "cpu", "-stats", "pid,command,cpu,threads"]) else { return [] }
 
         let lines = output.components(separatedBy: .newlines)
         let headerLine = lines.first { line in
@@ -255,14 +265,15 @@ final class BatteryManager: ObservableObject {
             let power = powerFirst ? valueA : valueB
             let cpu = powerFirst ? valueB : valueA
 
-            let score = power > 0 ? power : cpu
+            let usesPower = headerColumns.contains { $0.uppercased().contains("POWER") }
+            let score = usesPower ? power : cpu
             let command = String(line[commandRange]).trimmingCharacters(in: .whitespacesAndNewlines)
             let appName = resolvedAppName(pid: pid, command: command)
             guard !appName.isEmpty else { continue }
-            guard regularApps.contains(appName) else { continue }
+            guard includeBackground || regularApps.contains(appName) else { continue }
 
             let current = aggregate[appName] ?? Aggregate(score: 0, usesPower: false)
-            aggregate[appName] = Aggregate(score: current.score + score, usesPower: current.usesPower || power > 0)
+            aggregate[appName] = Aggregate(score: current.score + score, usesPower: usesPower)
         }
 
         if aggregate.isEmpty {
@@ -279,7 +290,7 @@ final class BatteryManager: ObservableObject {
                 )
             }
             .sorted { $0.impactScore > $1.impactScore }
-            .prefix(3)
+            .prefix(10)
             .map { $0 }
     }
 
@@ -328,24 +339,8 @@ final class BatteryManager: ObservableObject {
     }
 
     nonisolated private static func fallbackRunningApps() -> [BatteryConsumerApp] {
-        let fallbackApps = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
-            .compactMap { app -> String? in
-                app.localizedName
-                    .map { normalizeHumanAppName($0) }
-                    .flatMap { $0.nonEmpty }
-            }
-            .uniquedPreservingOrder()
-            .prefix(3)
-
-        return fallbackApps.map { appName in
-            BatteryConsumerApp(
-                id: appName,
-                appName: appName,
-                impactScore: 0,
-                metricLabel: "power"
-            )
-        }
+        // Failure is not a measured zero-impact application.
+        return []
     }
 
     var batteryIconName: String {

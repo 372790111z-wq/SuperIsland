@@ -1,0 +1,29 @@
+{
+  "requirement": "BM1",
+  "version": "v0.3",
+  "date": "2026-10-29",
+  "userText": "确认",
+  "scope": [
+    "v0.3交互增量",
+    "当前BM1 PRD功能范围"
+  ],
+  "htmlFiles": [
+    {
+      "path": "prototype/charge-management-v0.3.html",
+      "sha256": "d8377b63d1a558757ef68e8ac71ca73c2d9b71065041934367aa6a79da17b03d"
+    },
+    {
+      "path": "prototype/charge-management-v0.3/app.js",
+      "sha256": "9fe1efe44a107d2e1911a2c0dc909b54d30823767e01b1316afa63460fffd28e"
+    },
+    {
+      "path": "prototype/charge-management-v0.3/style.css",
+      "sha256": "89b89047a5758c8397c6f7449939504f523936fae928fd4d147013e847d830d5"
+    }
+  ],
+  "prd": {
+    "path": "docs/product-package/10-SuperIsland电池管理PRD-BM1.md",
+    "sha256": "0ba398fa9e128c8daeb19b3690babc50faf56ba68c73e751f90e188e0d586ce0"
+  },
+  "nativeImplementationAuthorized": false
+}

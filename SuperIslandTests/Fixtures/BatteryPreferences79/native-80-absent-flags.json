@@ -1,0 +1,51 @@
+{
+  "at": "2026-11-02T06:26:25.013459+00:00",
+  "domain": "com.apple.smartcharging.topoffprotection",
+  "producer": "sudo -k /usr/bin/defaults export fixed-domain -",
+  "scope": "root CurrentUser/AnyHost",
+  "noPreferenceSetter": true,
+  "values": {
+    "mclLimitValue": {
+      "type": "int",
+      "value": 80
+    },
+    "MCLFeatureState": {
+      "type": "int",
+      "value": 1
+    },
+    "isEngaged": {
+      "absent": true
+    },
+    "isManuallyChargeLimited": {
+      "absent": true
+    },
+    "initialChargeLimitSetDate": {
+      "type": "float",
+      "value": 802769612.70032
+    },
+    "MCLTempDisabledUntilDate": {
+      "absent": true
+    },
+    "disabledUntil": {
+      "absent": true
+    },
+    "MCLOverridenUntilDate": {
+      "absent": true
+    },
+    "MCLSavedTargetSoC": {
+      "absent": true
+    },
+    "checkpoint": {
+      "type": "int",
+      "value": 2
+    },
+    "currentState": {
+      "type": "int",
+      "value": 1
+    },
+    "modeOfOperation": {
+      "type": "int",
+      "value": 7
+    }
+  }
+}
