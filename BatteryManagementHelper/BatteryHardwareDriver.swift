@@ -137,7 +137,7 @@ final class BatteryHardwareDriver {
     }
 
     func writePauseRefreshCHIE(_ value: Int) throws {
-        #if BATTERY_REVIEW
+        #if BATTERY_REVIEW || BATTERY_PAUSE_REFRESH
         guard pauseRefreshTrial, preferencesBackend != nil, dischargeKey == "CHIE", let smc else {
             throw BatteryControlError.unavailable("本包未开放单次暂停切换。")
         }

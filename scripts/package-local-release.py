@@ -119,12 +119,30 @@ def requirement(app):
                 if 'designated => ' in line)
 
 
+def validate_pause_refresh_build(receipt, info, enabled):
+    """An explicit opt-in must match the narrow helper build, never Review."""
+    command = receipt.get('command', [])
+    settings = [item for item in command if isinstance(item, str) and '=' in item]
+    narrow = [item for item in settings if item.startswith('WE1_BATTERY_SWIFT_CONDITIONS=')]
+    expected = ['WE1_BATTERY_SWIFT_CONDITIONS=BATTERY_PAUSE_REFRESH'] if enabled else []
+    if narrow != expected:
+        raise ValueError('Pause refresh package flag must match the narrow build receipt')
+    if any('BATTERY_REVIEW' in item or ('BATTERY_PAUSE_REFRESH' in item and item not in expected) for item in settings):
+        raise ValueError('Broad Review or undeclared pulse compilation is not allowed')
+    if any(info.get(key) for key in ('BM1DiagnosticsOnly', 'BM1NativeCutoffTrial', 'BM1Preferences79Review',
+                                    'BM1PauseRefreshTrial', 'WE1PauseRefreshTrial')):
+        raise ValueError('Build input must not be a previously sealed experiment')
+    if info.get('CFBundleIdentifier') != 'com.workview.SuperIsland.WE1Debug':
+        raise ValueError('Pause refresh is restricted to the unified WE1 identity')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build-receipt', required=True, type=Path)
     parser.add_argument('--reference-app', required=True, type=Path)
     parser.add_argument('--output-dir', required=True, type=Path)
     parser.add_argument('--signing-identity', default='SuperIsland WE1 Debug Local Code Signing')
+    parser.add_argument('--pause-refresh-trial', action='store_true', help='Seal the authorized one-shot 79–85 percent pause trial; receipt must enable only BATTERY_PAUSE_REFRESH')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     receipt = json.loads(args.build_receipt.read_text())
@@ -139,6 +157,7 @@ def main():
     assert sha(binary) == receipt['sourceBinarySHA256'], 'Build output changed since verification'
     assert app_digest(source) == receipt['sourceAppSHA256'], 'Build resources changed since verification'
     info = plistlib.loads((source / 'Contents/Info.plist').read_bytes())
+    validate_pause_refresh_build(receipt, info, args.pause_refresh_trial)
     for helper in ('KeepAwakeHelper', 'KeepAwakeEventTool', 'BatteryManagementHelper'):
         assert (source / 'Contents/MacOS' / helper).is_file(), 'Missing bundled helper: ' + helper
     for helper in ('KeepAwakeHelper', 'BatteryManagementHelper'):
@@ -179,6 +198,8 @@ def main():
                 WE1SourceRevision=head, WE1SourceExecutableSHA256=sha(binary))
     # Branding does not transfer ownership of production OAuth/deep links.
     info.pop('CFBundleURLTypes', None)
+    if args.pause_refresh_trial:
+        info['WE1PauseRefreshTrial'] = True
     (candidate / 'Contents/Info.plist').write_bytes(plistlib.dumps(info, sort_keys=False))
     symbol_stripping = strip_release_symbols(candidate)
     # --deep may replace a raw nested executable's identifier with its file
