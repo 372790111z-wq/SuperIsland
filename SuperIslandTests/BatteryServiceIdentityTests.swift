@@ -58,6 +58,31 @@ final class BatteryServiceIdentityTests: XCTestCase {
         try await client.register()
         XCTAssertEqual(registrar.events, ["retire", "register"], "Approval retry must not unregister the NEW endpoint")
     }
+    func testNewEndpointIgnoresLegacyReceiptsButPreservesItsOwnUpgradeAndApprovalState() async throws {
+        let domain = "BatteryEndpointReceipt.\(UUID())"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let legacyKey = "batteryManagement.helperRegistrationBuild"
+        let newKey = legacyKey + "." + BatteryManagementIdentity.unifiedLabel
+        defaults.set("old-host-build", forKey: legacyKey)
+        defaults.set("new", forKey: "batteryManagement.helperLaunchRepairAttemptBuild")
+        let registrar = Registrar()
+        let client = BatteryManagementClient(registrar: registrar, defaults: defaults, buildIdentifier: "new",
+            registrationServiceLabel: BatteryManagementIdentity.unifiedLabel)
+        try await client.register()
+        XCTAssertEqual(registrar.events, ["retire", "register"], "An absent endpoint must not be unregistered because of another endpoint's receipt")
+        XCTAssertEqual(defaults.string(forKey: legacyKey), "old-host-build")
+        XCTAssertEqual(defaults.string(forKey: newKey), "new")
+        registrar.events = []; registrar.status = .requiresApproval
+        try await client.register()
+        XCTAssertEqual(registrar.events, ["retire", "register"])
+        registrar.events = []; registrar.status = .notRegistered
+        let upgraded = BatteryManagementClient(registrar: registrar, defaults: defaults, buildIdentifier: "newer",
+            registrationServiceLabel: BatteryManagementIdentity.unifiedLabel)
+        try await upgraded.register()
+        XCTAssertEqual(registrar.events, ["retire", "unregister", "register"], "A real receipt for this endpoint must retain stale-build recovery")
+        XCTAssertEqual(defaults.string(forKey: newKey), "newer")
+    }
     private final class Registrar: BatteryHelperRegistering {
         var status = SMAppService.Status.notRegistered
         var events = [String](), failRetirement = false

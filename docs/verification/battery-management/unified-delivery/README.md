@@ -30,3 +30,5 @@
 用户批准后，旧 label 的 launchd `Executable` 仍指向退役的 Review，`EX_CONFIG 78`；先前登记表的 parent version 不能证明运行文件已切换。统一 WE1 宿主改用 `com.workview.SuperIsland.WE1Debug.BatteryControl`，其独立 plist 仅关联 WE1；生产与 Review 保持旧入口。客户端注册前只注销旧服务，后续批准重试不会因此注销新服务。
 
 代码签名标识继续为 `com.workview.SuperIsland.BatteryManagementHelper`。恢复目录、manual-retry、control.lock、独立 Review journal 和 root worker cache 均保持原路径。不能用改服务标识跳过恢复状态；两个版本仍受同一控制锁约束。迁移代码测试包括宿主/辅助程序路由、两个 plist 的端点隔离、稳定存储/签名契约、旧服务注销失败阻断和批准重试。
+
+首次实机迁移发现旧端点的登记版本收据仍被新端点读取，触发对尚不存在的新服务注销（BTM record not found / EPERM）。登记版本和一次修复收据现按服务端点隔离；旧端点仍使用原键名。新端点首次登记不继承旧收据，新端点后续升级仍保留原有刷新保护，批准重试不注销新记录。此隔离仅影响客户端登记收据，不移动root恢复数据。

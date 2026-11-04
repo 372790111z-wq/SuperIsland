@@ -70,10 +70,15 @@ final class BatteryManagementClient: BatteryManagementTransport {
     private let registrar: any BatteryHelperRegistering
     private let defaults: UserDefaults
     private let buildIdentifier: String
-    private let registrationKey = "batteryManagement.helperRegistrationBuild"
-    private let repairKey = "batteryManagement.helperLaunchRepairAttemptBuild"
+    private let registrationKey: String
+    private let repairKey: String
     private var registering = false
-    init(registrar: (any BatteryHelperRegistering)? = nil, defaults: UserDefaults = .standard, buildIdentifier: String? = nil, diagnosticsOnly: Bool? = nil) {
+    init(registrar: (any BatteryHelperRegistering)? = nil, defaults: UserDefaults = .standard, buildIdentifier: String? = nil, diagnosticsOnly: Bool? = nil, registrationServiceLabel: String = BatteryManagementIdentity.label) {
+        // Registration receipts describe a launchd endpoint, not the host app.
+        // A legacy receipt must not trigger unregister on a new, absent endpoint.
+        let suffix = registrationServiceLabel == BatteryManagementIdentity.legacyLabel ? "" : "." + registrationServiceLabel
+        self.registrationKey = "batteryManagement.helperRegistrationBuild" + suffix
+        self.repairKey = "batteryManagement.helperLaunchRepairAttemptBuild" + suffix
         self.diagnosticsOnly = diagnosticsOnly ?? BatteryStartupContext.currentProcessIsDiagnostic
         self.registrar = registrar ?? SystemBatteryHelperRegistration()
         self.defaults = defaults
