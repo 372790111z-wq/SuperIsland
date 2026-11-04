@@ -306,7 +306,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         guard !Self.isRunningUnitTests, !Self.isKeepAwakePreview, !Self.isFullScreenProbe, !Self.isBM1ReviewBundle else { return }
         guard !Self.isBM1FullApplicationReview || didBootstrapApp else { return }
-        if didBootstrapApp { startBatteryManagement(automaticallyEnable: true) }
+        // Activation can be caused by our own windows, not an explicit launch.
+        // Only default launch, Dock/Finder reopen, or the user control may enable.
+        if didBootstrapApp { startBatteryManagement(automaticallyEnable: false) }
         AppState.shared.setAppActive(true)
         WindowEnhancementController.shared.refreshSystemIntegrations()
     }
@@ -394,7 +396,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeepAwakeService.shared.openSettings = { Self.showSettingsWindow(initialPane: .keepAwake) }
         KeepAwakeService.shared.start()
         keepAwakeMenu.installStandaloneStatusItem()
-        defer { startZilanSuppressionReceiver() }
+        // Every shell (including WE1) must install battery renewal before
+        // returning. App activation is not guaranteed for background launches.
+        defer {
+            startBatteryManagement()
+            startZilanSuppressionReceiver()
+        }
 
         // The WE1 bundle remains isolated from production analytics, updates,
         // URL handling, and extension subprocesses, but its island must use the
@@ -412,8 +419,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             initializeManagers()
             ScreenshotLineFeature.shared.openSettings = { Self.showSettingsWindow(initialPane: .screenshotLine) }
             ScreenshotLineFeature.shared.start(appName: "SuperIsland")
-            DispatchQueue.main.async {
-                Self.showSettingsWindow(initialPane: Self.isScreenshotLineQAMode ? .screenshotLine : .windowEnhancement)
+            if batteryAutomaticallyEnableOnStartup {
+                DispatchQueue.main.async {
+                    Self.showSettingsWindow(initialPane: Self.isScreenshotLineQAMode ? .screenshotLine : .windowEnhancement)
+                }
             }
             return
         }
@@ -423,7 +432,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeMenuBarSetting()
         observePowerState()
         initializeManagers()
-        startBatteryManagement()
         ScreenshotLineFeature.shared.openSettings = { Self.showSettingsWindow(initialPane: .screenshotLine) }
         ScreenshotLineFeature.shared.start(appName: Self.isBM1FullApplicationReview ? "SuperIsland-BM1-Review" : "SuperIsland")
     }

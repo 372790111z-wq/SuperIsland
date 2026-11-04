@@ -462,6 +462,9 @@ final class BatteryManagementService: ObservableObject {
     }
     func setEnabled(_ value: Bool) {
         guard !authorizing, !terminationRequested else { return }
+        // An explicit UI action can reach this service before shell bootstrap.
+        // Install its observer/heartbeat lifecycle without a default write first.
+        if !started { start(automaticallyEnable: false) }
         automaticStartupDeferred = false
         userDisabledControl = !value
         wantsEnabled = value

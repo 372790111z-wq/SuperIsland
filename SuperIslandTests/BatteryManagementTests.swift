@@ -2671,6 +2671,30 @@ final class BatteryPauseRefreshInteractionTests: XCTestCase {
         r.recoveryPending = request.mode == .paused
         r.message = "已提交，正在验证供电与暂停"; return r
     }
+    func testExplicitOffBeforeStartupSurvivesLaterActivationAndReopen() async throws {
+        let t = BatteryTestTransport(); let s = try fixture(t, telemetry: sample); defer { s.shutdown() }
+        s.setEnabled(false)
+        s.start(automaticallyEnable: false)
+        s.start(automaticallyEnable: true)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertFalse(s.enabled); XCTAssertTrue(t.renewals.isEmpty)
+    }
+    func testExplicitEnableBeforeStartupInstallsRecurringLeaseRenewal() async throws {
+        let t = BatteryTestTransport(); let renewed = expectation(description: "Real heartbeat renews after initial explicit enable")
+        renewed.assertForOverFulfill = false
+        var renewals = 0
+        t.renewalReply = { request in
+            renewals += 1
+            if renewals >= 2 { renewed.fulfill() }
+            var report = self.pending(request); report.available = true; return (true, report)
+        }
+        let s = try fixture(t, telemetry: sample); defer { s.shutdown() }
+        XCTAssertTrue(t.renewals.isEmpty)
+        s.setEnabled(true) // No prior start call: this is the actual broken route.
+        await fulfillment(of: [renewed], timeout: 20)
+        XCTAssertGreaterThanOrEqual(t.renewals.count, 2)
+        XCTAssertTrue(s.enabled)
+    }
     func testAcceptedPendingPauseCanCancelWithoutAdapterOrNewRenew() async throws {
         let t = BatteryTestTransport(); var sample = sample()
         t.renewalReply = { (true, self.pending($0)) }
