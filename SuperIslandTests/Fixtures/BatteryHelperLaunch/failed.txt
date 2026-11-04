@@ -1,0 +1,82 @@
+system/com.workview.SuperIsland.BatteryManagementHelper = {
+	active count = 0
+	path = (submitted by smd.341)
+	type = Submitted
+	managed_by = com.apple.xpc.ServiceManagement
+	state = spawn scheduled
+
+	program identifier = Contents/MacOS/BatteryManagementHelper (mode: 2)
+	parent bundle identifier = com.workview.SuperIsland.BM1Debug
+	parent bundle version = 20261102070936
+	BTM uuid = EF6CFBE1-CFB7-47FD-8D0A-EA138C4B03B2
+	arguments = {
+		Contents/MacOS/BatteryManagementHelper
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.workview.SuperIsland.BatteryManagementHelper
+	}
+
+	LWCR = {
+		"reqs" => {
+			"cdhash" => {
+				"$in" => [
+					0 = 				]
+			}
+		}
+		"vers" => 1
+		"comp" => 1
+		"ccat" => 0
+	}
+
+	domain = system
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 198
+	last exit code = 78: EX_CONFIG
+
+	endpoints = {
+		"com.workview.SuperIsland.BatteryManagementHelper" = {
+			port = 0x18528f
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	resource coalition = {
+		ID = 153503
+		type = resource
+		state = active
+		active count = 1
+		name = com.workview.SuperIsland.BatteryManagementHelper
+	}
+
+	jetsam coalition = {
+		ID = 153504
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.workview.SuperIsland.BatteryManagementHelper
+	}
+
+	spawn type = background (5)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	submitted job. ignore execute allowed
+	jetsam thread limit = 32
+	cpumon = default
+	job state = spawn failed
+	sanitizer flags = 0x0
+
+	properties = partial import | keepalive | runatload | resolve program | needs LWCR update | has LWCR
+}

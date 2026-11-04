@@ -11,7 +11,7 @@ extension Notification.Name {
 }
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, modules, appearance, extensions, windowEnhancement, screenshotLine, keepAwake, advanced
+    case general, modules, appearance, extensions, windowEnhancement, screenshotLine, keepAwake, batteryManagement, advanced
     var id: String { rawValue }
 
     var title: String {
@@ -23,6 +23,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .windowEnhancement: "窗口增强"
         case .screenshotLine: "截图挂绳"
         case .keepAwake: "保持唤醒"
+        case .batteryManagement: "电池管理"
         case .advanced:   "高级"
         }
     }
@@ -36,6 +37,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .windowEnhancement: "rectangle.split.3x1.fill"
         case .screenshotLine: "tshirt"
         case .keepAwake: "cup.and.saucer"
+        case .batteryManagement: "battery.100.bolt"
         case .advanced:   "wrench.and.screwdriver"
         }
     }
@@ -56,14 +58,14 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        AnyView(HStack(spacing: 0) {
             sidebar
                 .dataAnnotationID("app-localization-settings-ui")
             Rectangle()
                 .fill(settingsDivider)
                 .frame(width: 1)
             contentArea
-        }
+        })
         .frame(minWidth: 800, idealWidth: 960, minHeight: 560, idealHeight: 680)
         .background(settingsBg)
         .preferredColorScheme(.dark)
@@ -167,17 +169,20 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private var detailContent: some View {
+    // One concrete boundary keeps the nine-pane conditional type from being
+    // specialized in each content-area layout. State and pane identity stay in
+    // their original views; no selection, navigation or layout is changed.
+    private var detailContent: AnyView {
         switch selectedPane {
-        case .general:    GeneralSettingsView()
-        case .modules:    ModuleSettingsView()
-        case .appearance: AppearanceSettingsView()
-        case .extensions: ExtensionsSettingsView()
-        case .windowEnhancement: WindowEnhancementSettingsView()
-        case .screenshotLine: ScreenshotLineSettingsView()
-        case .keepAwake: KeepAwakeSettingsView()
-        case .advanced: AdvancedSettingsView()
+        case .general:    return AnyView(GeneralSettingsView())
+        case .modules:    return AnyView(ModuleSettingsView())
+        case .appearance: return AnyView(AppearanceSettingsView())
+        case .extensions: return AnyView(ExtensionsSettingsView())
+        case .windowEnhancement: return AnyView(WindowEnhancementSettingsView())
+        case .screenshotLine: return AnyView(ScreenshotLineSettingsView())
+        case .keepAwake: return AnyView(KeepAwakeSettingsView())
+        case .batteryManagement: return AnyView(BatteryManagementSettingsView())
+        case .advanced: return AnyView(AdvancedSettingsView())
         }
     }
 }

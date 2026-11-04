@@ -3,6 +3,45 @@ import XCTest
 
 @MainActor
 final class ModuleRefreshSchedulerTests: XCTestCase {
+    func testVisibleSettingsKeepsSamplingWhileHiddenIslandJobsStayThrottled() {
+        let scheduler = ModuleRefreshScheduler(isolatedForTesting: true, energyMode: { .smart }, moduleVisibility: { _, _ in false })
+        var visible = true, enabled = true
+        scheduler.register(id: "settings", name: "Visible battery dashboard", module: .builtIn(.battery),
+            policy: .interval(5, tolerance: 1), enabled: { enabled }, visibleOutsideIsland: { visible }, action: {})
+        scheduler.register(id: "legacy", name: "Existing hidden job", module: .builtIn(.battery),
+            policy: .interval(5, tolerance: 1), action: {})
+        defer { scheduler.unregister(id: "settings"); scheduler.unregister(id: "legacy") }
+        XCTAssertEqual(scheduler.scheduledIntervalForTesting(id: "settings"), 5)
+        XCTAssertEqual(scheduler.scheduledIntervalForTesting(id: "legacy"), 30)
+        visible = false; scheduler.refreshScheduling()
+        XCTAssertEqual(scheduler.scheduledIntervalForTesting(id: "settings"), 30)
+        enabled = false; scheduler.refreshScheduling()
+        XCTAssertNil(scheduler.scheduledIntervalForTesting(id: "settings"))
+        XCTAssertEqual(scheduler.scheduledTimerCountForTesting, 1)
+    }
+
+    func testVisibleModuleUsesActiveRateAndLowPowerStillWins() {
+        var visible = false, mode = EnergyMode.smart
+        let scheduler = ModuleRefreshScheduler(isolatedForTesting: true, energyMode: { mode }, moduleVisibility: { _, _ in visible })
+        scheduler.register(id: "module", name: "Battery visibility", module: .builtIn(.battery), policy: .interval(5, tolerance: 1), action: {})
+        defer { scheduler.unregister(id: "module") }
+        XCTAssertEqual(scheduler.scheduledIntervalForTesting(id: "module"), 30)
+        visible = true; scheduler.refreshScheduling()
+        XCTAssertEqual(scheduler.scheduledIntervalForTesting(id: "module"), 5)
+        mode = .lowPower; scheduler.refreshScheduling()
+        XCTAssertEqual(scheduler.scheduledIntervalForTesting(id: "module"), 60)
+    }
+
+    func testVisibleDashboardDoesNotBypassLowPowerRefreshLimit() {
+        var mode = EnergyMode.lowPower
+        let scheduler = ModuleRefreshScheduler(isolatedForTesting: true, energyMode: { mode })
+        scheduler.register(id: "settings", name: "Visible dashboard", module: .builtIn(.battery),
+            policy: .interval(5, tolerance: 1), visibleOutsideIsland: { true }, action: {})
+        defer { scheduler.unregister(id: "settings") }
+        XCTAssertEqual(scheduler.scheduledIntervalForTesting(id: "settings"), 60)
+        mode = .normal; scheduler.refreshScheduling()
+        XCTAssertEqual(scheduler.scheduledIntervalForTesting(id: "settings"), 5)
+    }
 
     // Regression test for the main-thread freeze caused by leaked RunLoop timers.
     //

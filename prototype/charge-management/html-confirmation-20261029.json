@@ -1,0 +1,24 @@
+{
+  "requirement": "BM1",
+  "date": "2026-10-29",
+  "confirmation": {
+    "userText": "确认",
+    "scope": "HTML：灵动岛概览/充电/趋势、模块内电池设置及已呈现交互",
+    "prdConfirmed": false,
+    "nativeImplementationAuthorized": false
+  },
+  "files": [
+    {
+      "path": "prototype/charge-management-v0.1.html",
+      "sha256": "a2cbb2553ff58383537a59175d2d0026299dedbf1da333ed4cb577f1b4e3eca8"
+    },
+    {
+      "path": "prototype/charge-management/app.js",
+      "sha256": "b81590db4e2face163a3174602f4b39c6fc10ecfa6ce184fb6aa2abae63160d7"
+    },
+    {
+      "path": "prototype/charge-management/style.css",
+      "sha256": "f7968058651eb304b91767ab2c7fec8f3f8c1eecca65cb69228b699a66131a72"
+    }
+  ]
+}

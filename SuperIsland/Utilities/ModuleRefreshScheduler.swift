@@ -94,6 +94,7 @@ final class ModuleRefreshScheduler: ObservableObject {
         let module: ActiveModule?
         let policy: ModuleRefreshPolicy
         let enabled: @MainActor () -> Bool
+        let visibleOutsideIsland: @MainActor () -> Bool
         let action: @MainActor () -> Void
         var nextFireDate: Date?
         var lastRunDate: Date?
@@ -112,6 +113,7 @@ final class ModuleRefreshScheduler: ObservableObject {
     // ownership authoritative and re-entrancy-safe.
     private var timers: [String: Timer] = [:]
     private var recentActivity: [(date: Date, duration: TimeInterval)] = []
+    private let energyModeProvider: @MainActor () -> EnergyMode
     private var activityState = IslandActivityState(
         islandState: .compact,
         activeModule: nil,
@@ -120,14 +122,22 @@ final class ModuleRefreshScheduler: ObservableObject {
         isAppActive: true
     )
 
-    private init() {}
+    private init() { energyModeProvider = { AppState.shared.effectiveEnergyMode } }
 
 #if DEBUG
-    /// Test seam: build an isolated instance instead of the shared singleton.
-    init(isolatedForTesting: Bool) { _ = isolatedForTesting }
+    private var moduleVisibilityForTesting: (@MainActor (ActiveModule, IslandActivityState) -> Bool)?
+    /// Test seams include visibility so a real UI test's selected module cannot
+    /// silently make an isolated scheduler's supposedly hidden job visible.
+    init(isolatedForTesting: Bool, energyMode: @escaping @MainActor () -> EnergyMode = { AppState.shared.effectiveEnergyMode },
+         moduleVisibility: (@MainActor (ActiveModule, IslandActivityState) -> Bool)? = nil) {
+        _ = isolatedForTesting
+        energyModeProvider = energyMode
+        moduleVisibilityForTesting = moduleVisibility
+    }
 
     var scheduledTimerCountForTesting: Int { timers.count }
     var jobCountForTesting: Int { jobs.count }
+    func scheduledIntervalForTesting(id: String) -> TimeInterval? { timers[id]?.timeInterval }
 #endif
 
     @discardableResult
@@ -137,6 +147,7 @@ final class ModuleRefreshScheduler: ObservableObject {
         module: ActiveModule? = nil,
         policy: ModuleRefreshPolicy,
         enabled: @escaping @MainActor () -> Bool = { true },
+        visibleOutsideIsland: @escaping @MainActor () -> Bool = { false },
         action: @escaping @MainActor () -> Void
     ) -> ModuleRefreshToken {
         unregister(id: id)
@@ -147,6 +158,7 @@ final class ModuleRefreshScheduler: ObservableObject {
             module: module,
             policy: policy,
             enabled: enabled,
+            visibleOutsideIsland: visibleOutsideIsland,
             action: action
         )
         reschedule(id: id, runIfNewlyVisible: false)
@@ -261,29 +273,31 @@ final class ModuleRefreshScheduler: ObservableObject {
         case .eventDriven, .manual:
             return nil
         case .interval(let interval, let tolerance):
-            return adjustedSchedule(interval: interval, tolerance: tolerance, module: job.module)
+            return adjustedSchedule(interval: interval, tolerance: tolerance, module: job.module, visibleOutsideIsland: job.visibleOutsideIsland())
         case .activeOnly(let interval, let tolerance):
             guard jobIsVisible(job) || activityState.isHovering else { return nil }
-            return adjustedSchedule(interval: interval, tolerance: tolerance, module: job.module)
+            return adjustedSchedule(interval: interval, tolerance: tolerance, module: job.module, visibleOutsideIsland: job.visibleOutsideIsland())
         case .visibleOnly(let interval, let tolerance):
             guard jobIsVisible(job) else { return nil }
-            return adjustedSchedule(interval: interval, tolerance: tolerance, module: job.module)
+            return adjustedSchedule(interval: interval, tolerance: tolerance, module: job.module, visibleOutsideIsland: job.visibleOutsideIsland())
         }
     }
 
     private func adjustedSchedule(
         interval: TimeInterval,
         tolerance: TimeInterval,
-        module: ActiveModule?
+        module: ActiveModule?,
+        visibleOutsideIsland: Bool
     ) -> (interval: TimeInterval, tolerance: TimeInterval) {
-        let mode = AppState.shared.effectiveEnergyMode
+        let mode = energyModeProvider()
         var adjustedInterval = max(interval, minimumInterval(for: module))
         var adjustedTolerance = max(tolerance, adjustedInterval * 0.15)
 
         if mode == .smart,
+           !visibleOutsideIsland,
            activityState.islandState == .compact,
            !activityState.isHovering,
-           module.map({ !AppState.shared.isModuleVisibleForRefresh($0) }) ?? true {
+           module.map({ !currentModuleIsVisible($0) }) ?? true {
             adjustedInterval = max(adjustedInterval * 4, 30)
             adjustedTolerance = max(adjustedTolerance, adjustedInterval * 0.35)
         } else if mode == .lowPower {
@@ -294,10 +308,17 @@ final class ModuleRefreshScheduler: ObservableObject {
         return (adjustedInterval, adjustedTolerance)
     }
 
+    private func currentModuleIsVisible(_ module: ActiveModule) -> Bool {
+#if DEBUG
+        if let moduleVisibilityForTesting { return moduleVisibilityForTesting(module, activityState) }
+#endif
+        return AppState.shared.isModuleVisibleForRefresh(module)
+    }
+
     private func minimumInterval(for module: ActiveModule?) -> TimeInterval {
         switch module {
         case .extension_:
-            return AppState.shared.effectiveEnergyMode == .lowPower ? 5 : 1
+            return energyModeProvider() == .lowPower ? 5 : 1
         default:
             return 1
         }
@@ -321,9 +342,13 @@ final class ModuleRefreshScheduler: ObservableObject {
     }
 
     private func jobIsVisible(_ job: Job?, state: IslandActivityState) -> Bool {
+        if job?.visibleOutsideIsland() == true { return true }
         guard let module = job?.module else {
             return state.isAppActive || state.isHovering
         }
+#if DEBUG
+        if let moduleVisibilityForTesting { return moduleVisibilityForTesting(module, state) }
+#endif
         return AppState.shared.isModuleVisibleForRefresh(module, state: state)
     }
 
