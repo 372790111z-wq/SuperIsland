@@ -91,7 +91,7 @@ def strip_release_symbols(app, command=run):
     caller must sign the staged App after this operation.
     """
     report = {}
-    for name in ('SuperIsland', 'KeepAwakeHelper', 'KeepAwakeEventTool'):
+    for name in ('SuperIsland', 'KeepAwakeHelper', 'KeepAwakeEventTool', 'BatteryManagementHelper'):
         binary = app / 'Contents/MacOS' / name
         if not binary.exists():
             continue
@@ -139,6 +139,10 @@ def main():
     assert sha(binary) == receipt['sourceBinarySHA256'], 'Build output changed since verification'
     assert app_digest(source) == receipt['sourceAppSHA256'], 'Build resources changed since verification'
     info = plistlib.loads((source / 'Contents/Info.plist').read_bytes())
+    for helper in ('KeepAwakeHelper', 'KeepAwakeEventTool', 'BatteryManagementHelper'):
+        assert (source / 'Contents/MacOS' / helper).is_file(), 'Missing bundled helper: ' + helper
+    for helper in ('KeepAwakeHelper', 'BatteryManagementHelper'):
+        assert (source / 'Contents/Library/LaunchDaemons' / ('com.workview.SuperIsland.' + helper + '.plist')).is_file(), 'Missing launch declaration: ' + helper
     assert info['CFBundleIdentifier'] == 'com.workview.SuperIsland.WE1Debug'
     assert not (source / 'Contents/MacOS/SuperIsland.debug.dylib').exists(), 'Use a Release build'
     assert not list(source.rglob('*.xctest')), 'Do not ship test bundles'
@@ -176,7 +180,7 @@ def main():
     run('codesign', '--force', '--deep', '--sign', args.signing_identity, '--timestamp=none',
         '--entitlements', root / 'SuperIsland/SuperIsland.entitlements', candidate)
     nested_identifiers = {}
-    for name in ('KeepAwakeHelper', 'KeepAwakeEventTool'):
+    for name in ('KeepAwakeHelper', 'KeepAwakeEventTool', 'BatteryManagementHelper'):
         nested = candidate / 'Contents/MacOS' / name
         if nested.exists():
             identifier = 'com.workview.SuperIsland.' + name
@@ -214,7 +218,7 @@ def main():
     (output / '说明.txt').write_text(
         f'SuperIsland {build}（Apple Silicon，macOS 14+）\n'
         '应用对外名称已统一为 SuperIsland，保留原有设置与内部应用身份。\n'
-        '包含 Codex 用量刷新修复；Claude 功能保留。\n'
+        '包含主线功能及电池管理整合；功能验收结果另见交付记录。\n'
         '本包为本机证书签名，未经过 Apple 公证；尚未安装或实机验收。\n'
         '更新前须退出原应用，避免新旧版本同时运行。\n')
     print(json.dumps(manifest, ensure_ascii=False, indent=2))

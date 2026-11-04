@@ -4,6 +4,7 @@
     <key>Label</key><string>com.workview.SuperIsland.BatteryManagementHelper</string>
     <key>BundleProgram</key><string>Contents/MacOS/BatteryManagementHelper</string>
     <key>MachServices</key><dict><key>com.workview.SuperIsland.BatteryManagementHelper</key><true/></dict>
+    <key>AssociatedBundleIdentifiers</key><array><string>com.workview.SuperIsland</string><string>com.workview.SuperIsland.WE1Debug</string><string>com.workview.SuperIsland.BM1Debug</string></array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>ProcessType</key><string>Background</string>

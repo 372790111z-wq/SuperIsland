@@ -36,7 +36,10 @@ python3 scripts/package-local-release.py \
 ```
 
 改名安装完成后，下一次 `--reference-app` 指向 `/Applications/SuperIsland.app`。
-参考应用仅用于读取和比较稳定身份，不会修改。输出目录必须不存在。
+参考应用仅用于读取和比较稳定身份，不会修改。
+统一包必须包含 KeepAwakeHelper、KeepAwakeEventTool 和 BatteryManagementHelper；
+裁剪符号后逐个保留其 IPC 签名标识，再封签外层应用。电池后台接受现有 WE1 本机身份，
+但不开放 BM1 Review 专用的供电切换试验。输出目录必须不存在。
 
 打包器检查产物架构、测试运行时、覆盖率、签名身份，解包 ZIP 并再次核验；失败时
 保留输出供排查，不标记为成功，不修改历史产物。`manifest.json` 明确区分签名、安装

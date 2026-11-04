@@ -17,6 +17,12 @@ final class BatteryHelperLaunchFailureTests: XCTestCase {
         XCTAssertTrue(BatteryHelperLaunchFailure.confirmed(failed, parent: parent, build: build))
         XCTAssertFalse(BatteryHelperLaunchFailure.confirmed(running, parent: parent, build: build))
     }
+    func testUnifiedLocalIdentitySupportsRepairWithoutAcceptingOtherParents() throws {
+        let unified = "com.workview.SuperIsland.WE1Debug"
+        let text = try fixture("failed").replacingOccurrences(of: parent, with: unified)
+        XCTAssertTrue(BatteryHelperLaunchFailure.confirmed(text, parent: unified, build: build))
+        XCTAssertFalse(BatteryHelperLaunchFailure.confirmed(text, parent: parent, build: build))
+    }
     func testOtherLabelParentBuildOrExecutableCannotBeRebound() throws {
         let original = try fixture("failed")
         for text in [original.replacingOccurrences(of: "system/com.workview.SuperIsland.BatteryManagementHelper", with: "system/other"),

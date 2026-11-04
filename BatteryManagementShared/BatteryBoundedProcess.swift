@@ -278,4 +278,3 @@ enum BatteryNativeReadProcess {
         return output
     }
 }
-
