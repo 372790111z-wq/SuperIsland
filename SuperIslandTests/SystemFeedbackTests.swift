@@ -37,9 +37,9 @@ final class SystemFeedbackTests: XCTestCase {
         let original = state.contentSize(for: .compact)
         state.showVolumeHUD()
         XCTAssertTrue(state.usesNotchSafeSystemFeedback)
-        // Live media may already occupy the same safe side slots before the
-        // HUD starts. Reusing that width is valid; a second expansion is not
-        // required. Still require both side space and no narrowing.
+        // Media may already occupy both sides of the notch before feedback.
+        // Replacing that content need not widen it again, but must still leave
+        // space outside the camera gap and preserve the original footprint.
         XCTAssertGreaterThanOrEqual(state.contentSize(for: .compact).width, original.width)
         XCTAssertGreaterThan(state.contentSize(for: .compact).width, state.systemFeedbackCenterGapWidth)
         XCTAssertGreaterThanOrEqual(state.systemFeedbackCenterGapWidth, try XCTUnwrap(state.presentationNotchRect).width)
