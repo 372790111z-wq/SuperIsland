@@ -237,7 +237,7 @@ final class BatterySMC {
         return String(decoding: try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]), as: UTF8.self)
     }
     #endif
-    #if BATTERY_REVIEW || DEBUG
+    #if BATTERY_REVIEW || BATTERY_PAUSE_REFRESH || DEBUG
     /// Sealed pulse caller validated CHIE0 before its durable intent. Unlike
     /// the general writer this fixed command does NOT query sensors before or
     /// after the write. Both readbacks happen only after release to0.

@@ -284,6 +284,17 @@ final class BatteryManagementService: ObservableObject {
         report.capabilities.minimumDischargeTarget ?? report.minimumSupportedLimit
     }
 
+    var pauseRefreshPending: Bool {
+        mode == .paused && report.mode == .paused && report.pauseRefreshOperationID == operationID
+            && report.leaseHeldByRequester == true && report.requiresManualRetry != true && report.lastFailure == nil
+    }
+    var canCancelPauseRefresh: Bool {
+        pauseRefreshPending && mayOwnOverrides && enabled && !busy && !authorizing && !terminationRequested
+    }
+    var canResumeCharging: Bool {
+        mode == .paused && ((canControl && telemetry.adapterPresent) || canCancelPauseRefresh)
+    }
+
     var canStopDischarge: Bool {
         guard mode == .discharge else { return false }
         if canControl && telemetry.adapterPresent { return true }
@@ -647,6 +658,24 @@ final class BatteryManagementService: ObservableObject {
         guard requested != .discharge || !reviewTrialActive || target == 80 else {
             throw BatteryControlError.invalid("本验证包的手动放电目标固定为80%；未提交控制请求。")
         }
+        // Cancelling an accepted pulse is release-only, including while input
+        // is absent/unknown. Never issue a fresh automatic lease in this path.
+        if requested == .automatic && canCancelPauseRefresh {
+            wantsEnabled = false; enabled = false; userDisabledControl = true
+            automaticStartupDeferred = false; faultAcknowledged = false; acknowledgedFaultID = nil
+            mode = .automatic; dischargeTarget = nil; calibrationCommand = nil
+            revision &+= 1; dirty = true
+            let cancelledOperation = operationID
+            await synchronize()
+            guard operationID == cancelledOperation, mode == .automatic, !wantsEnabled, !enabled else {
+                throw BatteryControlError.conflict("取消期间控制请求已改变，请以当前状态为准。")
+            }
+            guard report.requiresManualRetry != true else { throw BatteryControlError.recovery(report.message) }
+            report.message = mayOwnOverrides || report.recoveryPending || report.leaseHeldByRequester != false
+                ? "已取消暂停，正在恢复原设置；充电控制保持关闭，恢复完成后可重新启用。"
+                : "已取消暂停并恢复原设置；充电控制已关闭，可重新启用。"
+            return report.message
+        }
         refreshTelemetry()
         guard (canControl && telemetry.adapterPresent) || (requested == .automatic && canStopDischarge) else {
             throw BatteryControlError.unavailable(telemetry.adapterPresent ? report.message : "请先接入电源适配器。")
@@ -670,7 +699,7 @@ final class BatteryManagementService: ObservableObject {
         }
         mode = requested; dischargeTarget = target; operationID = UUID(); revision &+= 1
         await synchronize()
-        guard enabled, report.available else { throw BatteryControlError.unavailable(report.message) }
+        guard enabled, report.available || (requested == .paused && pauseRefreshPending) else { throw BatteryControlError.unavailable(report.message) }
         return report.message
     }
     /// A write Intent may launch without the normal Dock/Finder startup.

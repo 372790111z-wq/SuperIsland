@@ -624,6 +624,7 @@ private final class BatteryTestTransport: BatteryManagementTransport {
     var inspectReport: BatteryControlReport?
     var inspectReply: (() async throws -> (Bool, BatteryControlReport))?
     var renewalReply: ((BatteryControlRequest) -> (Bool, BatteryControlReport))?
+    var releaseReply: (() async throws -> (Bool, BatteryControlReport))?
     func register() async throws {
         registered += 1
         if let registrationFailure { throw registrationFailure }
@@ -655,6 +656,7 @@ private final class BatteryTestTransport: BatteryManagementTransport {
             return (true, report)
         case .release:
             releases += 1
+            if let releaseReply { return try await releaseReply() }
             if pendingReleaseCount > 0 {
                 pendingReleaseCount -= 1
                 report.recoveryPending = true; report.cutoffPhase = pendingReleasePhase
@@ -662,6 +664,7 @@ private final class BatteryTestTransport: BatteryManagementTransport {
                 report.message = "Waiting for actual supply recovery"
                 return (false, report)
             }
+            report.leaseHeldByRequester = failRelease
             report.recoveryPending = failRelease; report.message = failRelease ? "restore failed" : "restored"
             return (!failRelease, report)
         }
@@ -2646,5 +2649,105 @@ final class BatteryTargetAuthorityTests: XCTestCase {
         try lease.apply([key: 90], owner: owner)
         XCTAssertEqual(actual, 90); XCTAssertEqual(writes, [80, 90])
         XCTAssertEqual(disk?.entries[key]?.expected, 90); XCTAssertEqual(disk?.entries[key]?.original, 95)
+    }
+}
+
+
+@MainActor
+final class BatteryPauseRefreshInteractionTests: XCTestCase {
+    private func fixture(_ t: BatteryTestTransport, telemetry: @escaping () -> BatteryTelemetry) throws -> BatteryManagementService {
+        let domain = "BatteryPauseUI." + UUID().uuidString, defaults = UserDefaults(suiteName: domain)!
+        defaults.set(try JSONEncoder().encode(BatteryControlPreferences()), forKey: "batteryManagement.preferences")
+        addTeardownBlock { defaults.removePersistentDomain(forName: domain) }
+        return BatteryManagementService(defaults: defaults, client: t, telemetryReader: telemetry, conflictChecker: { nil }, scheduleStarter: {})
+    }
+    private func sample() -> BatteryTelemetry {
+        var s = BatteryTelemetry(); s.hasBattery = true; s.level = 80; s.onAC = true; s.current = 1; return s
+    }
+    private func pending(_ request: BatteryControlRequest) -> BatteryControlReport {
+        var r = BatteryControlReport(); r.mode = request.mode; r.mechanism = "macOS Preferences Limit"
+        r.available = request.mode != .paused; r.leaseHeldByRequester = true
+        r.pauseRefreshOperationID = request.mode == .paused ? request.operationID : nil
+        r.recoveryPending = request.mode == .paused
+        r.message = "已提交，正在验证供电与暂停"; return r
+    }
+    func testAcceptedPendingPauseCanCancelWithoutAdapterOrNewRenew() async throws {
+        let t = BatteryTestTransport(); var sample = sample()
+        t.renewalReply = { (true, self.pending($0)) }
+        let s = try fixture(t, telemetry: { sample }); defer { s.shutdown() }
+        await s.attemptStartupForTesting()
+        let message = try await s.execute(mode: .paused)
+        XCTAssertTrue(message.contains("正在验证")); XCTAssertTrue(s.enabled)
+        XCTAssertTrue(s.pauseRefreshPending); XCTAssertFalse(s.canControl); XCTAssertTrue(s.canCancelPauseRefresh)
+        sample.onAC = false
+        s.refreshTelemetry()
+        XCTAssertTrue(s.canResumeCharging)
+        let count = t.renewals.count
+        _ = try await s.execute(mode: .automatic)
+        XCTAssertEqual(t.renewals.count, count); XCTAssertEqual(t.releases, 1)
+        XCTAssertFalse(s.enabled); XCTAssertFalse(s.pauseRefreshPending)
+        XCTAssertEqual(s.preferences.limit, 80)
+    }
+    func testPendingReleaseDoesNotClaimRecoveryOrReenable() async throws {
+        let t = BatteryTestTransport(); t.renewalReply = { (true, self.pending($0)) }
+        let s = try fixture(t, telemetry: sample); defer { s.shutdown() }
+        await s.attemptStartupForTesting(); _ = try await s.execute(mode: .paused)
+        t.pendingReleaseCount = 3
+        let count = t.renewals.count
+        let message = try await s.execute(mode: .automatic)
+        XCTAssertTrue(message.contains("正在恢复")); XCTAssertFalse(s.enabled)
+        XCTAssertTrue(s.report.recoveryPending); XCTAssertEqual(t.renewals.count, count)
+    }
+    func testNewEnableDuringCancellationCannotReceiveStaleClosedMessage() async throws {
+        let t = BatteryTestTransport(); t.renewalReply = { (true, self.pending($0)) }
+        let s = try fixture(t, telemetry: sample); defer { s.shutdown() }
+        await s.attemptStartupForTesting(); _ = try await s.execute(mode: .paused)
+        var held: CheckedContinuation<(Bool, BatteryControlReport), Error>?
+        t.releaseReply = { try await withCheckedThrowingContinuation { held = $0 } }
+        let cancel = Task { try await s.execute(mode: .automatic) }
+        for _ in 0..<100 where held == nil { await Task.yield() }
+        guard let continuation = held else { XCTFail("Release did not start"); cancel.cancel(); return }
+        s.setEnabled(true)
+        var restored = BatteryControlReport(); restored.available = true
+        restored.leaseHeldByRequester = false; restored.mechanism = "macOS Preferences Limit"
+        continuation.resume(returning: (true, restored)); t.releaseReply = nil
+        do { _ = try await cancel.value; XCTFail("Stale cancellation result was accepted") } catch {}
+        XCTAssertTrue(s.enabled); XCTAssertEqual(s.mode, .automatic)
+        XCTAssertFalse(s.report.message.contains("控制已关闭"))
+    }
+    func testRepeatedOffSyncDuringCancellationDoesNotInvalidateSameIntent() async throws {
+        let t = BatteryTestTransport(); t.renewalReply = { (true, self.pending($0)) }
+        let s = try fixture(t, telemetry: sample); defer { s.shutdown() }
+        await s.attemptStartupForTesting(); _ = try await s.execute(mode: .paused)
+        var held: CheckedContinuation<(Bool, BatteryControlReport), Error>?
+        t.releaseReply = { try await withCheckedThrowingContinuation { held = $0 } }
+        let cancel = Task { try await s.execute(mode: .automatic) }
+        for _ in 0..<100 where held == nil { await Task.yield() }
+        guard let continuation = held else { XCTFail("Release did not start"); cancel.cancel(); return }
+        s.setEnabled(false) // Queues sync/revision without introducing a new operation.
+        var restored = BatteryControlReport(); restored.available = true
+        restored.leaseHeldByRequester = false; restored.mechanism = "macOS Preferences Limit"
+        continuation.resume(returning: (true, restored)); t.releaseReply = nil
+        let message = try await cancel.value
+        XCTAssertFalse(s.enabled); XCTAssertTrue(message.contains("已取消暂停并恢复"))
+    }
+    func testWrongOperationMissingOwnershipAndFailureNeverCountAsAcceptedPause() async throws {
+        for variant in 0..<4 {
+            let t = BatteryTestTransport()
+            t.renewalReply = { request in
+                var r = self.pending(request)
+                if request.mode == .paused {
+                    if variant == 0 { r.pauseRefreshOperationID = UUID() }
+                    if variant == 1 { r.leaseHeldByRequester = nil }
+                    if variant == 2 { r.lastFailure = "failed" }
+                    if variant == 3 { r.requiresManualRetry = true }
+                }
+                return (true, r)
+            }
+            let s = try fixture(t, telemetry: sample); defer { s.shutdown() }
+            await s.attemptStartupForTesting()
+            do { _ = try await s.execute(mode: .paused); XCTFail("Unverified pending was accepted") } catch {}
+            XCTAssertFalse(s.pauseRefreshPending); XCTAssertFalse(s.canCancelPauseRefresh)
+        }
     }
 }

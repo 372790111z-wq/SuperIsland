@@ -182,7 +182,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.workview.SuperIsland.BatteryManagementHelper
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) BATTERY_HELPER $(BM1_REVIEW_SWIFT_CONDITIONS)"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) BATTERY_HELPER $(BM1_REVIEW_SWIFT_CONDITIONS) $(WE1_BATTERY_SWIFT_CONDITIONS)"
         SKIP_INSTALL: YES
         ENABLE_HARDENED_RUNTIME: true
       configs:

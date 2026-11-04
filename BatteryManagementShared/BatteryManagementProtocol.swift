@@ -63,21 +63,46 @@ enum BatteryManagementIdentity {
               ["com.workview.SuperIsland", "com.workview.SuperIsland.WE1Debug", "com.workview.SuperIsland.BM1Debug"].contains(identifier) else { return nil }
         return identifier == "com.workview.SuperIsland.BM1Debug" && info["BM1DiagnosticsOnly"] as? Bool == true
     }
-    static func packagePauseRefreshTrial(executableURL: URL?) -> Bool {
+    // A narrow compile gate is separate from the broad legacy Review build.
+    static var pauseRefreshBuilds: (review: Bool, unified: Bool) {
         #if BATTERY_REVIEW
-        guard let executableURL, executableURL.lastPathComponent == "BatteryManagementHelper" else { return false }
+        let review = true
+        #else
+        let review = false
+        #endif
+        #if BATTERY_PAUSE_REFRESH
+        let unified = true
+        #else
+        let unified = false
+        #endif
+        return (review, unified)
+    }
+    static func pauseRefreshClient(info: [String: Any], reviewBuild: Bool, unifiedBuild: Bool) -> String? {
+        guard info["BM1DiagnosticsOnly"] as? Bool != true,
+              info["BM1NativeCutoffTrial"] as? Bool != true,
+              info["BM1Preferences79Review"] as? Bool != true else { return nil }
+        let identifier = info["CFBundleIdentifier"] as? String
+        if reviewBuild, identifier == "com.workview.SuperIsland.BM1Debug",
+           info["BM1PauseRefreshTrial"] as? Bool == true, info["WE1PauseRefreshTrial"] as? Bool != true {
+            return identifier
+        }
+        if unifiedBuild, identifier == "com.workview.SuperIsland.WE1Debug",
+           info["WE1PauseRefreshTrial"] as? Bool == true, info["BM1PauseRefreshTrial"] as? Bool != true {
+            return identifier
+        }
+        return nil
+    }
+    static func packagePauseRefreshClient(executableURL: URL?) -> String? {
+        guard pauseRefreshBuilds.review || pauseRefreshBuilds.unified,
+              let executableURL, executableURL.lastPathComponent == "BatteryManagementHelper" else { return nil }
         let url = executableURL.resolvingSymlinksInPath().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Info.plist")
         guard let data = try? Data(contentsOf: url), data.count < 65_536,
-              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return false }
-        return info["CFBundleIdentifier"] as? String == "com.workview.SuperIsland.BM1Debug"
-            && info["BM1PauseRefreshTrial"] as? Bool == true
-            && info["BM1DiagnosticsOnly"] as? Bool != true
-            && info["BM1NativeCutoffTrial"] as? Bool != true
-            && info["BM1Preferences79Review"] as? Bool != true
-        #else
-        return false
-        #endif
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
+        return pauseRefreshClient(info: info, reviewBuild: pauseRefreshBuilds.review, unifiedBuild: pauseRefreshBuilds.unified)
+    }
+    static func packagePauseRefreshTrial(executableURL: URL?) -> Bool {
+        packagePauseRefreshClient(executableURL: executableURL) != nil
     }
     static func packageNativeCutoffTrial(executableURL: URL?) -> Bool {
         guard let executableURL, executableURL.lastPathComponent == "BatteryManagementHelper" else { return false }

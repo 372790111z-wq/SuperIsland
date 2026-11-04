@@ -2,6 +2,33 @@ import XCTest
 @testable import SuperIsland
 
 final class BatteryPauseRefreshTests: XCTestCase {
+    func testSealedPackageRequiresMatchingIdentityFlagAndCompileGate() {
+        let we1: [String: Any] = ["CFBundleIdentifier": "com.workview.SuperIsland.WE1Debug", "WE1PauseRefreshTrial": true]
+        let bm1: [String: Any] = ["CFBundleIdentifier": "com.workview.SuperIsland.BM1Debug", "BM1PauseRefreshTrial": true]
+        XCTAssertEqual(BatteryManagementIdentity.pauseRefreshClient(info: we1, reviewBuild: false, unifiedBuild: true), "com.workview.SuperIsland.WE1Debug")
+        XCTAssertEqual(BatteryManagementIdentity.pauseRefreshClient(info: bm1, reviewBuild: true, unifiedBuild: false), "com.workview.SuperIsland.BM1Debug")
+        for info in [we1, bm1] {
+            XCTAssertNil(BatteryManagementIdentity.pauseRefreshClient(info: info, reviewBuild: false, unifiedBuild: false))
+        }
+        XCTAssertNil(BatteryManagementIdentity.pauseRefreshClient(info: we1, reviewBuild: true, unifiedBuild: false))
+        XCTAssertNil(BatteryManagementIdentity.pauseRefreshClient(info: bm1, reviewBuild: false, unifiedBuild: true))
+        for identifier in ["com.workview.SuperIsland", "other", "com.workview.SuperIsland.BM1Debug"] {
+            var bad = we1; bad["CFBundleIdentifier"] = identifier
+            XCTAssertNil(BatteryManagementIdentity.pauseRefreshClient(info: bad, reviewBuild: true, unifiedBuild: true))
+        }
+        for key in ["BM1DiagnosticsOnly", "BM1NativeCutoffTrial", "BM1Preferences79Review", "BM1PauseRefreshTrial"] {
+            var bad = we1; bad[key] = true
+            XCTAssertNil(BatteryManagementIdentity.pauseRefreshClient(info: bad, reviewBuild: true, unifiedBuild: true))
+        }
+        var missing = we1; missing.removeValue(forKey: "WE1PauseRefreshTrial")
+        XCTAssertNil(BatteryManagementIdentity.pauseRefreshClient(info: missing, reviewBuild: false, unifiedBuild: true))
+    }
+    func testDefaultBuildHasNoPulseEvenWithSealedInfo() {
+        #if !BATTERY_REVIEW && !BATTERY_PAUSE_REFRESH
+        XCTAssertFalse(BatteryManagementIdentity.pauseRefreshBuilds.review)
+        XCTAssertFalse(BatteryManagementIdentity.pauseRefreshBuilds.unified)
+        #endif
+    }
     private let owner = UUID()
     private enum Fault: Error { case injected }
     private func telemetry(update: Double = 1001, charging: Bool = false, current: Double = 0) -> BatteryTelemetry {

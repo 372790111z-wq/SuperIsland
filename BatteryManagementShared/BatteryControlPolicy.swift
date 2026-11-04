@@ -340,6 +340,8 @@ struct BatteryControlReport: Codable, Equatable {
     #endif
     var ownedAdapterCutoff: Bool?
     var cutoffPhase: BatteryCutoffSession.Phase?
+    /// Accepted pause refresh awaiting physical evidence, never a success receipt.
+    var pauseRefreshOperationID: UUID?
     var recoveryPending = false
     var requiresManualRetry: Bool? = false
     var manualRetryID: UUID?

@@ -243,8 +243,8 @@ struct BatteryManualControls: View {
                 AnyView(Button(service.mode == .topUp ? "停止充满" : "充满") { run(service.mode == .topUp ? .automatic : .topUp) }
                     .disabled(!service.canControl || !service.telemetry.adapterPresent || service.reviewTrialActive).dataAnnotationID(
                         "si.bm.top-up")),
-                AnyView(Button(service.mode == .paused ? "恢复充电" : "暂停充电") { run(service.mode == .paused ? .automatic : .paused) }
-                    .disabled(service.mode == .paused ? (!service.canControl || !service.telemetry.adapterPresent) : !service.canPauseCharging)
+                AnyView(Button(service.pauseRefreshPending ? "取消暂停并恢复" : service.mode == .paused ? "恢复充电" : "暂停充电") { run(service.mode == .paused ? .automatic : .paused) }
+                    .disabled(service.mode == .paused ? !service.canResumeCharging : !service.canPauseCharging)
                     .help(service.mode != .paused && !service.report.capabilities.canPause(at: service.telemetry.level)
                         ? "当前电量或控制通道尚无法确认临时暂停充电。" : "临时暂停或恢复充电，保留长期上限。")
                     .dataAnnotationID("si.bm.pause")),
@@ -257,7 +257,7 @@ struct BatteryManualControls: View {
                 AnyView(Spacer()),
                 AnyView(Text(service.calibrationActive ? "校准" : service.mode.title).font(.system(size: 10)).foregroundStyle(.secondary)),
             ])).buttonStyle(.bordered).controlSize(.small)
-                .disabled(!service.canControl && !service.canStopDischarge).dataAnnotationID("si.bm.mode"))
+                .disabled(!service.canControl && !service.canStopDischarge && !service.canCancelPauseRefresh).dataAnnotationID("si.bm.mode"))
     }
     private var dischargeDescription: String {
         batteryDischargeRouteDescription(service) + "；达到目标后恢复原来的长期上限，需持续接入适配器。"
