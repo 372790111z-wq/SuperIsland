@@ -32,3 +32,5 @@
 代码签名标识继续为 `com.workview.SuperIsland.BatteryManagementHelper`。恢复目录、manual-retry、control.lock、独立 Review journal 和 root worker cache 均保持原路径。不能用改服务标识跳过恢复状态；两个版本仍受同一控制锁约束。迁移代码测试包括宿主/辅助程序路由、两个 plist 的端点隔离、稳定存储/签名契约、旧服务注销失败阻断和批准重试。
 
 首次实机迁移发现旧端点的登记版本收据仍被新端点读取，触发对尚不存在的新服务注销（BTM record not found / EPERM）。登记版本和一次修复收据现按服务端点隔离；旧端点仍使用原键名。新端点首次登记不继承旧收据，新端点后续升级仍保留原有刷新保护，批准重试不注销新记录。此隔离仅影响客户端登记收据，不移动root恢复数据。
+
+macOS实机还会对包内存在但尚无BTM记录的新plist返回notFound（3），不一定是notRegistered（0）。无本端点收据且notFound时直接首次register；只有既有enabled/requiresApproval状态或本端点历史收据才执行版本刷新。保留已验证的失败job修复分支；不将EPERM吞掉当成成功。

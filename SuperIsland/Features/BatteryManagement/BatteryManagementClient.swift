@@ -102,7 +102,12 @@ final class BatteryManagementClient: BatteryManagementTransport {
         // Refresh at most once per build: retrying after human approval must not
         // unregister the very record the user just approved.
         let previousBuild = defaults.string(forKey: registrationKey)
-        let changed = previousBuild != buildIdentifier && (previousBuild != nil || registrar.status != .notRegistered)
+        let status = registrar.status
+        // macOS can report notFound for a bundled plist whose BTM record has
+        // never existed. Only a receipt or an existing registration warrants
+        // an upgrade refresh; unregistering that absent record fails with EPERM.
+        let hasRegistration = status == .enabled || status == .requiresApproval
+        let changed = previousBuild != buildIdentifier && (previousBuild != nil || hasRegistration)
         var repaired = false
         if changed { try await unregisterCurrent() }
         else if try await confirmedLaunchFailure() { try await repairOnce(); repaired = true }
