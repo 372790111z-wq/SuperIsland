@@ -1,6 +1,16 @@
 import SwiftUI
+import Darwin
 
 @main
+enum SuperIslandMain {
+    @MainActor static func main() {
+        if CommandLine.arguments.dropFirst().contains(BatteryLidLockWorker.argument) {
+            _exit(BatteryLidLockWorker.run(arguments: CommandLine.arguments))
+        }
+        SuperIslandApp.main()
+    }
+}
+
 struct SuperIslandApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 

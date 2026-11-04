@@ -27,7 +27,7 @@ final class ExtensionManager: ObservableObject {
 
     var discoveryDirectories: [URL] {
         ExtensionHostEnvironment.discoveryDirectories(
-            isWE1: ExtensionHostEnvironment.isWE1,
+            isWE1: ExtensionHostEnvironment.isIsolatedReview,
             installed: installedExtensionsDirectory,
             development: developmentExtensionsDirectory,
             local: localExtensionsDirectory,
@@ -178,7 +178,7 @@ final class ExtensionManager: ObservableObject {
             installedIDs: Set(installed.map(\.id)),
             defaultDisabledIDs: Set(installed.filter { !$0.defaultEnabled }.map(\.id)),
             defaults: .standard,
-            isWE1: ExtensionHostEnvironment.isWE1
+            isWE1: ExtensionHostEnvironment.isIsolatedReview
         )
     }
 
@@ -561,7 +561,7 @@ final class WhatsAppWebBridge: ObservableObject {
                 return bundled
             }
         }
-        if ExtensionHostEnvironment.isWE1 {
+        if ExtensionHostEnvironment.isIsolatedReview {
             // A packaged WE1 must never run the source tree's older provider.
             return (Bundle.main.resourceURL ?? Bundle.main.bundleURL)
                 .appendingPathComponent("BundledExtensions/whatsapp-web/provider", isDirectory: true)

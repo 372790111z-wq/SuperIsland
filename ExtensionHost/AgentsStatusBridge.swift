@@ -30,7 +30,7 @@ final class AgentsStatusBridge {
     func start(extensionDirectory: URL? = nil) {
         self.extensionDirectory = extensionDirectory
         shouldKeepRunning = true
-        if !ExtensionHostEnvironment.isWE1 { cleanupLegacyLaunchdOnce() }
+        if !ExtensionHostEnvironment.isIsolatedReview { cleanupLegacyLaunchdOnce() }
         startServerIfNeeded()
     }
 
@@ -41,11 +41,11 @@ final class AgentsStatusBridge {
     /// will fail and the extension will mark itself "setup required".
     @discardableResult
     func waitForListening(timeout: TimeInterval = 2.0) -> Bool {
-        if ExtensionHostEnvironment.isWE1 && serverProcess == nil { return false }
+        if ExtensionHostEnvironment.isIsolatedReview && serverProcess == nil { return false }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if isServerListening() {
-                if !ExtensionHostEnvironment.isWE1 { return true }
+                if !ExtensionHostEnvironment.isIsolatedReview { return true }
                 if let process = serverProcess, process.isRunning,
                    let pid = probeOwnedHealth(), pid == process.processIdentifier { return true }
             }
@@ -85,7 +85,7 @@ final class AgentsStatusBridge {
         let semaphore = DispatchSemaphore(value: 0)
         var resolvedPID: pid_t?
         var matched = false
-        let requiredOwnerToken = ExtensionHostEnvironment.isWE1 ? ownerToken : nil
+        let requiredOwnerToken = ExtensionHostEnvironment.isIsolatedReview ? ownerToken : nil
         let task = URLSession.shared.dataTask(with: request) { data, response, _ in
             defer { semaphore.signal() }
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -152,7 +152,7 @@ final class AgentsStatusBridge {
                 return bundled
             }
         }
-        if ExtensionHostEnvironment.isWE1 { return nil }
+        if ExtensionHostEnvironment.isIsolatedReview { return nil }
         let sourceFileURL = URL(fileURLWithPath: #filePath)
         let repoRoot = sourceFileURL.deletingLastPathComponent().deletingLastPathComponent()
         let repoScript = repoRoot.appendingPathComponent(
@@ -181,7 +181,7 @@ final class AgentsStatusBridge {
                 return bundled.path
             }
         }
-        if ExtensionHostEnvironment.isWE1 { return "" }
+        if ExtensionHostEnvironment.isIsolatedReview { return "" }
         let sourceFileURL = URL(fileURLWithPath: #filePath)
         let repoRoot = sourceFileURL.deletingLastPathComponent().deletingLastPathComponent()
         let repoPath = repoRoot.appendingPathComponent(
@@ -223,7 +223,7 @@ final class AgentsStatusBridge {
         guard shouldKeepRunning, serverProcess == nil else { return }
 
         if isServerListening() {
-            if ExtensionHostEnvironment.isWE1 {
+            if ExtensionHostEnvironment.isIsolatedReview {
                 ExtensionLogger.shared.log(Self.managedExtensionID, .error,
                     "Agent 状态端口 \(Self.port) 正被其他进程使用；请先退出另一套 Agent 状态服务，再点重新加载。")
                 showPortConflictAlertOnce()
@@ -262,7 +262,7 @@ final class AgentsStatusBridge {
         let ccHookPath = hookScriptPath("cc-event-hook.sh")
         let codexHookPath = hookScriptPath("codex-notify-hook.sh")
         // Bundle resources lose +x through rsync in some setups; re-assert it.
-        if !ExtensionHostEnvironment.isWE1 {
+        if !ExtensionHostEnvironment.isIsolatedReview {
             try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ccHookPath)
             try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHookPath)
         }

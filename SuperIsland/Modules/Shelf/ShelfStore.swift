@@ -767,8 +767,15 @@ final class ShelfStore: ObservableObject {
 
     private static var imageStorageURL: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("SuperIsland", isDirectory: true)
+            .first.map { imageStorageDirectory(base: $0, bundleIdentifier: Bundle.main.bundleIdentifier) }
+    }
+
+    static func imageStorageDirectory(base: URL, bundleIdentifier: String?) -> URL {
+        // Preserve historical production/WE1 paths; the new full BM1 review
+        // gets its own images as well as its separate UserDefaults item list.
+        let directory = bundleIdentifier == ExtensionHostEnvironment.bm1BundleIdentifier
+            ? "SuperIsland-BM1-Review" : "SuperIsland"
+        return base.appendingPathComponent(directory, isDirectory: true)
             .appendingPathComponent("ShelfImages", isDirectory: true)
     }
 

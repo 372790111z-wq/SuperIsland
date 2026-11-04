@@ -149,7 +149,7 @@ final class Daemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperProtocol {
 let daemon = Daemon()
 daemon.prepare()
 // Fail closed for untrusted/ad-hoc builds; no listener accepts clients.
-guard let requirement = KeepAwakeHelperIdentity.requirement(identifiers: ["com.workview.SuperIsland", "com.workview.SuperIsland.WE1Debug"]) else { exit(78) }
+guard let requirement = KeepAwakeHelperIdentity.requirement(identifiers: ["com.workview.SuperIsland", "com.workview.SuperIsland.WE1Debug", "com.workview.SuperIsland.BM1Debug"]) else { exit(78) }
 let listener = NSXPCListener(machServiceName: KeepAwakeHelperIdentity.label)
 listener.setConnectionCodeSigningRequirement(requirement)
 listener.delegate = daemon

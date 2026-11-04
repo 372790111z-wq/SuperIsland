@@ -47,7 +47,18 @@ private let nowPlayingSupportedBrowserTargets = [
 
 @MainActor
 final class NowPlayingManager: ObservableObject {
-    static let shared = NowPlayingManager()
+    private static weak var initializedInstance: NowPlayingManager?
+    static let shared: NowPlayingManager = {
+        let instance = NowPlayingManager()
+        initializedInstance = instance
+        return instance
+    }()
+
+    /// Background-only launches may never load media. Teardown must not start
+    /// the singleton (and a new adapter process) just to shut it down.
+    static func shutdownIfInitialized() {
+        initializedInstance?.shutdownExternalProcesses()
+    }
 
     @Published var title: String = ""
     @Published var artist: String = ""

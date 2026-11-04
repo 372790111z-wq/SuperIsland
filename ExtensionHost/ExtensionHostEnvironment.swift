@@ -4,12 +4,23 @@ import Foundation
 /// need to touch the current user's extensions, credentials, or CLI configuration.
 enum ExtensionHostEnvironment {
     static let we1BundleIdentifier = "com.workview.SuperIsland.WE1Debug"
+    static let bm1BundleIdentifier = "com.workview.SuperIsland.BM1Debug"
     static var isWE1: Bool { Bundle.main.bundleIdentifier == we1BundleIdentifier }
-
-    static func applicationSupportDirectoryName(bundleIdentifier: String?) -> String {
-        bundleIdentifier == we1BundleIdentifier ? "SuperIsland-WE1-Debug" : "SuperIsland"
+    static var isIsolatedReview: Bool { isIsolatedReview(bundleIdentifier: Bundle.main.bundleIdentifier) }
+    static func isIsolatedReview(bundleIdentifier: String?) -> Bool {
+        bundleIdentifier == we1BundleIdentifier || bundleIdentifier == bm1BundleIdentifier
     }
 
+    static func applicationSupportDirectoryName(bundleIdentifier: String?) -> String {
+        switch bundleIdentifier {
+        case we1BundleIdentifier: return "SuperIsland-WE1-Debug"
+        case bm1BundleIdentifier: return "SuperIsland-BM1-Review"
+        default: return "SuperIsland"
+        }
+    }
+
+    // The isWE1 argument and persisted opt-in key below are retained for
+    // source/storage compatibility; callers pass the isolated-review policy.
     static func discoveryDirectories(
         isWE1: Bool,
         installed: URL,

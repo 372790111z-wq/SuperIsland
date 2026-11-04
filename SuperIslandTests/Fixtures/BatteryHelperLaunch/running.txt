@@ -1,0 +1,93 @@
+system/com.workview.SuperIsland.BatteryManagementHelper = {
+	active count = 2
+	path = (submitted by smd.341)
+	type = Submitted
+	managed_by = com.apple.xpc.ServiceManagement
+	state = running
+
+	program identifier = Contents/MacOS/BatteryManagementHelper (mode: 2)
+	parent bundle identifier = com.workview.SuperIsland.BM1Debug
+	parent bundle version = 20261102070936
+	BTM uuid = F9C6B908-FC5C-4761-B0C4-5607C2E3D03C
+	arguments = {
+		Contents/MacOS/BatteryManagementHelper
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.workview.SuperIsland.BatteryManagementHelper
+	}
+
+	LWCR = {
+		"reqs" => {
+			"cdhash" => {
+				"$in" => [
+					0 = 				]
+			}
+		}
+		"vers" => 1
+		"comp" => 1
+		"ccat" => 0
+	}
+
+	domain = system
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	pid = 28525
+	immediate reason = speculative
+	forks = 2
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	endpoints = {
+		"com.workview.SuperIsland.BatteryManagementHelper" = {
+			port = 0x998d3
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	resource coalition = {
+		ID = 154541
+		type = resource
+		state = active
+		active count = 1
+		name = com.workview.SuperIsland.BatteryManagementHelper
+	}
+
+	jetsam coalition = {
+		ID = 154542
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.workview.SuperIsland.BatteryManagementHelper
+	}
+
+	spawn type = background (5)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	submitted job. ignore execute allowed
+	jetsam thread limit = 32
+	cpumon = default
+	job state = running
+	sanitizer flags = 0x0
+
+	properties = partial import | keepalive | runatload | resolve program | has LWCR
+}
