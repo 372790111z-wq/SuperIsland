@@ -102,7 +102,7 @@ final class KeepAwakeTaskIdentityTests: XCTestCase {
         var status: SMAppService.Status = .enabled
         let transport = RecoveryAuthorizationTransport()
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
-            remoteProxyFactory: { _, _ in transport }, requestTimeout: 1)
+            remoteProxyFactory: { _, _ in transport }, requestTimeout: 1, conflictReader: { nil })
         client.authorize()
         let readyDeadline = KeepAwakeClock.now() + 1
         while !client.enabled && KeepAwakeClock.now() < readyDeadline { await Task.yield() }

@@ -364,7 +364,7 @@ final class KeepAwakeHelperRecoveryTests: XCTestCase {
                 transport.errors.append(error)
                 transport.disconnects.append(disconnected)
                 return transport
-            }, requestTimeout: 1)
+            }, requestTimeout: 1, conflictReader: { nil })
     }
 
     @MainActor

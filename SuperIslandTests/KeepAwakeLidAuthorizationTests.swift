@@ -271,7 +271,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
             registerService: { registrations += 1; status = .enabled },
-            openSystemSettings: { settingsOpened += 1 })
+            openSystemSettings: { settingsOpened += 1 }, conflictReader: { nil })
         client.authorize()
         await settle()
         XCTAssertEqual(registrations, 1)
@@ -289,7 +289,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
             registerService: { registrations += 1; status = .requiresApproval },
-            openSystemSettings: { settingsOpened += 1 })
+            openSystemSettings: { settingsOpened += 1 }, conflictReader: { nil })
         client.authorize()
         XCTAssertEqual(registrations, 1)
         XCTAssertEqual(settingsOpened, 1)
@@ -311,7 +311,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
                     NSLocalizedDescriptionKey: "PRIVATE-TOKEN-FROM-DESCRIPTION",
                     NSFilePathErrorKey: "/Users/private-test/secret-file"
                 ])
-            }, openSystemSettings: { settingsOpened += 1 })
+            }, openSystemSettings: { settingsOpened += 1 }, conflictReader: { nil })
         client.authorize()
         await settle()
         XCTAssertTrue(client.enabled)
@@ -335,7 +335,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         let transport = AuthorizationTransport()
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
-            registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 })
+            registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 }, conflictReader: { nil })
         client.authorize()
         await settle()
         XCTAssertTrue(client.enabled)
@@ -354,7 +354,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         let transport = AuthorizationTransport()
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .enabled }, signingRequirement: { _ in "test-only" },
             remoteProxyFactory: transport.proxy,
-            registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 })
+            registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 }, conflictReader: { nil })
         client.authorize()
         await settle()
         client.authorize()
@@ -458,7 +458,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         let transport = AuthorizationTransport()
         transport.autoStatus = false
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { status }, signingRequirement: { _ in "test-only" },
-            remoteProxyFactory: transport.proxy, requestTimeout: 1)
+            remoteProxyFactory: transport.proxy, requestTimeout: 1, conflictReader: { nil })
         client.authorize()
         status = .requiresApproval
         transport.statusReplies[0](true, "ready")
