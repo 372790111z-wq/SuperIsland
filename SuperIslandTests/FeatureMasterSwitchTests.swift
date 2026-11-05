@@ -180,7 +180,7 @@ final class FeatureMasterSwitchTests: XCTestCase {
         let f = try Fixture(); defer { f.dispose() }
         let transport = MasterSwitchTransport()
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in },
-            serviceStatus: { .enabled }, signingRequirement: { _ in "test" }, remoteProxyFactory: { _, _ in transport })
+            serviceStatus: { .enabled }, signingRequirement: { _ in "test" }, remoteProxyFactory: { _, _ in transport }, conflictReader: { nil })
         client.authorize(); try await wait(0.05)
         client.apply(hold: true); transport.renewReply?(true, "held"); try await wait(0.05)
         XCTAssertTrue(client.hasPendingRelease)
@@ -329,7 +329,7 @@ final class FeatureMasterSwitchTests: XCTestCase {
     @MainActor func testWakeNoOwnedLeaseRetryDoesNotContactHelper() {
         let transport = MasterSwitchTransport()
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in },
-            serviceStatus: { .notRegistered }, remoteProxyFactory: { _, _ in transport })
+            serviceStatus: { .notRegistered }, remoteProxyFactory: { _, _ in transport }, conflictReader: { nil })
         client.retryOwnedRelease()
         XCTAssertFalse(client.hasPendingRelease); XCTAssertTrue(transport.releaseReplies.isEmpty)
     }
