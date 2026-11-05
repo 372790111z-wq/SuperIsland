@@ -185,3 +185,20 @@ struct BatteryCapabilityProbe {
             && !calibrationActive && !requestActive && !exitHoldActive && !experimentPending
     }
 }
+
+/// Exact audited firmware/framework pairs. A matching OS string alone is not
+/// sufficient evidence for the private preference reload contract.
+enum BatteryPreferencesPlatform {
+    enum Profile {
+        case resetsAbsentOnReload, retainsAbsentOnReload
+        var requiresExplicitMCLBaseline: Bool { self == .retainsAbsentOnReload }
+    }
+    static func profile(model: String, osBuild: String, frameworkUUID: String) -> Profile? {
+        guard model == "Mac17,2" else { return nil }
+        switch (osBuild, frameworkUUID) {
+        case ("26A434", "05E1F9B3-62E9-34DD-B111-6A3DEF44FDAC"): return .resetsAbsentOnReload
+        case ("26B123", "AE881170-6B3F-3ABE-94EC-E8210C5ECCF0"): return .retainsAbsentOnReload
+        default: return nil
+        }
+    }
+}

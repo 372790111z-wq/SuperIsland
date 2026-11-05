@@ -8,6 +8,8 @@ final class BatteryPreferencesLeaseTests: XCTestCase {
     final class Fixture {
         var values: T.Snapshot = Dictionary(uniqueKeysWithValues: K.allCases.map { ($0, V.absent) })
         var disk: BatteryOverrideLease.Journal?
+        var requiresExplicitMCLBaseline = false
+        var saves = 0
         var writes = 0
         var signals = 0
         var failSave = false
@@ -24,6 +26,7 @@ final class BatteryPreferencesLeaseTests: XCTestCase {
         func lease() -> BatteryOverrideLease {
             let lease = BatteryOverrideLease(journal: disk, read: { _ in 0 }, write: { _, _ in XCTFail("Unexpected register write") }, save: { next in
                 if self.failSave { throw BatteryControlError.recovery("save") }
+                self.saves += 1
                 self.disk = next
             })
             lease.preferencesIO = .init(snapshot: { self.values }, write: { key, desired, expected, guards, restoring in
@@ -39,8 +42,9 @@ final class BatteryPreferencesLeaseTests: XCTestCase {
                 self.signals += 1
                 XCTAssertTrue([T.Phase.signalIntent, .restoreSignalIntent].contains(self.disk!.preferences!.phase))
                 if self.failSignal { throw BatteryControlError.recovery("signal") }
-            })
-            lease.confirmPreferences = { try T.restored($0, snapshot: self.values, registrations: self.registered) }
+            }, requiresExplicitMCLBaseline: requiresExplicitMCLBaseline)
+            lease.confirmPreferences = { try T.restored($0, snapshot: self.values, registrations: self.registered,
+                requiresExplicitMCLBaseline: self.requiresExplicitMCLBaseline) }
             return lease
         }
         func active(_ target: Int = 79) throws -> BatteryOverrideLease {
@@ -50,6 +54,103 @@ final class BatteryPreferencesLeaseTests: XCTestCase {
             return lease
         }
     }
+
+    func testExactAuditedPlatformPairsOnly() {
+        let old = "05E1F9B3-62E9-34DD-B111-6A3DEF44FDAC", new = "AE881170-6B3F-3ABE-94EC-E8210C5ECCF0"
+        for model in ["Mac17,2", "Mac17,1", ""] {
+            for build in ["26A434", "26B123", "26B124", ""] {
+                for uuid in [old, new, ""] {
+                    let result = BatteryPreferencesPlatform.profile(model: model, osBuild: build, frameworkUUID: uuid)
+                    if model == "Mac17,2" && build == "26A434" && uuid == old {
+                        XCTAssertEqual(result?.requiresExplicitMCLBaseline, false)
+                    } else if model == "Mac17,2" && build == "26B123" && uuid == new {
+                        XCTAssertEqual(result?.requiresExplicitMCLBaseline, true)
+                    } else { XCTAssertNil(result) }
+                }
+            }
+        }
+    }
+    func testNewReloadRejectsMissingOrInvalidBaselineBeforeAcquiringOwnership() throws {
+        let pairs: [(V, V)] = [(.absent, .integer(80)), (.bool(false), .absent),
+            (.absent, .absent), (.integer(2), .integer(80)), (.integer(1), .integer(101))]
+        for (state, limit) in pairs {
+            let f = Fixture(); f.requiresExplicitMCLBaseline = true
+            f.values[.mclFeatureState] = state; f.values[.mclLimitValue] = limit
+            let original = f.values, lease = f.lease()
+            XCTAssertThrowsError(try lease.validatePreferencesAdmission())
+            XCTAssertThrowsError(try T.begin(snapshot: f.values, target: 79, requiresExplicitMCLBaseline: true))
+            XCTAssertEqual(f.values, original); XCTAssertNil(lease.journal); XCTAssertNil(f.disk)
+            XCTAssertEqual(lease.expires, 0); XCTAssertEqual(f.saves, 0)
+            XCTAssertEqual(f.writes, 0); XCTAssertEqual(f.signals, 0)
+        }
+    }
+    func testNewReloadRechecksBaselineAtActualApply() throws {
+        let f = Fixture(); f.requiresExplicitMCLBaseline = true
+        let lease = f.lease(); try lease.validatePreferencesAdmission()
+        try lease.renew(owner: f.owner, now: 1)
+        f.values[.mclFeatureState] = .absent
+        let saved = f.disk, count = f.saves
+        XCTAssertThrowsError(try lease.applyPreferences(target: 79, owner: f.owner, now: { 1 }))
+        XCTAssertEqual(f.disk, saved); XCTAssertEqual(f.saves, count)
+        XCTAssertEqual(f.writes, 0); XCTAssertEqual(f.signals, 0)
+    }
+    func testNewReloadKeepsLegacyMissingBaselineJournalsReadableButNeverConfirmed() throws {
+        for phase in [T.Phase.prepared, .active, .restoring, .awaitingConfirmation] {
+            let f = Fixture(); f.values[.mclFeatureState] = .absent; f.values[.mclLimitValue] = .absent
+            var record = try T.begin(snapshot: f.values, target: 79); record.phase = phase
+            let decoded = try JSONDecoder().decode(T.Record.self, from: JSONEncoder().encode(record))
+            try T.validate(decoded)
+            f.disk = .init(owner: f.owner, entries: [:], schemaVersion: 4, preferences: decoded)
+            f.requiresExplicitMCLBaseline = true
+            let original = f.disk, lease = f.lease(), io = try XCTUnwrap(lease.preferencesIO)
+            XCTAssertThrowsError(try lease.validatePreferencesAdmission())
+            XCTAssertThrowsError(try T.apply(decoded, target: 79, io: io, save: { _ in XCTFail("must not save") }, admit: {}))
+            XCTAssertThrowsError(try lease.release())
+            XCTAssertThrowsError(try T.restored(decoded, snapshot: f.values, registrations: [], requiresExplicitMCLBaseline: true))
+            XCTAssertEqual(f.disk, original); XCTAssertEqual(lease.journal, original)
+            XCTAssertEqual(f.saves, 0); XCTAssertEqual(f.writes, 0); XCTAssertEqual(f.signals, 0)
+        }
+    }
+    func testNewReloadExplicitOriginalNeedsRuntimeConfirmationBeforeJournalRemoval() throws {
+        let f = Fixture(); f.requiresExplicitMCLBaseline = true
+        let lease = f.lease(); try lease.validatePreferencesAdmission()
+        try lease.renew(owner: f.owner, now: 1)
+        try lease.applyPreferences(target: 79, owner: f.owner, now: { 1 })
+        f.registered = [79] // A posted notification has not yet been consumed.
+        XCTAssertFalse(try lease.release(owner: f.owner))
+        XCTAssertEqual(f.values[.mclLimitValue], .integer(80))
+        XCTAssertEqual(f.disk?.preferences?.phase, .awaitingConfirmation)
+        let writes = f.writes
+        f.registered = nil
+        XCTAssertFalse(try lease.release(owner: f.owner)); XCTAssertNotNil(f.disk)
+        f.registered = [80]
+        XCTAssertTrue(try lease.release(owner: f.owner)); XCTAssertNil(f.disk)
+        XCTAssertEqual(f.writes, writes)
+    }
+    func testNewReloadExplicitDisabledBaselineRestoresWithoutAssumingMissingLimit() throws {
+        let f = Fixture(); f.requiresExplicitMCLBaseline = true
+        f.values[.mclFeatureState] = .bool(false); f.registered = []
+        let original = f.values, lease = try f.active()
+        XCTAssertTrue(try lease.release(owner: f.owner))
+        for key in K.direct { XCTAssertEqual(f.values[key], original[key]) }
+    }
+    func testDeletingDiskValuesDoesNotResetNewReloadRuntimeCache() throws {
+        let f = Fixture(); f.values[.mclFeatureState] = .absent; f.values[.mclLimitValue] = .absent
+        var record = try T.begin(snapshot: f.values, target: 79)
+        var runtimeState = 1, runtimeLimit = 79
+        func reload() {
+            if let value = f.values[.mclFeatureState]?.numeric { runtimeState = Int(value) }
+            if let value = f.values[.mclLimitValue]?.numeric { runtimeLimit = Int(value) }
+        }
+        reload()
+        XCTAssertEqual(runtimeState, 1); XCTAssertEqual(runtimeLimit, 79)
+        record.phase = .awaitingConfirmation
+        XCTAssertThrowsError(try T.restored(record, snapshot: f.values, registrations: [], requiresExplicitMCLBaseline: true),
+            "Even empty registrations cannot prove a missing cached baseline")
+        f.values[.mclFeatureState] = .integer(1); f.values[.mclLimitValue] = .integer(80)
+        reload(); XCTAssertEqual(runtimeLimit, 80)
+    }
+
     func testTargetChangesKeepFirstTypedBaseline() throws {
         let f = Fixture(), original = f.values, lease = try f.active()
         try lease.applyPreferences(target: 70, owner: f.owner, now: { f.now })

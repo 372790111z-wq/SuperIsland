@@ -141,6 +141,13 @@ final class BatteryOverrideLease {
         return pulseElapsed
     }
 
+    /// Read-only admission before fault acknowledgement or acquiring ownership.
+    func validatePreferencesAdmission() throws {
+        guard let io = preferencesIO else { throw BatteryControlError.unavailable("偏好控制传输尚未确认。") }
+        guard io.requiresExplicitMCLBaseline else { return }
+        let original = try journal?.preferences?.original ?? io.snapshot()
+        try BatteryPreferencesLease.validateReloadBaseline(original, requiresExplicitMCLBaseline: true)
+    }
     func applyPreferences(target: Int, owner: UUID, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) throws {
         guard let current = journal, current.owner == owner, current.detachedExitHold != true, let io = preferencesIO,
               current.entries.keys.allSatisfy({ !$0.hasPrefix("native") }) else {
@@ -155,7 +162,8 @@ final class BatteryOverrideLease {
         let record: BatteryPreferencesLease.Record
         if let existing = current.preferences { record = existing }
         else {
-            record = try BatteryPreferencesLease.begin(snapshot: io.snapshot(), target: target)
+            record = try BatteryPreferencesLease.begin(snapshot: io.snapshot(), target: target,
+                requiresExplicitMCLBaseline: io.requiresExplicitMCLBaseline)
             try checkpointPreferences(record)
         }
         _ = try BatteryPreferencesLease.apply(record, target: target, io: io, save: checkpointPreferences, admit: admit)

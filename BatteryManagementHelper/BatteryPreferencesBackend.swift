@@ -26,15 +26,18 @@ final class BatteryPreferencesBackend {
         var snapshot: Snapshot?
         var error: String?
     }
-    init() throws { try Self.validatePlatform() }
+    private let profile: BatteryPreferencesPlatform.Profile
+    var requiresExplicitMCLBaseline: Bool { profile.requiresExplicitMCLBaseline }
+    init() throws { profile = try Self.validatePlatform() }
     static func systemString(_ name: String) throws -> String {
         var bytes = [CChar](repeating: 0, count: 128), count = bytes.count
         guard sysctlbyname(name, &bytes, &count, nil, 0) == 0, count > 1, count <= bytes.count else { throw failure() }
         return String(cString: bytes)
     }
-    static func validatePlatform() throws {
+    static func validatePlatform() throws -> BatteryPreferencesPlatform.Profile {
         #if arch(arm64)
-        guard try systemString("hw.model") == "Mac17,2", try systemString("kern.osversion") == "26A434",
+        let model = try systemString("hw.model"), osBuild = try systemString("kern.osversion")
+        guard model == "Mac17,2",
               dlopen("/System/Library/PrivateFrameworks/PowerUI.framework/Versions/A/PowerUI", RTLD_NOW | RTLD_LOCAL) != nil else { throw failure() }
         for index in 0..<_dyld_image_count() {
             guard let name = _dyld_get_image_name(index),
@@ -52,7 +55,7 @@ final class BatteryPreferencesBackend {
                 guard command.cmdsize >= MemoryLayout<load_command>.size, offset + Int(command.cmdsize) <= end else { break }
                 if command.cmd == LC_UUID, command.cmdsize == MemoryLayout<uuid_command>.size {
                     let id = base.advanced(by: offset).assumingMemoryBound(to: uuid_command.self).pointee.uuid
-                    if UUID(uuid: id).uuidString == "05E1F9B3-62E9-34DD-B111-6A3DEF44FDAC" { return }
+                    if let profile = BatteryPreferencesPlatform.profile(model: model, osBuild: osBuild, frameworkUUID: UUID(uuid: id).uuidString) { return profile }
                     break
                 }
                 offset += Int(command.cmdsize)
@@ -75,7 +78,7 @@ final class BatteryPreferencesBackend {
         }, signal: { expected, guards, restoring in
             _ = try self.call(.init(operation: "signal", expected: expected, guards: guards, restoring: restoring,
                 bootID: try Self.systemString("kern.bootsessionuuid"), expiry: ProcessInfo.processInfo.systemUptime + 3, leaseExpiry: expiry()))
-        })
+        }, requiresExplicitMCLBaseline: requiresExplicitMCLBaseline)
     }
     private func call(_ request: Request) throws -> Reply {
         try Self.fence()
@@ -172,7 +175,7 @@ final class BatteryPreferencesBackend {
               getppid() > 1, let own = try? BatteryReadWorkerExecutable.kernelCDHash(pid: getpid()),
               let parent = try? BatteryReadWorkerExecutable.kernelCDHash(pid: getppid()), own == parent else { Darwin._exit(77) }
         do {
-            try validatePlatform()
+            _ = try validatePlatform()
             guard arguments[2].utf8.count < 180_000, let data = Data(base64Encoded: arguments[2]), data.count < 131_072 else { throw failure() }
             let request = try JSONDecoder().decode(Request.self, from: data)
             if request.operation == "snapshot" { emit(.init(snapshot: try rawSnapshot())) }
