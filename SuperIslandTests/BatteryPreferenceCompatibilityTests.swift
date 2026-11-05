@@ -231,7 +231,7 @@ private final class CompatibilityTransport: BatteryManagementTransport {
     func call(_ command: BatteryManagementClient.Command) async throws -> (Bool, BatteryControlReport) {
         var reply = report; reply.timestamp = Date()
         switch command {
-        case .inspect: return (true, reply)
+        case .inspect, .refreshCapabilities: return (true, reply)
         case .release:
             releases += 1; reply.leaseHeldByRequester = false; reply.registeredTarget = nil
             return (true, reply)

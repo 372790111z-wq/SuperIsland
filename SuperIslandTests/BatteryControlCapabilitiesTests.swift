@@ -156,3 +156,85 @@ final class BatteryControlCapabilitiesTests: XCTestCase {
             validateTargets: { _ in XCTFail("Do not replace calibration with ordinary targets") })
     }
 }
+
+final class BatteryCapabilityProbeTests: XCTestCase {
+    func testTransientFailureRecoversWithoutBecomingUnsupported() {
+        var probe = BatteryCapabilityProbe()
+        probe.complete(supported: false, error: "timeout", now: 0)
+        XCTAssertEqual(probe.status, .failed)
+        var reads = 0
+        XCTAssertFalse(probe.retry(explicit: false, idle: true, now: 14, clock: { 14 }) { reads += 1; return true })
+        XCTAssertTrue(probe.retry(explicit: false, idle: true, now: 15, clock: { 19 }) { reads += 1; return true })
+        XCTAssertEqual(reads, 1); XCTAssertEqual(probe.status, .supported); XCTAssertNil(probe.failure)
+        XCTAssertFalse(probe.retry(explicit: true, idle: true, now: 100, clock: { 100 }) { XCTFail("Already supported"); return true })
+    }
+    func testRepeatedFailureExhaustsAutomaticBudgetButExplicitRetryWorks() {
+        var probe = BatteryCapabilityProbe()
+        probe.complete(supported: false, error: "launch timeout", now: 0)
+        for now in [15.0, 30] {
+            XCTAssertTrue(probe.retry(explicit: false, idle: true, now: now, clock: { now }) {
+                throw BatteryControlError.unavailable("child still unreaped")
+            })
+            XCTAssertEqual(probe.status, .failed)
+        }
+        XCTAssertEqual(probe.attempts, 3)
+        XCTAssertFalse(probe.retry(explicit: false, idle: true, now: 300, clock: { 300 }) { XCTFail(); return true })
+        XCTAssertTrue(probe.retry(explicit: true, idle: true, now: 300, clock: { 304 }) { true })
+        XCTAssertEqual(probe.status, .supported)
+    }
+    func testCooldownStartsAfterQueryCompletionAndBlocksRepeatedClicks() {
+        var probe = BatteryCapabilityProbe()
+        probe.complete(supported: false, error: "timeout", now: 0)
+        XCTAssertTrue(probe.retry(explicit: true, idle: true, now: 2, clock: { 6 }) { false })
+        XCTAssertEqual(probe.status, .unsupported)
+        XCTAssertFalse(probe.retry(explicit: true, idle: true, now: 7.99, clock: { 8 }) { XCTFail(); return true })
+        XCTAssertTrue(probe.retry(explicit: true, idle: true, now: 8, clock: { 8 }) { true })
+    }
+    func testNegativeResultDoesNotPollForever() {
+        var probe = BatteryCapabilityProbe()
+        probe.complete(supported: false, error: nil, now: 0)
+        XCTAssertEqual(probe.status, .unsupported)
+        XCTAssertFalse(probe.retry(explicit: false, idle: true, now: 100, clock: { 100 }) { XCTFail(); return true })
+        var report = BatteryControlReport(); report.capabilityProbeStatus = probe.status
+        XCTAssertFalse(report.capabilityDetectionPending)
+        report.capabilityProbeStatus = .failed
+        XCTAssertTrue(report.capabilityDetectionPending)
+        XCTAssertThrowsError(try report.capabilities.validate(.init(owner: UUID(), preferences: .init()), currentLevel: 80))
+    }
+    func testEveryOwnershipAndRecoveryBoundaryPreventsEvenARead() {
+        for index in 0..<8 {
+            let idle = BatteryCapabilityProbe.isIdle(recoveryKnown: index != 0,
+                infrastructureReady: index != 1, leaseHeld: index == 2, cutoffHeld: index == 3,
+                calibrationActive: index == 4, requestActive: index == 5, exitHoldActive: index == 6,
+                experimentPending: index == 7)
+            XCTAssertFalse(idle)
+            var probe = BatteryCapabilityProbe(); probe.complete(supported: false, error: "timeout", now: 0)
+            for explicit in [false, true] {
+                XCTAssertFalse(probe.retry(explicit: explicit, idle: idle, now: 100, clock: { 100 }) { XCTFail("Active boundary \(index)"); return true })
+            }
+            XCTAssertEqual(probe.attempts, 1)
+        }
+        XCTAssertTrue(BatteryCapabilityProbe.isIdle(recoveryKnown: true, infrastructureReady: true,
+            leaseHeld: false, cutoffHeld: false, calibrationActive: false, requestActive: false,
+            exitHoldActive: false, experimentPending: false))
+    }
+    func testProbeSuccessCannotClearDurableManualFault() throws {
+        var saved: Data?
+        let retry = BatteryManualRetry(load: { nil }, save: { saved = $0 })
+        retry.fail(owner: UUID(), operation: UUID(), reason: "control failure")
+        let fault = retry.faultID, before = saved
+        var probe = BatteryCapabilityProbe(); probe.complete(supported: false, error: "timeout", now: 0)
+        XCTAssertTrue(probe.retry(explicit: true, idle: true, now: 10, clock: { 10 }) { true })
+        XCTAssertTrue(retry.required); XCTAssertEqual(retry.faultID, fault); XCTAssertEqual(saved, before)
+        XCTAssertThrowsError(try retry.validate(.init(owner: UUID(), preferences: .init()), recovered: true))
+    }
+    func testOptionalStatusDecodesOldReportsWithoutAssumingSupport() throws {
+        var report = BatteryControlReport(); report.capabilityProbeStatus = .failed; report.capabilityProbeFailure = "timeout"
+        let encoded = try JSONEncoder().encode(report)
+        XCTAssertEqual(try JSONDecoder().decode(BatteryControlReport.self, from: encoded), report)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        json.removeValue(forKey: "capabilityProbeStatus"); json.removeValue(forKey: "capabilityProbeFailure")
+        let old = try JSONDecoder().decode(BatteryControlReport.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertTrue(old.capabilityDetectionPending); XCTAssertFalse(old.available)
+    }
+}

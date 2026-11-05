@@ -261,7 +261,7 @@ private final class AutomationCompletionTransport: BatteryManagementTransport {
     func call(_ command: BatteryManagementClient.Command) async throws -> (Bool, BatteryControlReport) {
         var report = makeReport()
         switch command {
-        case .inspect:
+        case .inspect, .refreshCapabilities:
             if suspendInspection { return try await withCheckedThrowingContinuation { inspection = $0 } }
         case .renew(let request):
             requests.append(request); report.mode = request.mode

@@ -22,7 +22,7 @@ final class BatteryExitHoldServiceTests: XCTestCase {
         func call(_ command: BatteryManagementClient.Command) async throws -> (Bool, BatteryControlReport) {
             var report = snapshot()
             switch command {
-            case .inspect: report.leaseHeldByRequester = false
+            case .inspect, .refreshCapabilities: report.leaseHeldByRequester = false
             case .renew(let request): renewals += 1; report.mode = request.mode
             case .release:
                 releases += 1; report.recoveryPending = failRelease

@@ -18,7 +18,7 @@ final class BatteryCalibrationServiceTests: XCTestCase {
             response.mechanism = "SMC CHTE"; response.dischargeSupported = true
             response.protocolVersion = protocolVersion; response.calibrationSupported = supported
             switch command {
-            case .inspect: break
+            case .inspect, .refreshCapabilities: break
             case .renew(let request):
                 commands.append(request)
                 try runtime.accept(request.calibration, owner: request.owner, preferences: request.preferences, supported: supported, date: Date())

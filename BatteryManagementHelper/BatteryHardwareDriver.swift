@@ -8,8 +8,8 @@ import Darwin
 final class BatteryHardwareDriver {
     typealias Mechanism = BatteryControlCapabilities.Backend
     let smc: BatterySMC?
-    let mechanism: Mechanism?
-    let preferencesBackend: BatteryPreferencesBackend?
+    private(set) var mechanism: Mechanism?
+    private(set) var preferencesBackend: BatteryPreferencesBackend?
     var nativeTargetKey: String { preferencesBackend == nil ? "nativeAPILimit" : "preferencesTarget" }
     var reportedMechanism: Mechanism? { mechanism == .native && preferencesBackend != nil ? .nativePreferences : mechanism }
     let dischargeKey: String?
@@ -42,8 +42,8 @@ final class BatteryHardwareDriver {
     // Writer construction/calls stay before arming cutoff or after CHIE0.
     // Periodic ownership/readback checks never enter this private connection.
     private var nativeWriter: BatteryNativeChargeClient? { try? BatteryNativeChargeClient() }
-    private let nativeReadback: BatteryNativeReadTransport?
-    let nativeReadInitializationFailure: String?
+    private var nativeReadback: BatteryNativeReadTransport?
+    private(set) var capabilityProbe = BatteryCapabilityProbe()
     private let domain = "com.apple.smartcharging.topoffprotection" as CFString
     private var lastLimitRead = -Double.infinity
     private var cachedRegistrations: Set<Int>?
@@ -70,7 +70,6 @@ final class BatteryHardwareDriver {
             nativeSupported = try reader?.value(.supported) == 1
         } catch { nativeFailure = error.localizedDescription }
         nativeReadback = reader
-        nativeReadInitializationFailure = nativeFailure
         func supports(_ key: String, _ size: Int) -> Bool { (try? probe?.read(key).bytes.count) == size }
 #if arch(arm64)
         if supports("CHTE", 4) { mechanism = .modern }
@@ -82,12 +81,42 @@ final class BatteryHardwareDriver {
         mechanism = supports("BCLM", 1) ? .intel : nil
         dischargeKey = nil
 #endif
-        preferencesBackend = mechanism == .native && !nativeCutoffReviewTrial ? try? BatteryPreferencesBackend() : nil
+        // Restoring an already-owned preferences journal must not depend on a
+        // successful capability query. Platform/ABI validation still applies;
+        // mechanism stays nil and denies all new control until probing succeeds.
+        let needsPreferencesTransport = mechanism == .native || (mechanism == nil && nativeFailure != nil)
+        preferencesBackend = needsPreferencesTransport && !nativeCutoffReviewTrial ? try? BatteryPreferencesBackend() : nil
         ledSupported = !nativeCutoffReviewTrial && supports("ACLC", 1)
         highPowerSupported = !nativeCutoffReviewTrial && (try? Self.pmset(["-g", "custom"]))
             .flatMap(BatteryEnergyConfiguration.parse)?.highPowerSupported == true
             && (try? Self.pmset(["-g", "cap"]))
                 .map(BatteryEnergyConfiguration.advertisesHighPower) == true
+        #if arch(arm64)
+        capabilityProbe.complete(supported: mechanism != nil, error: nativeFailure, now: ProcessInfo.processInfo.systemUptime)
+        #else
+        capabilityProbe.complete(supported: mechanism != nil, error: nil, now: ProcessInfo.processInfo.systemUptime)
+        #endif
+    }
+
+    /// Called only on the daemon queue while it has no active/recovery session.
+    /// Reuses the same driver; does not rerun daemon preparation or touch journals.
+    @discardableResult
+    func refreshCapabilities(explicit: Bool, idle: Bool) -> Bool {
+        #if arch(arm64)
+        guard mechanism == nil else { return false }
+        return capabilityProbe.retry(explicit: explicit, idle: idle,
+            now: ProcessInfo.processInfo.systemUptime,
+            clock: { ProcessInfo.processInfo.systemUptime }) {
+                let reader = try nativeReadback ?? BatteryNativeReadTransport()
+                nativeReadback = reader
+                guard try reader.value(.supported) == 1 else { return false }
+                if preferencesBackend == nil, !nativeCutoffReviewTrial { preferencesBackend = try? BatteryPreferencesBackend() }
+                mechanism = .native
+                return true
+            }
+        #else
+        return false
+        #endif
     }
 
     private static let nativeClientClass: AnyClass? = {
@@ -138,7 +167,7 @@ final class BatteryHardwareDriver {
 
     func writePauseRefreshCHIE(_ value: Int) throws {
         #if BATTERY_REVIEW || BATTERY_PAUSE_REFRESH
-        guard pauseRefreshTrial, preferencesBackend != nil, dischargeKey == "CHIE", let smc else {
+        guard pauseRefreshTrial, mechanism == .native, preferencesBackend != nil, dischargeKey == "CHIE", let smc else {
             throw BatteryControlError.unavailable("本包未开放单次暂停切换。")
         }
         try smc.writePauseRefreshCHIE(value)

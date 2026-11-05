@@ -2,6 +2,8 @@ import Foundation
 
 @objc protocol BatteryManagementProtocol {
     func inspect(reply: @escaping (Data) -> Void)
+    /// Bounded capability-only retry. Does not acquire ownership or clear faults.
+    func refreshCapabilities(reply: @escaping (Data) -> Void)
     /// Fixed read-only probes. The daemon rejects this while any control or
     /// recovery session exists; callers cannot choose a selector or command.
     func diagnoseNativeReads(reply: @escaping (Data) -> Void)
