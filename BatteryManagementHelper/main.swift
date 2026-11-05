@@ -235,7 +235,8 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
         if let preferences = journal.preferences {
             guard let backend = driver.preferencesBackend else { return false }
             return try BatteryPreferencesLease.restored(preferences, snapshot: backend.snapshot(),
-                registrations: driver.registeredLimits(fresh: true))
+                registrations: driver.registeredLimits(fresh: true),
+                requiresExplicitMCLBaseline: backend.requiresExplicitMCLBaseline)
         }
         let limit = journal.entries["nativeAPILimit"]?.expected
         let enabled = journal.entries["nativeAPIEnabled"]?.expected
@@ -687,7 +688,8 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
         lease.preferencesIO = backend.io(expiry: { [weak lease] in lease?.expires ?? 0 })
         lease.confirmPreferences = { record in
             try BatteryPreferencesLease.restored(record, snapshot: backend.snapshot(),
-                registrations: self.driver.registeredLimits(fresh: true))
+                registrations: self.driver.registeredLimits(fresh: true),
+                requiresExplicitMCLBaseline: backend.requiresExplicitMCLBaseline)
         }
     }
     private func refreshIdleCapabilities(explicit: Bool) {
@@ -867,6 +869,7 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
                         _ = try self.driver.targets(for: proposed, request: request, telemetry: incomingTelemetry,
                             ownedKeys: Set(lease.journal?.entries.keys.map { $0 } ?? []))
                 }
+                if self.driver.preferencesBackend != nil { try lease.validatePreferencesAdmission() }
                 guard let calibration = self.calibration else { throw BatteryControlError.unavailable("校准恢复服务尚未就绪。") }
                 if case .start = request.calibration, !calibration.isActive, let previous = self.request, previous.mode != .automatic {
                     throw BatteryControlError.conflict("当前临时模式尚未结束，请先恢复自动模式再校准。")

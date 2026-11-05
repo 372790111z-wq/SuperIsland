@@ -20,6 +20,7 @@ enum BatteryPreferencesLease {
         var snapshot: () throws -> Snapshot
         var write: (Key, Value, Value, Snapshot, Bool) throws -> Void
         var signal: (Snapshot, Snapshot, Bool) throws -> Void
+        var requiresExplicitMCLBaseline = false
     }
     static func plannedTarget(_ decision: BatteryControlDecision, currentLevel: Int, calibrating: Bool) throws -> Int {
         guard (0...100).contains(currentLevel) else { throw failure() }
@@ -53,7 +54,20 @@ enum BatteryPreferencesLease {
         default: break
         }
     }
-    static func begin(snapshot: Snapshot, target: Int) throws -> Record {
+    /// On newer PowerUI, removing these keys retains cached values. Without
+    /// explicit originals neither normalization nor absence proves restoration.
+    /// Keep this separate from schema validation so old journals stay readable.
+    static func validateReloadBaseline(_ original: Snapshot, requiresExplicitMCLBaseline: Bool) throws {
+        guard requiresExplicitMCLBaseline else { return }
+        guard let state = original[.mclFeatureState], state != .absent,
+              let limit = original[.mclLimitValue], limit != .absent else {
+            throw BatteryControlError.recovery("当前macOS需要明确的原始充电开关和上限；缺失值不能作为可恢复的基线，原设置和恢复记录已保留。")
+        }
+        try validate(state, key: .mclFeatureState)
+        try validate(limit, key: .mclLimitValue)
+    }
+    static func begin(snapshot: Snapshot, target: Int, requiresExplicitMCLBaseline: Bool = false) throws -> Record {
+        try validateReloadBaseline(snapshot, requiresExplicitMCLBaseline: requiresExplicitMCLBaseline)
         guard Set(snapshot.keys) == Set(Key.allCases) else { throw failure() }
         let originals = Dictionary(uniqueKeysWithValues: Key.direct.map { ($0, snapshot[$0]!) })
         let guards = Dictionary(uniqueKeysWithValues: Key.guards.map { ($0, snapshot[$0]!) })
@@ -90,6 +104,7 @@ enum BatteryPreferencesLease {
     static func apply(_ initial: Record, target: Int, io: IO,
                       save: (Record) throws -> Void, admit: () throws -> Void) throws -> Record {
         try validate(initial)
+        try validateReloadBaseline(initial.original, requiresExplicitMCLBaseline: io.requiresExplicitMCLBaseline)
         guard (1...100).contains(target), [.prepared, .active].contains(initial.phase), initial.prior.isEmpty else { throw failure() }
         var next = initial
         var snapshot = try io.snapshot(); try checkGuards(snapshot, next)
@@ -131,6 +146,7 @@ enum BatteryPreferencesLease {
     }
     static func restore(_ initial: Record, io: IO, save: (Record) throws -> Void) throws -> Record {
         try validate(initial)
+        try validateReloadBaseline(initial.original, requiresExplicitMCLBaseline: io.requiresExplicitMCLBaseline)
         if initial.phase == .awaitingConfirmation { return initial }
         var next = initial; next.phase = .restoring; try save(next)
         for key in Key.restoration {
@@ -163,8 +179,10 @@ enum BatteryPreferencesLease {
             && Key.direct.filter { !$0.derived }.allSatisfy { snapshot[$0] == record.expected[$0] }
             && registrations == [target]
     }
-    static func restored(_ record: Record, snapshot: Snapshot, registrations: Set<Int>?) throws -> Bool {
-        try validate(record); try checkGuards(snapshot, record)
+    static func restored(_ record: Record, snapshot: Snapshot, registrations: Set<Int>?, requiresExplicitMCLBaseline: Bool = false) throws -> Bool {
+        try validate(record)
+        try validateReloadBaseline(record.original, requiresExplicitMCLBaseline: requiresExplicitMCLBaseline)
+        try checkGuards(snapshot, record)
         guard record.phase == .awaitingConfirmation, record.prior.isEmpty,
               Key.direct.filter({ !$0.derived }).allSatisfy({ snapshot[$0] == record.original[$0] }),
               let registrations else { return false }
