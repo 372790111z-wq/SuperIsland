@@ -139,7 +139,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         let defaults = UserDefaults(suiteName: name)!; defer { defaults.removePersistentDomain(forName: name) }
         var statusReads = 0
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in },
-            serviceStatus: { statusReads += 1; return .notRegistered }, signingRequirement: { _ in nil })
+            serviceStatus: { statusReads += 1; return .notRegistered }, signingRequirement: { _ in nil }, conflictReader: { nil })
         let service = KeepAwakeService(defaults: defaults, root: root, codexAvailability: { false }, lidClient: client)
         service.start(); await service.recap.flush(); service.tick(); await service.recap.flush()
         var notifications = 0
@@ -155,7 +155,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         var status = SMAppService.Status.enabled
         var queries = 0
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in },
-            serviceStatus: { queries += 1; return status }, signingRequirement: { _ in nil })
+            serviceStatus: { queries += 1; return status }, signingRequirement: { _ in nil }, conflictReader: { nil })
         XCTAssertEqual(queries, 1)
         for _ in 0..<1_000 { XCTAssertTrue(client.registered); XCTAssertFalse(client.requiresApproval) }
         XCTAssertEqual(queries, 1)
@@ -370,7 +370,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         var registrations = 0
         var settingsOpened = 0
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .notFound }, signingRequirement: { _ in "test-only" },
-            registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 })
+            registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 }, conflictReader: { nil })
         client.authorize()
         XCTAssertEqual(registrations, 1)
         XCTAssertEqual(settingsOpened, 0)
@@ -383,7 +383,7 @@ final class KeepAwakeLidAuthorizationTests: XCTestCase {
         var registrations = 0
         var settingsOpened = 0
         let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .notFound }, signingRequirement: { _ in nil },
-            registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 })
+            registerService: { registrations += 1 }, openSystemSettings: { settingsOpened += 1 }, conflictReader: { nil })
         client.authorize()
         XCTAssertEqual(registrations, 0)
         XCTAssertEqual(settingsOpened, 0)
