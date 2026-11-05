@@ -37,14 +37,7 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
     private let controlLog = Logger(subsystem: BatteryManagementIdentity.label, category: "control")
 
     func prepare() {
-        report.mechanism = driver.reportedMechanism?.rawValue ?? "此设备没有可用的充电控制接口"
-        report.dischargeSupported = driver.dischargeSupported
-        report.minimumDischargeTarget = driver.minimumDischargeTarget
-        report.dischargeMechanism = driver.dischargeMechanism
-        report.ledSupported = driver.ledSupported
-        report.highPowerSupported = driver.highPowerSupported
-        report.calibrationSupported = driver.calibrationSupported
-        report.nativeCutoffReviewTrial = driver.nativeCutoffReviewTrial
+        updateCapabilityReport()
         #if BATTERY_REVIEW
         report.preferences79Review = preferences79.canStart
         preferences79.afterRecovery = { [weak self] in
@@ -140,13 +133,7 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
             let retryStore = BatteryLeaseJournalStore(directory: directory, name: "manual-retry")
             manualRetry = BatteryManualRetry(load: retryStore.load, save: { try retryStore.save($0) })
             pauseRefreshTicket = BatteryPauseRefreshTicket(directory: directory)
-            if let backend = driver.preferencesBackend, let lease {
-                lease.preferencesIO = backend.io(expiry: { [weak lease] in lease?.expires ?? 0 })
-                lease.confirmPreferences = { record in
-                    try BatteryPreferencesLease.restored(record, snapshot: backend.snapshot(),
-                        registrations: self.driver.registeredLimits(fresh: true))
-                }
-            }
+            attachPreferencesBackend()
             let cutoffFile = directory.appendingPathComponent("cutoff.json")
             var cutoffRecord: BatteryCutoffSession.Record?
             if fm.fileExists(atPath: cutoffFile.path) {
@@ -211,9 +198,8 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
             if cutoff?.recovering == true { report.message = cutoff!.message }
             else {
                 report.message = report.available ? "辅助程序就绪；尚未开始控制" : "设备没有可用的控制接口；仅显示电池读数"
-                if driver.mechanism == nil, let failure = driver.nativeReadInitializationFailure {
-                    report.preserveFailure(stage: "初始化原生读取", detail: failure)
-                    report.message = "原生读取尚未确认，未启用控制：" + failure
+                if report.capabilityDetectionPending {
+                    report.message = "系统电池接口暂未检测成功；已保留设置，将有限次重试，也可点击重新检查。"
                 }
             }
         } catch { record(error) }
@@ -404,6 +390,7 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
         // The watchdog still attempts restoration, even after a write failed.
     }
     private func tick() {
+        refreshIdleCapabilities(explicit: false)
         guard !BatteryPreferences79Identity.pending else { return }
         #if BATTERY_REVIEW
         guard !preferences79.blocksNormalControl else { return }
@@ -682,7 +669,57 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
             required: decision.forceDischarge || decision.inhibit, charging: telemetry.charging,
             now: ProcessInfo.processInfo.systemUptime)
     }
+    private func updateCapabilityReport() {
+        report.capabilityProbeStatus = driver.capabilityProbe.status
+        report.capabilityProbeFailure = driver.capabilityProbe.failure
+        report.mechanism = driver.reportedMechanism?.rawValue
+            ?? (report.capabilityDetectionPending ? "充电接口尚未确认" : "此设备没有可用的充电控制接口")
+        report.dischargeSupported = driver.dischargeSupported
+        report.minimumDischargeTarget = driver.minimumDischargeTarget
+        report.dischargeMechanism = driver.dischargeMechanism
+        report.ledSupported = driver.ledSupported
+        report.highPowerSupported = driver.highPowerSupported
+        report.calibrationSupported = driver.calibrationSupported
+        report.nativeCutoffReviewTrial = driver.nativeCutoffReviewTrial
+    }
+    private func attachPreferencesBackend() {
+        guard let backend = driver.preferencesBackend, let lease else { return }
+        lease.preferencesIO = backend.io(expiry: { [weak lease] in lease?.expires ?? 0 })
+        lease.confirmPreferences = { record in
+            try BatteryPreferencesLease.restored(record, snapshot: backend.snapshot(),
+                registrations: self.driver.registeredLimits(fresh: true))
+        }
+    }
+    private func refreshIdleCapabilities(explicit: Bool) {
+        var experimentPending = BatteryPreferences79Identity.pending
+        #if BATTERY_REVIEW
+        experimentPending = experimentPending || preferences79.blocksNormalControl
+        #endif
+        let idle = BatteryCapabilityProbe.isIdle(recoveryKnown: !recoveryUnknown,
+            infrastructureReady: !diagnosticOnly && controlLock >= 0 && lease != nil && cutoff != nil && calibration != nil,
+            leaseHeld: lease?.journal != nil, cutoffHeld: cutoff?.record != nil,
+            calibrationActive: calibration?.isActive == true, requestActive: request != nil,
+            exitHoldActive: exitHoldVerification != nil || pauseRefreshVerification != nil,
+            experimentPending: experimentPending)
+        guard driver.refreshCapabilities(explicit: explicit, idle: idle) else { return }
+        attachPreferencesBackend()
+        updateCapabilityReport()
+        report.available = driver.mechanism != nil && !failed
+        // Capability detection is not acknowledgement of a durable control fault.
+        guard manualRetry?.required == false, !failed, report.lastFailure == nil else { return }
+        switch driver.capabilityProbe.status {
+        case .supported: report.message = "电池接口已确认；辅助程序就绪，尚未开始控制。"
+        case .unsupported: report.message = "未检测到可用的充电控制接口；仅显示电池读数。"
+        case .failed, .unknown: report.message = "系统电池接口暂未检测成功；设置已保留，请稍后重新检查。"
+        }
+    }
     func inspect(reply: @escaping (Data) -> Void) { queue.async { reply(self.data()) } }
+    func refreshCapabilities(reply: @escaping (Data) -> Void) {
+        queue.async {
+            self.refreshIdleCapabilities(explicit: true)
+            reply(self.data())
+        }
+    }
     func diagnoseNativeReads(reply: @escaping (Data) -> Void) {
         #if BATTERY_REVIEW || DEBUG
         queue.async {

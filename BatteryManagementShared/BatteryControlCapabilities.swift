@@ -149,3 +149,39 @@ enum BatteryControlAdmission {
     }
 }
 #endif
+
+/// A failed query is unknown capability, not a negative capability result.
+/// The probe owns no lease, fault acknowledgement, preference or hardware write.
+struct BatteryCapabilityProbe {
+    enum Status: String, Codable { case unknown, failed, supported, unsupported }
+    private(set) var status: Status = .unknown
+    private(set) var failure: String?
+    private(set) var attempts = 0
+    private var completedAt = -Double.infinity
+
+    mutating func complete(supported: Bool, error: String?, now: TimeInterval) {
+        attempts += 1
+        completedAt = now
+        status = supported ? .supported : error == nil ? .unsupported : .failed
+        failure = supported ? nil : error.map { String($0.prefix(768)) }
+    }
+
+    /// Automatic retries stop after three total attempts. Explicit checks can
+    /// retry later, but repeated clicks cannot continuously spawn subprocesses.
+    mutating func retry(explicit: Bool, idle: Bool, now: TimeInterval,
+                        clock: () -> TimeInterval, query: () throws -> Bool) -> Bool {
+        guard idle, status != .supported, now.isFinite,
+              now - completedAt >= (explicit ? 2 : 15),
+              explicit || (status == .failed && attempts < 3) else { return false }
+        do { complete(supported: try query(), error: nil, now: clock()) }
+        catch { complete(supported: false, error: error.localizedDescription, now: clock()) }
+        return true
+    }
+
+    static func isIdle(recoveryKnown: Bool, infrastructureReady: Bool,
+                       leaseHeld: Bool, cutoffHeld: Bool, calibrationActive: Bool,
+                       requestActive: Bool, exitHoldActive: Bool, experimentPending: Bool) -> Bool {
+        recoveryKnown && infrastructureReady && !leaseHeld && !cutoffHeld
+            && !calibrationActive && !requestActive && !exitHoldActive && !experimentPending
+    }
+}

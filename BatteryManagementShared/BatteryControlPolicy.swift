@@ -300,11 +300,17 @@ struct BatteryControlReport: Codable, Equatable {
     var completedOperationID: UUID?
     var completionReason: BatteryOperationCompletionReason?
     var completionReceiptsSupported: Bool? = true
-    static let currentProtocolVersion = 17
+    static let currentProtocolVersion = 18
     // Optional so older helpers can be decoded and rejected before any renew.
     var protocolVersion: Int? = currentProtocolVersion
     var controlEpoch: UUID? = UUID()
     var nativeCutoffReviewTrial: Bool? = false
+    var capabilityProbeStatus: BatteryCapabilityProbe.Status?
+    var capabilityProbeFailure: String?
+    var capabilityDetectionPending: Bool {
+        capabilityProbeStatus == .failed || capabilityProbeStatus == .unknown
+            || (capabilityProbeStatus == nil && capabilities.backend == nil)
+    }
     var available = false
     var mechanism = "尚未检测"
     var message = "尚未检测"

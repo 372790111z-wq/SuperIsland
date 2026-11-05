@@ -276,6 +276,9 @@ final class BatteryManagementService: ObservableObject {
         BatteryPreferenceCompatibility.taskWarning(task, report: report, preferences: preferences)
     }
     private var incompatiblePreferencesMessage: String? {
+        if report.capabilityDetectionPending {
+            return "电池控制能力尚未确认；已保留全部规则，请重新检查，无需关闭已保存的功能。"
+        }
         let issues = BatteryPreferenceCompatibility.issues(preferences, report: report)
         guard !issues.isEmpty else { return nil }
         return "充电控制保持关闭；仍有当前不可执行的已保存规则：" + issues.map(\.title).joined(separator: "、") + "。请逐项关闭或调整后再启用。"
@@ -526,7 +529,7 @@ final class BatteryManagementService: ObservableObject {
         }
         refreshTelemetry()
         let result: Result<(Bool, BatteryControlReport), Error>
-        do { result = .success(try await client.call(.inspect)) }
+        do { result = .success(try await client.call(.refreshCapabilities)) }
         catch { result = .failure(error) }
         guard inspectedRevision == revision, !authorizing, !terminationRequested else { return }
         switch result {
@@ -544,8 +547,10 @@ final class BatteryManagementService: ObservableObject {
         }
     }
 
+    private var capabilityRefreshRequested = false
     func retry() {
         guard !authorizing, !terminationRequested else { return }
+        capabilityRefreshRequested = true
         if report.requiresManualRetry == true { faultAcknowledged = true; wantsEnabled = true; operationID = UUID(); acknowledgedFaultID = nil }
         queueSync()
     }
@@ -838,7 +843,9 @@ final class BatteryManagementService: ObservableObject {
                     }
                     authorizationError = nil
                     if !mayOwnOverrides || faultAcknowledged {
-                        let (_, response) = try await client.call(.inspect)
+                        let refresh = capabilityRefreshRequested && !mayOwnOverrides
+                        capabilityRefreshRequested = false
+                        let (_, response) = try await client.call(refresh ? .refreshCapabilities : .inspect)
                         // Inspection may yield to shutdown, manual off, or a newer request.
                         // Re-enter the loop before acquiring any new hardware ownership.
                         guard currentRevision == revision, wantsEnabled, !terminationRequested else {

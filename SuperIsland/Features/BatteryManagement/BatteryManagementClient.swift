@@ -57,7 +57,7 @@ extension BatteryManagementTransport {
 
 @MainActor
 final class BatteryManagementClient: BatteryManagementTransport {
-    enum Command { case inspect, renew(BatteryControlRequest), release(UUID) }
+    enum Command { case inspect, refreshCapabilities, renew(BatteryControlRequest), release(UUID) }
     static let readOnlyPreviewIdentifier = "com.workview.SuperIsland.BM1ReadOnlyPreview"
     static func defaultTransport() -> any BatteryManagementTransport {
         if Bundle.main.bundleIdentifier == readOnlyPreviewIdentifier { return BatteryReadOnlyPreviewTransport() }
@@ -189,7 +189,9 @@ final class BatteryManagementClient: BatteryManagementTransport {
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             Task { [weak self] in
-                try? await Task.sleep(for: .seconds(5))
+                let timeout: Double
+                if case .refreshCapabilities = command { timeout = 10 } else { timeout = 5 }
+                try? await Task.sleep(for: .seconds(timeout))
                 self?.finish(id, result: .failure(BatteryControlError.unavailable("辅助程序响应超时；实际状态未确认。")))
             }
             guard let remote = connection?.remoteObjectProxyWithErrorHandler({ [weak self] _ in
@@ -211,6 +213,7 @@ final class BatteryManagementClient: BatteryManagementTransport {
             }
             switch command {
             case .inspect: remote.inspect { reply(true, $0) }
+            case .refreshCapabilities: remote.refreshCapabilities { reply(true, $0) }
             case .renew(let request):
                 do { remote.renew(request: try JSONEncoder().encode(request), reply: reply) }
                 catch { finish(id, result: .failure(error)) }

@@ -606,6 +606,7 @@ private final class BatteryTestTransport: BatteryManagementTransport {
     var renewals: [BatteryControlRequest] = []
     var releases = 0
     var inspectCount = 0
+    var capabilityRefreshCount = 0
     var failRenewal = false
     var controlFault = false
     var failRelease = false
@@ -638,7 +639,8 @@ private final class BatteryTestTransport: BatteryManagementTransport {
         report.highPowerSupported = highPowerSupported
         report.requiresManualRetry = controlFault
         switch command {
-        case .inspect:
+        case .inspect, .refreshCapabilities:
+            if case .refreshCapabilities = command { capabilityRefreshCount += 1 }
             inspectCount += 1
             if let inspectReply { return try await inspectReply() }
             return (true, inspectReport ?? report)
@@ -1220,6 +1222,7 @@ final class BatteryManagementServiceTests: XCTestCase {
         defer { service.shutdown() }
         await service.recheckStatus()
         XCTAssertEqual(transport.inspectCount, 1)
+        XCTAssertEqual(transport.capabilityRefreshCount, 1)
         XCTAssertTrue(service.report.available)
         XCTAssertEqual(service.report.mechanism, transport.mechanism)
         XCTAssertTrue(service.report.message.contains("充电控制保持关闭"))
@@ -1228,6 +1231,29 @@ final class BatteryManagementServiceTests: XCTestCase {
         XCTAssertEqual(transport.releases, 0)
         XCTAssertEqual(transport.registered, 0)
         XCTAssertEqual(service.preferences.limit, 80)
+    }
+
+    func testUnknownCapabilityPreservesSavedRulesAndRefreshDoesNotEnable() async throws {
+        let transport = BatteryTestTransport(), service = service(transport)
+        await service.recheckStatus() // Known fake support permits saving these user choices.
+        try service.updatePreferences { $0.automaticDischarge = true; $0.sailing = true; $0.sailingLower = 70 }
+        for _ in 0..<20 { await Task.yield() }
+        let preferences = service.preferences
+        XCTAssertTrue(preferences.automaticDischarge); XCTAssertTrue(preferences.sailing)
+        var failure = BatteryControlReport(); failure.capabilityProbeStatus = .failed
+        failure.capabilityProbeFailure = "subprocess timeout"; failure.message = "query failed"
+        transport.inspectReport = failure
+        await service.recheckStatus()
+        service.setEnabled(false)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(service.report.message.contains("无需关闭"))
+        XCTAssertEqual(service.preferences, preferences)
+        transport.inspectReport = nil
+        await service.recheckStatus()
+        XCTAssertTrue(service.report.available); XCTAssertFalse(service.enabled)
+        XCTAssertEqual(service.preferences, preferences)
+        XCTAssertTrue(transport.renewals.isEmpty); XCTAssertEqual(transport.releases, 0)
+        service.shutdown()
     }
 
     func testRepeatedStatusRefreshDoesNotAcknowledgeForeignFaultOrRecovery() async {
@@ -1319,6 +1345,47 @@ final class BatteryManagementServiceTests: XCTestCase {
         XCTAssertEqual(transport.renewals.first?.preferences.limit, 80)
         XCTAssertFalse(service.report.message.contains("stale inspection"))
         service.shutdown()
+    }
+
+    func testProbeDiagnosticsAreCollapsedButAccessibleWithoutControlWrites() async throws {
+        let transport = BatteryTestTransport(), service = service(transport)
+        var failure = BatteryControlReport()
+        failure.capabilityProbeStatus = .failed
+        failure.capabilityProbeFailure = "probe-timeout-evidence pid=2625 elapsed=4.639s"
+        failure.lastFailure = "preserved-control-fault-evidence"
+        failure.requiresManualRetry = true
+        failure.message = "系统电池接口暂未检测成功；设置已保留，请稍后重新检查。"
+        transport.inspectReport = failure
+        await service.recheckStatus()
+        defer { service.shutdown() }
+        let host = NSHostingView(rootView: BatteryManagementSettingsView(service: service)
+            .padding(24).background(Color(nsColor: .windowBackgroundColor)).preferredColorScheme(.dark))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 760, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+        let probe = BatteryPanelAXProbe(window: window, host: host)
+        try await probe.wait { probe.text.contains("诊断详情") }
+        XCTAssertFalse(probe.text.contains("probe-timeout-evidence"))
+        let triangle = try XCTUnwrap(probe.nodes().first {
+            probe.string($0, "accessibilityRole") == "AXDisclosureTriangle"
+                && (probe.string($0, "accessibilityLabel") == "诊断详情" || probe.string($0, "accessibilityTitle") == "诊断详情")
+        })
+        let selector = NSSelectorFromString("accessibilityPerformPress")
+        typealias Press = @convention(c) (AnyObject, Selector) -> Bool
+        XCTAssertTrue(triangle.responds(to: selector))
+        _ = unsafeBitCast(triangle.method(for: selector), to: Press.self)(triangle, selector)
+        try await probe.wait { probe.text.contains("probe-timeout-evidence") && probe.text.contains("preserved-control-fault-evidence") }
+        XCTAssertTrue(transport.renewals.isEmpty); XCTAssertEqual(transport.releases, 0)
+        XCTAssertFalse(service.enabled); XCTAssertEqual(service.report.requiresManualRetry, true)
+        try await Task.sleep(for: .milliseconds(350)) // Allow native disclosure animation to finish.
+        host.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        let output = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("build/unified-delivery/probe-recovery/native-diagnostics.png")
+        try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output)
     }
 
     func testNativeRecheckButtonRefreshesDisabledController() async throws {

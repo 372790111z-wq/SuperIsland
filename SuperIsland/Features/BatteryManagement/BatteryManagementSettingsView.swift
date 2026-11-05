@@ -260,9 +260,12 @@ struct BatteryManagementSettingsView: View {
         }.dataAnnotationID("si.bm.master")
     }
     private var failureRecord: AnyView {
-        guard let failure = service.report.lastFailure else { return AnyView(EmptyView()) }
-        return AnyView(
-            BatteryStatusText(text: "失败记录：" + failure, failure: true))
+        let failures = [service.report.lastFailure, service.report.capabilityProbeFailure].compactMap { $0 }
+        guard !failures.isEmpty else { return AnyView(EmptyView()) }
+        return AnyView(DisclosureGroup("诊断详情") {
+            BatteryStatusText(text: failures.joined(separator: "\n"), failure: true)
+                .textSelection(.enabled)
+        }.font(.caption).foregroundStyle(.secondary))
     }
     // Keep the eight heterogeneous settings sections behind one view boundary.
     // Editing state lives on this parent, so switching sections preserves it

@@ -416,7 +416,7 @@ final class BatteryLidLockServiceIntegrationTests: XCTestCase {
             case .release:
                 var released = report(); released.leaseHeldByRequester = false
                 return (true, released)
-            case .inspect:
+            case .inspect, .refreshCapabilities:
                 if suspendInspection { return try await withCheckedThrowingContinuation { pending = $0 } }
             }
             return (true, report())
