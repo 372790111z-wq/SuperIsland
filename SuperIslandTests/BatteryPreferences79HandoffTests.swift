@@ -3,6 +3,62 @@ import Darwin
 @testable import SuperIsland
 
 final class BatteryPreferences79HandoffTests: XCTestCase {
+    func testFenceRetriesTimeoutWithANewCompleteList() throws {
+        var clock: Double = 0, lists = 0, seen: [pid_t] = []
+        try BatteryPreferencesProcessFence.check(caller: 99, processIDs: {
+            lists += 1; return lists == 1 ? [10, 11] : [10, 11, 12]
+        }, observe: { pid in
+            seen.append(pid)
+            if lists == 1 { clock = 1.01 }
+            return .path("/usr/bin/unrelated")
+        }, now: { clock })
+        XCTAssertEqual(lists, 2); XCTAssertEqual(seen, [10, 10, 11, 12])
+    }
+    func testFenceRejectsWorkerAppearingInFreshRetryList() {
+        var clock: Double = 0, lists = 0
+        XCTAssertThrowsError(try BatteryPreferencesProcessFence.check(caller: 99, processIDs: {
+            lists += 1; return lists == 1 ? [10] : [10, 12]
+        }, observe: { pid in
+            if lists == 1 { clock = 1.01 }
+            return .path(pid == 12 ? "/private/cache/BatteryManagementHelper" : "/usr/bin/unrelated")
+        }, now: { clock }))
+        XCTAssertEqual(lists, 2)
+    }
+    func testFenceNeverRetriesUnknownIdentityOrKnownWorker() {
+        for result in [BatteryHandoffProcessIdentity.PathResolution.unresolved("unknown"),
+                       .path("/private/com.workview.SuperIsland.BatteryManagementHelper/read-workers/hash/worker")] {
+            var lists = 0
+            XCTAssertThrowsError(try BatteryPreferencesProcessFence.check(caller: 99, processIDs: {
+                lists += 1; return [10]
+            }, observe: { _ in result }, now: { 0 }))
+            XCTAssertEqual(lists, 1)
+        }
+    }
+    func testFenceLastSlowProcessCannotBeAcceptedAndRetriesAreBounded() {
+        var clock: Double = 0, lists = 0, reads = 0
+        XCTAssertThrowsError(try BatteryPreferencesProcessFence.check(caller: 99, processIDs: {
+            lists += 1; return [10]
+        }, observe: { _ in
+            reads += 1; clock += 1.01; return .exited
+        }, now: { clock }))
+        XCTAssertEqual(lists, 2); XCTAssertEqual(reads, 2)
+    }
+    func testFenceOverallDeadlineCannotStartASecondScan() {
+        var clock: Double = 0, lists = 0
+        XCTAssertThrowsError(try BatteryPreferencesProcessFence.check(caller: 99, processIDs: {
+            lists += 1; return [10]
+        }, observe: { _ in clock += 3.01; return .unrelatedSigned }, now: { clock }))
+        XCTAssertEqual(lists, 1)
+    }
+    func testFenceRejectsClockFailureAndIncompleteList() {
+        var clock: Double = 2
+        XCTAssertThrowsError(try BatteryPreferencesProcessFence.check(caller: 99, processIDs: { [10] },
+            observe: { _ in clock = 1; return .exited }, now: { clock }))
+        XCTAssertThrowsError(try BatteryPreferencesProcessFence.check(caller: 99, processIDs: { [] },
+            observe: { _ in XCTFail(); return .exited }, now: { 0 }))
+        XCTAssertThrowsError(try BatteryPreferencesProcessFence.check(caller: 99, processIDs: { [10] },
+            observe: { _ in XCTFail(); return .exited }, now: { .nan }))
+    }
     func testOnlyStableKernelZombieCanBeExcludedAsExited() {
         let value = BatteryHandoffProcessIdentity.ExitedProcess(pid: 12, birthSeconds: 50,
             birthMicroseconds: 20, uid: 501, status: SZOMB)

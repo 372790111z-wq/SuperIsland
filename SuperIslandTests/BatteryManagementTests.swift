@@ -1848,6 +1848,18 @@ final class BatteryManagementServiceTests: XCTestCase {
         await service.attemptStartupForTesting()
         XCTAssertFalse(service.enabled); XCTAssertTrue(transport.renewals.isEmpty); XCTAssertTrue(service.report.message.contains("AlDente"))
     }
+    func testIdenticalWriteAndRecoveryErrorsAreNotDuplicated() async {
+        let transport = BatteryTestTransport(); transport.failRenewal = true
+        transport.releaseReply = {
+            var reply = BatteryControlReport(); reply.message = "write failed"
+            reply.recoveryPending = true; reply.leaseHeldByRequester = true
+            return (false, reply)
+        }
+        let service = service(transport); defer { service.shutdown() }
+        await service.attemptStartupForTesting()
+        XCTAssertEqual(service.report.message, "write failed")
+        XCTAssertTrue(service.report.recoveryPending); XCTAssertFalse(service.enabled)
+    }
     func testFailedWriteAttemptsRestorationAndKeepsFailureVisible() async {
         let transport = BatteryTestTransport(); transport.failRenewal = true
         let service = service(transport)

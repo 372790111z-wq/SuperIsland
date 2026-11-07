@@ -687,9 +687,17 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
         guard let backend = driver.preferencesBackend, let lease else { return }
         lease.preferencesIO = backend.io(expiry: { [weak lease] in lease?.expires ?? 0 })
         lease.confirmPreferences = { record in
-            try BatteryPreferencesLease.restored(record, snapshot: backend.snapshot(),
-                registrations: self.driver.registeredLimits(fresh: true),
-                requiresExplicitMCLBaseline: backend.requiresExplicitMCLBaseline)
+            let snapshot = try backend.snapshot()
+            let registrations = self.driver.registeredLimits(fresh: true)
+            let restored = try BatteryPreferencesLease.restored(record, snapshot: snapshot,
+                registrations: registrations, requiresExplicitMCLBaseline: backend.requiresExplicitMCLBaseline)
+            if !restored {
+                self.report.available = false
+                self.report.message = BatteryPreferencesLease.pendingRestorationMessage(record,
+                    snapshot: snapshot, registrations: registrations,
+                    powered: BatteryTelemetry.read().powerSupplyObservation)
+            }
+            return restored
         }
     }
     private func refreshIdleCapabilities(explicit: Bool) {

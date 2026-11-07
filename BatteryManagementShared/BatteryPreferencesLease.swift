@@ -190,6 +190,19 @@ enum BatteryPreferencesLease {
         guard let limit = record.original[.mclLimitValue]?.numeric else { return false }
         return registrations == [Int(limit)]
     }
+    /// Explain a pending confirmation without treating absent registrations as
+    /// proof that an enabled original was restored. Historical faults stay separate.
+    static func pendingRestorationMessage(_ record: Record, snapshot: Snapshot,
+                                          registrations: Set<Int>?, powered: Bool?) -> String {
+        guard Key.direct.filter({ !$0.derived }).allSatisfy({ snapshot[$0] == record.original[$0] }) else {
+            return "原始电池偏好尚未一致读回；恢复记录已保留。"
+        }
+        guard let registrations else { return "原始电池偏好已读回；系统充电目标暂不可读，恢复尚未确认。" }
+        if registrations.isEmpty && powered == false {
+            return "原始电池偏好已读回；当前未接电，等待系统充电目标登记后确认恢复。"
+        }
+        return "原始电池偏好已读回；等待系统充电目标恢复一致，恢复记录已保留。"
+    }
     private static func failure() -> BatteryControlError { .recovery("带类型电池偏好事务未确认，保留恢复责任。") }
 }
 #endif

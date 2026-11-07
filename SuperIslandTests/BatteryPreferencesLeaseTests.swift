@@ -55,6 +55,16 @@ final class BatteryPreferencesLeaseTests: XCTestCase {
         }
     }
 
+    func testPendingRestorationSeparatesUnpluggedRegistrationFromUnconfirmedPreferences() throws {
+        let f = Fixture()
+        var record = try T.begin(snapshot: f.values, target: 79); record.phase = .awaitingConfirmation
+        XCTAssertFalse(try T.restored(record, snapshot: f.values, registrations: [], requiresExplicitMCLBaseline: true))
+        XCTAssertTrue(T.pendingRestorationMessage(record, snapshot: f.values, registrations: [], powered: false).contains("当前未接电"))
+        XCTAssertFalse(T.pendingRestorationMessage(record, snapshot: f.values, registrations: [], powered: nil).contains("当前未接电"))
+        XCTAssertTrue(T.pendingRestorationMessage(record, snapshot: f.values, registrations: nil, powered: false).contains("暂不可读"))
+        f.values[.mclLimitValue] = .integer(79)
+        XCTAssertTrue(T.pendingRestorationMessage(record, snapshot: f.values, registrations: [], powered: false).contains("尚未一致读回"))
+    }
     func testExactAuditedPlatformPairsOnly() {
         let old = "05E1F9B3-62E9-34DD-B111-6A3DEF44FDAC", new = "AE881170-6B3F-3ABE-94EC-E8210C5ECCF0"
         for model in ["Mac17,2", "Mac17,1", ""] {

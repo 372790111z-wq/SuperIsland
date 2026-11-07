@@ -166,4 +166,52 @@ enum BatteryHandoffProcessIdentity {
     }
 }
 
+/// Every attempt must examine a fresh, complete process list. A transient
+/// scheduling delay can retry once, but never authorizes a partial scan.
+enum BatteryPreferencesProcessFence {
+    static func check(caller: pid_t, processIDs: () throws -> [pid_t],
+                      observe: (pid_t) -> BatteryHandoffProcessIdentity.PathResolution,
+                      now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) throws {
+        let started = now()
+        guard started.isFinite else { throw BatteryControlError.recovery("进程隔离时钟未知。") }
+        var lastTime = started, checked = 0, lastPID: pid_t = 0
+        for attempt in 0..<2 {
+            let attemptStart = now()
+            guard attemptStart.isFinite, attemptStart >= lastTime, attemptStart - started < 3 else { break }
+            lastTime = attemptStart
+            let ids = try processIDs()
+            guard !ids.isEmpty, ids.count < 65_000 else { throw BatteryControlError.recovery("进程隔离清单无效。") }
+            var timedOut = false
+            func inTime() throws -> Bool {
+                let time = now()
+                guard time.isFinite, time >= lastTime else { throw BatteryControlError.recovery("进程隔离时钟发生变化，未开始新的写入。") }
+                lastTime = time
+                return time - attemptStart < 1 && time - started < 3
+            }
+            checked = 0
+            for pid in ids where pid > 1 && pid != caller {
+                guard try inTime() else { timedOut = true; break }
+                lastPID = pid
+                let result = observe(pid)
+                // An unknown identity or a worker is never retried as a timeout.
+                switch result {
+                case .exited, .unrelatedSigned: break
+                case .path(let path):
+                    guard URL(fileURLWithPath: path).lastPathComponent != "BatteryManagementHelper",
+                          !path.contains("/com.workview.SuperIsland.BatteryManagementHelper/read-workers/") else {
+                        throw BatteryControlError.recovery("电池偏好进程隔离检查：仍有其他电池辅助程序或旧worker（PID=\(pid)）。")
+                    }
+                case .unresolved(let detail):
+                    throw BatteryControlError.recovery("电池偏好进程隔离检查：PID=\(pid)身份未确认（\(detail)）。")
+                }
+                checked += 1
+                guard try inTime() else { timedOut = true; break }
+            }
+            if !timedOut, try inTime() { return }
+            if attempt == 1 { break }
+        }
+        throw BatteryControlError.recovery("电池偏好进程隔离检查超时；未开始新的写入。（已检查\(checked)项，最后PID=\(lastPID)，耗时\(String(format: "%.2f", max(0, lastTime - started)))秒）")
+    }
+}
+
 #endif

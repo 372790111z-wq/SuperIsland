@@ -904,7 +904,7 @@ final class BatteryManagementService: ObservableObject {
                         mayOwnOverrides = response.leaseHeldByRequester ?? !success
                         report.recoveryPending = mayOwnOverrides
                         report.cutoffPhase = response.cutoffPhase
-                        if !success { report.message += "；" + response.message }
+                        if !success && response.message != report.message { report.message += "；" + response.message }
                     } catch { report.message += "；恢复尚未确认，辅助程序将按45秒租约尝试恢复" }
                 }
             }
