@@ -84,6 +84,10 @@ final class BatteryPreferencesBackend {
         try Self.fence()
         guard let source = Bundle.main.executableURL else { throw Self.failure() }
         let worker = try BatteryReadWorkerExecutable.securedCopyOfCurrentHelper(source: source)
+        // The worker's short execution window starts after read-only fencing
+        // and signature verification; the ownership lease deadline stays fixed.
+        var request = request
+        request.expiry = ProcessInfo.processInfo.systemUptime + 3
         let payload = try JSONEncoder().encode(request)
         guard payload.count < 131_072 else { throw Self.failure() }
         let data = try BatteryNativeReadProcess.run(executable: worker,
@@ -101,36 +105,24 @@ final class BatteryPreferencesBackend {
         guard BatteryNativeReadProcess.DeferredReaper.shared.reapNow() else {
             throw BatteryControlError.recovery("电池偏好进程隔离检查：旧子进程退出尚未确认。")
         }
-        let count = proc_listallpids(nil, 0)
-        guard count > 0, count < 65_000 else {
-            throw BatteryControlError.recovery("电池偏好进程隔离检查：进程清单大小未知。")
-        }
-        var ids = [pid_t](repeating: 0, count: Int(count) + 64)
-        let read = ids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
-        guard read > 0, read < ids.count else {
-            throw BatteryControlError.recovery("电池偏好进程隔离检查：进程清单读取不完整。")
-        }
-        let deadline = ProcessInfo.processInfo.systemUptime + 1
-        for pid in ids.prefix(Int(read)) where pid > 1 && pid != getpid() {
-            guard ProcessInfo.processInfo.systemUptime < deadline else {
-                throw BatteryControlError.recovery("电池偏好进程隔离检查超时；未开始新的写入。")
+        try BatteryPreferencesProcessFence.check(caller: getpid(), processIDs: {
+            let count = proc_listallpids(nil, 0)
+            guard count > 0, count < 65_000 else {
+                throw BatteryControlError.recovery("电池偏好进程隔离检查：进程清单大小未知。")
             }
-            let result = BatteryHandoffProcessIdentity.resolvePath(observe: {
+            var ids = [pid_t](repeating: 0, count: Int(count) + 64)
+            let read = ids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
+            guard read > 0, read < ids.count else {
+                throw BatteryControlError.recovery("电池偏好进程隔离检查：进程清单读取不完整。")
+            }
+            return Array(ids.prefix(Int(read)))
+        }, observe: { pid in
+            BatteryHandoffProcessIdentity.resolvePath(observe: {
                 BatteryHandoffProcessIdentity.observePath(pid: pid)
             })
-            let path: String
-            switch result {
-            case .exited, .unrelatedSigned: continue
-            case .path(let value): path = value
-            case .unresolved(let detail):
-                throw BatteryControlError.recovery("电池偏好进程隔离检查：PID=\(pid)身份未确认（\(detail)）。")
-            }
-            guard URL(fileURLWithPath: path).lastPathComponent != "BatteryManagementHelper",
-                  !path.contains("/com.workview.SuperIsland.BatteryManagementHelper/read-workers/") else {
-                throw BatteryControlError.recovery("电池偏好进程隔离检查：仍有其他电池辅助程序或旧worker（PID=\(pid)）。")
-            }
-        }
+        })
     }
+
     private static func rawSnapshot() throws -> Snapshot {
         guard CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) else { throw failure() }
         return try Dictionary(uniqueKeysWithValues: Key.allCases.map { key in
