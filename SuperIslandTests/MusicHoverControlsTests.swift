@@ -22,6 +22,24 @@ final class MusicHoverPolicyTests: XCTestCase {
         XCTAssertEqual(MusicPlaybackMode.repeatOne.next, .shuffle)
         XCTAssertEqual(MusicPlaybackMode.shuffle.next, .sequential)
     }
+    func testTwoModeSceneCyclesWithoutRequiringShuffle() {
+        var state = MusicAdvancedSnapshot(mode: .sequential, availableModes: [.repeatOne, .sequential])
+        XCTAssertEqual(state.nextMode, .repeatOne)
+        state.mode = .repeatOne
+        XCTAssertEqual(state.nextMode, .sequential)
+    }
+    func testThreeModeSceneKeepsProductOrderRegardlessOfMenuOrder() {
+        var state = MusicAdvancedSnapshot(mode: .sequential, availableModes: [.shuffle, .repeatOne, .sequential])
+        XCTAssertEqual(state.nextMode, .repeatOne)
+        state.mode = .repeatOne; XCTAssertEqual(state.nextMode, .shuffle)
+        state.mode = .shuffle; XCTAssertEqual(state.nextMode, .sequential)
+    }
+    func testUnknownMissingOrOnlyCurrentModeDoesNotGuessATarget() {
+        XCTAssertNil(MusicAdvancedSnapshot(mode: nil, availableModes: MusicPlaybackMode.allCases).nextMode)
+        XCTAssertNil(MusicAdvancedSnapshot(mode: .shuffle, availableModes: [.sequential, .repeatOne]).nextMode)
+        XCTAssertNil(MusicAdvancedSnapshot(mode: .sequential, availableModes: []).nextMode)
+        XCTAssertNil(MusicAdvancedSnapshot(mode: .sequential, availableModes: [.sequential, .sequential]).nextMode)
+    }
     func testTrackIdentityRequiresExactTitleAndArtist() {
         let description = "歌曲名：Song - 歌手名：Artist"
         XCTAssertTrue(QQMusicControlAdapter.trackMatches(description: description, title: "Song", artist: "Artist"))
@@ -36,7 +54,8 @@ private actor ControlledMusicAdapter: MusicAdvancedAdapter {
     var actions: [MusicAdvancedAction] = []
     var pending: CheckedContinuation<MusicAdvancedSnapshot, Never>?
     var actionFence: MusicControlFence?
-    let ready = MusicAdvancedSnapshot(favorite: false, mode: .sequential, canFavorite: true, canSetMode: true)
+    var ready = MusicAdvancedSnapshot(favorite: false, mode: .sequential, availableModes: MusicPlaybackMode.allCases, canFavorite: true, canSetMode: true)
+    func setSnapshot(_ snapshot: MusicAdvancedSnapshot) { ready = snapshot }
     func read(_ context: MusicControlContext, fence: MusicControlFence) async -> MusicAdvancedSnapshot { reads += 1; return ready }
     func apply(_ action: MusicAdvancedAction, context: MusicControlContext, fence: MusicControlFence) async -> MusicAdvancedSnapshot {
         actions.append(action); actionFence = fence
@@ -99,6 +118,45 @@ final class MusicAdvancedControlsTests: XCTestCase {
         XCTAssertFalse(service.isSupported)
         let reads = await adapter.reads
         XCTAssertEqual(reads, 0)
+    }
+    func testVisibleRefreshReplacesSceneOptionsWithoutChangingTrack() async {
+        let adapter = ControlledMusicAdapter()
+        let service = NowPlayingAdvancedControls(adapter: adapter), owner = UUID()
+        service.updateContext(context())
+        service.refreshIfVisible()
+        let hiddenReads = await adapter.reads
+        XCTAssertEqual(hiddenReads, 0)
+        await adapter.setSnapshot(.init(favorite: false, mode: .repeatOne, availableModes: [.sequential, .repeatOne], canFavorite: true, canSetMode: true))
+        service.setVisible(true, owner: owner); await ready(service)
+        XCTAssertEqual(service.snapshot.nextMode, .sequential)
+        service.cycleMode(); await waitForAction(adapter)
+        let target = await adapter.lastAction
+        XCTAssertEqual(target, .mode(.sequential))
+        await adapter.finish(.init(favorite: false, mode: .sequential, availableModes: [.sequential, .repeatOne], canFavorite: true, canSetMode: true))
+        await ready(service)
+        await adapter.setSnapshot(.init(favorite: false, mode: .repeatOne, availableModes: MusicPlaybackMode.allCases, canFavorite: true, canSetMode: true))
+        service.refreshIfVisible(); await ready(service)
+        XCTAssertEqual(service.snapshot.nextMode, .shuffle)
+        XCTAssertEqual(service.snapshot.favorite, false)
+        service.setVisible(false, owner: owner)
+        let reads = await adapter.reads
+        service.refreshIfVisible()
+        let hiddenAgain = await adapter.reads
+        XCTAssertEqual(reads, hiddenAgain)
+    }
+    func testVisibleReadRecoversAfterWindowReturnsWithoutRepeatingAction() async {
+        let adapter = ControlledMusicAdapter()
+        let controls = NowPlayingAdvancedControls(adapter: adapter), owner = UUID()
+        await adapter.setSnapshot(.init(message: "QQ 主窗口未就绪"))
+        controls.updateContext(context()); controls.setVisible(true, owner: owner); await ready(controls)
+        XCTAssertNil(controls.snapshot.favorite)
+        await adapter.setSnapshot(.init(favorite: true, mode: .sequential, availableModes: [.sequential, .repeatOne], canFavorite: true, canSetMode: true))
+        controls.refreshIfVisible(); await ready(controls)
+        XCTAssertEqual(controls.snapshot.favorite, true)
+        XCTAssertNil(controls.snapshot.message)
+        let writes = await adapter.count
+        XCTAssertEqual(writes, 0)
+        controls.setVisible(false, owner: owner)
     }
     func testNamedModeTargetAndLastViewerInvalidation() async {
         let adapter = ControlledMusicAdapter()

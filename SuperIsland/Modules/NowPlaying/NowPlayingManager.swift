@@ -193,6 +193,8 @@ final class NowPlayingManager: ObservableObject {
             enabled: { AppState.shared.nowPlayingEnabled }
         ) { [weak self] in
             guard let self else { return }
+            self.updateAdvancedControlContext()
+            self.advancedControls.refreshIfVisible()
             self.refreshPreferredSource()
         }
     }
