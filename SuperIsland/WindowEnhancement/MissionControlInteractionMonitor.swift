@@ -565,9 +565,19 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 let application = AXUIElementCreateApplication(dockPID)
                 AXUIElementSetMessagingTimeout(application, 0.015)
                 var value: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(
+                let error = AXUIElementCopyAttributeValue(
                     application, kAXChildrenAttribute as CFString, &value
-                ) == .success,
+                )
+                if WindowInteractionDiagnosticRecorder.missionControlDiagnosticsEnabled {
+                    WindowInteractionDiagnosticRecorder.shared.record(
+                        component: "mission_control", event: "root_children", metadata: [
+                            "ax_error": .integer(Int64(error.rawValue)),
+                            "count": .integer(Int64((value as? [AXUIElement])?.count ?? -1)),
+                            "elapsed_ms": .integer(Int64((DispatchTime.now().uptimeNanoseconds &- started) / 1_000_000))
+                        ]
+                    )
+                }
+                guard error == .success,
                 let children = value as? [AXUIElement], children.count <= 32 else {
                     return .unavailable
                 }
@@ -2614,6 +2624,22 @@ final class MissionControlInteractionMonitor {
     }
 
     private func scheduleInspection(force: Bool = false) {
+        if WindowInteractionDiagnosticRecorder.missionControlDiagnosticsEnabled {
+            WindowInteractionDiagnosticRecorder.shared.record(
+                component: "mission_control", event: "inspection_gate", metadata: [
+                    "trusted": .flag(AXIsProcessTrusted()),
+                    "enabled": .flag(preferences.isEnabled),
+                    "mission_enabled": .flag(preferences.missionControlEnabled),
+                    "suppressed": .flag(closeInteractionState.isSuppressed),
+                    "monitor_installed": .flag(globalMonitor != nil || localMonitor != nil),
+                    "mouse_tap_installed": .flag(mouseEventTap != nil),
+                    "observed": .flag(missionControlHierarchyObserved),
+                    "inspection_in_flight": .flag(inspectionInFlight),
+                    "root_in_flight": .flag(rootRecovery.inFlight != nil),
+                    "circuit_open": .flag(inspectionCircuitOpenUntil.map { ContinuousClock.now < $0 } ?? false)
+                ]
+            )
+        }
         guard canInspectScene else {
             clearTarget()
             return
@@ -2776,6 +2802,10 @@ final class MissionControlInteractionMonitor {
         case let .valid(hit):
             markMissionControlObserved()
             guard let target = target(from: hit) else {
+                WindowInteractionDiagnosticRecorder.shared.record(
+                    component: "mission_control", event: "target_presentation",
+                    metadata: ["result": .code("ineligible_application")]
+                )
                 clearTarget()
                 break
             }
@@ -2817,6 +2847,12 @@ final class MissionControlInteractionMonitor {
         }
         currentTarget = target
         currentTargetResolvedNanoseconds = DispatchTime.now().uptimeNanoseconds
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "mission_control", event: "target_presentation", metadata: [
+                "close_enabled": .flag(preferences.isActionEnabled(.closeWindow)),
+                "can_close": .flag(target.canClose)
+            ]
+        )
         guard preferences.isActionEnabled(.closeWindow),
               target.canClose else {
             closePanel.hide()
