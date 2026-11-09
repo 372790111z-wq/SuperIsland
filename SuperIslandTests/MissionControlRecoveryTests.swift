@@ -2,6 +2,39 @@ import XCTest
 @testable import SuperIsland
 
 final class MissionControlRecoveryTests: XCTestCase {
+    func testSceneRootsSupportLegacyDockAndMultipleWindowManagerDisplays() {
+        XCTAssertTrue(MissionControlSceneRootPolicy.isRoot(provider: .dock, identifier: "mc", role: nil))
+        XCTAssertEqual(MissionControlSceneRootPolicy.presence(provider: .dock, rootCount: 1), .present)
+        XCTAssertTrue(MissionControlSceneRootPolicy.isRoot(
+            provider: .windowManager, identifier: "mc.display", role: "AXGroup"))
+        XCTAssertEqual(MissionControlSceneRootPolicy.presence(provider: .windowManager, rootCount: 2), .present)
+        XCTAssertEqual(MissionControlSceneRootPolicy.presence(provider: .windowManager, rootCount: 0), .absent)
+    }
+
+    func testSceneRootPolicyRejectsAmbiguityAndUnrelatedGroups() {
+        XCTAssertEqual(MissionControlSceneRootPolicy.presence(provider: .dock, rootCount: 2), .unavailable)
+        XCTAssertEqual(MissionControlSceneRootPolicy.presence(provider: .windowManager, rootCount: 33), .unavailable)
+        for identifier in ["mc", "mc.spaces", "mc.spaces.list", "com.openai.codex.space.1", "display"] {
+            XCTAssertFalse(MissionControlSceneRootPolicy.isRoot(
+                provider: .windowManager, identifier: identifier, role: "AXGroup"))
+        }
+        XCTAssertFalse(MissionControlSceneRootPolicy.isRoot(
+            provider: .windowManager, identifier: "mc.display", role: "AXButton"))
+        XCTAssertFalse(MissionControlSceneRootPolicy.isRoot(
+            provider: .dock, identifier: "mc.display", role: "AXGroup"))
+    }
+
+    func testSceneRootProviderRequiresBothSystemBundleAndSystemPath() {
+        for provider in [MissionControlSceneProvider.dock, .windowManager] {
+            XCTAssertTrue(MissionControlSceneRootPolicy.isSystemProvider(
+                provider, bundleIdentifier: provider.bundleIdentifier, bundlePath: provider.bundlePath))
+            XCTAssertFalse(MissionControlSceneRootPolicy.isSystemProvider(
+                provider, bundleIdentifier: provider.bundleIdentifier, bundlePath: "/Applications/Lookalike.app"))
+            XCTAssertFalse(MissionControlSceneRootPolicy.isSystemProvider(
+                provider, bundleIdentifier: "com.example.fake", bundlePath: provider.bundlePath))
+        }
+    }
+
     func testSystemWindowManagerFrameMatchesObservedThumbnailMargins() {
         XCTAssertTrue(MissionControlWindowManagerFrameMatch.accepts(
             wrapper: CGRect(x: 15, y: 230, width: 137, height: 117),

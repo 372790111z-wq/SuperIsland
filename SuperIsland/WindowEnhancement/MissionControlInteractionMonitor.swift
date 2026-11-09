@@ -20,6 +20,133 @@ enum MissionControlRootPresence: Equatable, Sendable {
     case unavailable
 }
 
+/// Only the two system-owned Mission Control providers may establish a scene.
+/// WindowManager publishes one `mc.display` group per display on current macOS.
+enum MissionControlSceneProvider: String {
+    case dock
+    case windowManager
+
+    var bundleIdentifier: String {
+        self == .dock ? "com.apple.dock" : "com.apple.WindowManager"
+    }
+    var bundlePath: String {
+        self == .dock ? "/System/Library/CoreServices/Dock.app"
+            : "/System/Library/CoreServices/WindowManager.app"
+    }
+}
+
+enum MissionControlSceneRootPolicy {
+    static func isSystemProvider(_ provider: MissionControlSceneProvider,
+                                 bundleIdentifier: String?, bundlePath: String?) -> Bool {
+        bundleIdentifier == provider.bundleIdentifier && bundlePath == provider.bundlePath
+    }
+
+    static func isRoot(provider: MissionControlSceneProvider, identifier: String, role: String?) -> Bool {
+        switch provider {
+        case .dock: return identifier == "mc"
+        case .windowManager: return identifier == "mc.display" && role == kAXGroupRole
+        }
+    }
+
+    static func presence(provider: MissionControlSceneProvider, rootCount: Int) -> MissionControlRootPresence {
+        if rootCount == 0 { return .absent }
+        switch provider {
+        case .dock: return rootCount == 1 ? .present : .unavailable
+        case .windowManager: return (1...16).contains(rootCount) ? .present : .unavailable
+        }
+    }
+}
+
+private enum MissionControlSceneRoots {
+    struct Snapshot {
+        let provider: MissionControlSceneProvider
+        let processIdentifier: pid_t
+        let elements: [AXUIElement]
+        var identity: [UInt64] {
+            [UInt64(processIdentifier)] + elements.map { UInt64(CFHash($0)) }.sorted()
+        }
+    }
+
+    enum Result {
+        case present(Snapshot)
+        case absent
+        case unavailable
+
+        var presence: MissionControlRootPresence {
+            switch self {
+            case .present: return .present
+            case .absent: return .absent
+            case .unavailable: return .unavailable
+            }
+        }
+    }
+
+    /// Bounded direct-child reads only: no arbitrary app or desktop subtree scan.
+    static func read(dockPID: pid_t, timeout: Float = 0.015) -> Result {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ 100_000_000
+        guard let dock = NSRunningApplication(processIdentifier: dockPID),
+              isSystemProvider(dock, .dock) else { return .unavailable }
+        let legacy = readChildren(of: dock, provider: .dock, timeout: timeout, deadline: deadline)
+        // An ambiguous or unreadable legacy scene never falls through.
+        guard case .absent = legacy else { return legacy }
+        let managers = NSRunningApplication.runningApplications(
+            withBundleIdentifier: MissionControlSceneProvider.windowManager.bundleIdentifier
+        ).filter { isSystemProvider($0, .windowManager) }
+        if managers.isEmpty { return .absent }
+        guard managers.count == 1, let manager = managers.first else { return .unavailable }
+        return readChildren(of: manager, provider: .windowManager, timeout: timeout, deadline: deadline)
+    }
+
+    private static func isSystemProvider(_ app: NSRunningApplication,
+                                         _ provider: MissionControlSceneProvider) -> Bool {
+        !app.isTerminated && MissionControlSceneRootPolicy.isSystemProvider(
+            provider, bundleIdentifier: app.bundleIdentifier,
+            bundlePath: app.bundleURL?.standardizedFileURL.path
+        )
+    }
+
+    private static func readChildren(of app: NSRunningApplication,
+                                     provider: MissionControlSceneProvider,
+                                     timeout: Float, deadline: UInt64) -> Result {
+        guard DispatchTime.now().uptimeNanoseconds < deadline else { return .unavailable }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, timeout)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(root, kAXChildrenAttribute as CFString, &value) == .success,
+              let children = value as? [AXUIElement], children.count <= 32 else { return .unavailable }
+        var roots: [AXUIElement] = []
+        for child in children {
+            guard DispatchTime.now().uptimeNanoseconds < deadline else { return .unavailable }
+            AXUIElementSetMessagingTimeout(child, timeout)
+            var identifierValue: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(child, "AXIdentifier" as CFString, &identifierValue)
+            if error == .attributeUnsupported || error == .noValue { continue }
+            guard error == .success, let identifier = identifierValue as? String else { return .unavailable }
+            var roleValue: CFTypeRef?
+            if provider == .windowManager, identifier == "mc.display" {
+                guard AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleValue) == .success
+                else { return .unavailable }
+            }
+            if MissionControlSceneRootPolicy.isRoot(
+                provider: provider, identifier: identifier, role: roleValue as? String
+            ) { roots.append(child) }
+        }
+        guard DispatchTime.now().uptimeNanoseconds < deadline else { return .unavailable }
+        let presence = MissionControlSceneRootPolicy.presence(provider: provider, rootCount: roots.count)
+        WindowInteractionDiagnosticRecorder.shared.record(
+            component: "mission_control", event: "scene_root_\(provider.rawValue)", metadata: [
+                "provider": .code(provider.rawValue), "count": .integer(Int64(roots.count))
+            ]
+        )
+        switch presence {
+        case .present:
+            return .present(Snapshot(provider: provider, processIdentifier: app.processIdentifier, elements: roots))
+        case .absent: return .absent
+        case .unavailable: return .unavailable
+        }
+    }
+}
+
 /// A motion-driven recovery probe is separate from a full window inspection.
 /// Invalidating a session keeps its outstanding slot occupied until completion,
 /// so a delayed AX reply cannot queue overlapping work or resurrect that session.
@@ -441,7 +568,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
     private let messagingTimeout: Float = 0.075
     private let missionControlStabilizationNanoseconds: UInt64 = 300_000_000
     private var observedMissionControlRoot: (
-        hash: CFHashCode,
+        identity: [UInt64],
         firstSeenNanoseconds: UInt64
     )?
 
@@ -560,52 +687,8 @@ private final class MissionControlAXResolver: @unchecked Sendable {
     ) {
         queue.async { [self] in
             let started = DispatchTime.now().uptimeNanoseconds
-            let result: MissionControlRootPresence = autoreleasepool {
-                guard dockPID > 0 else { return .unavailable }
-                let application = AXUIElementCreateApplication(dockPID)
-                AXUIElementSetMessagingTimeout(application, 0.015)
-                var value: CFTypeRef?
-                let error = AXUIElementCopyAttributeValue(
-                    application, kAXChildrenAttribute as CFString, &value
-                )
-                if WindowInteractionDiagnosticRecorder.missionControlDiagnosticsEnabled {
-                    WindowInteractionDiagnosticRecorder.shared.record(
-                        component: "mission_control", event: "root_children", metadata: [
-                            "ax_error": .integer(Int64(error.rawValue)),
-                            "count": .integer(Int64((value as? [AXUIElement])?.count ?? -1)),
-                            "elapsed_ms": .integer(Int64((DispatchTime.now().uptimeNanoseconds &- started) / 1_000_000))
-                        ]
-                    )
-                }
-                guard error == .success,
-                let children = value as? [AXUIElement], children.count <= 32 else {
-                    return .unavailable
-                }
-                let deadline = started &+ 45_000_000
-                var roots = 0
-                for child in children {
-                    guard DispatchTime.now().uptimeNanoseconds < deadline else {
-                        return .unavailable
-                    }
-                    AXUIElementSetMessagingTimeout(child, 0.015)
-                    var identifier: CFTypeRef?
-                    let error = AXUIElementCopyAttributeValue(
-                        child, "AXIdentifier" as CFString, &identifier
-                    )
-                    if error == .attributeUnsupported || error == .noValue { continue }
-                    guard error == .success, let identifier = identifier as? String else {
-                        return .unavailable
-                    }
-                    if normalizedAXToken(identifier) == "mc" { roots += 1 }
-                }
-                guard DispatchTime.now().uptimeNanoseconds < deadline else {
-                    return .unavailable
-                }
-                switch roots {
-                case 0: return .absent
-                case 1: return .present
-                default: return .unavailable
-                }
+            let result = autoreleasepool {
+                MissionControlSceneRoots.read(dockPID: dockPID).presence
             }
             completion(result, DispatchTime.now().uptimeNanoseconds &- started)
         }
@@ -657,7 +740,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         point: CGPoint,
         dockPID: pid_t
     ) -> MissionControlAXResolution {
-        // An absent or ambiguous current Dock scene is terminal evidence.
+        // An absent or unreadable current system scene is terminal evidence.
         // App-owned AX groups inherit the real window ID, and their ordinary
         // subrectangles are not proof of a Mission Control thumbnail.
         canonicalized(resolveFromSceneSnapshot(point: point, dockPID: dockPID))
@@ -701,20 +784,8 @@ private final class MissionControlAXResolver: @unchecked Sendable {
             return .indeterminate("close-invalid-identity")
         }
 
-        let dockApplication = AXUIElementCreateApplication(dockPID)
-        AXUIElementSetMessagingTimeout(dockApplication, 0.025)
-        let missionControlRoots = childAttributeElements(
-            kAXChildrenAttribute,
-            of: dockApplication
-        ).filter {
-            normalizedAXToken(stringAttribute("AXIdentifier", of: $0) ?? "") == "mc"
-        }
-        guard missionControlRoots.count == 1 else {
-            return .missionControlWithoutExactTarget(
-                missionControlRoots.isEmpty
-                    ? "close-mc-root-missing"
-                    : "close-mc-root-ambiguous"
-            )
+        guard case .present = MissionControlSceneRoots.read(dockPID: dockPID, timeout: 0.025) else {
+            return .missionControlWithoutExactTarget("close-mc-root-unavailable")
         }
 
         let options: CGWindowListOption = [
@@ -784,12 +855,8 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         return sizeDelta <= 12 && originDelta <= 16
     }
 
-    /// Mission Control creates a transient `AXIdentifier == "mc"` direct child
-    /// under the Dock. Hammerspoon uses the same root and documents that the
-    /// subtree is incomplete until the Mission Control animation settles.
-    /// Anchor the bounded scan to that concrete root instead of guessing across
-    /// all WindowManager/Dock windows, then geometry-hit-test only exact
-    /// AXExposeWindowGroup descendants.
+    /// Anchor the scene to the current system provider roots. Their descendants
+    /// may remain incomplete until the Mission Control animation settles.
     private func resolveFromSceneSnapshot(
         point: CGPoint,
         dockPID: pid_t
@@ -802,41 +869,18 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         let maximumTraversalDepth = 8
         let maximumVisitedNodes = 96
 
-        guard dockPID > 0 else {
+        let scene: MissionControlSceneRoots.Snapshot
+        switch MissionControlSceneRoots.read(dockPID: dockPID, timeout: 0.025) {
+        case let .present(snapshot): scene = snapshot
+        case .absent:
             observedMissionControlRoot = nil
-            return .outsideMissionControl("scene-marker-not-found-no-dock")
-        }
-        let dockApplication = AXUIElementCreateApplication(dockPID)
-        AXUIElementSetMessagingTimeout(dockApplication, 0.025)
-        let directDockChildren = childAttributeElements(
-            kAXChildrenAttribute,
-            of: dockApplication
-        )
-        let missionControlRoots = directDockChildren.filter {
-            normalizedAXToken(stringAttribute("AXIdentifier", of: $0) ?? "") == "mc"
-        }
-        let dockRootIdentifiers: Set<String> = Set(directDockChildren.compactMap {
-            let identifier = stringAttribute("AXIdentifier", of: $0) ?? ""
-            guard !identifier.isEmpty else { return nil }
-            return sanitizedDiagnosticToken(identifier)
-        }.prefix(12))
-        guard missionControlRoots.count == 1,
-              let missionControlRoot = missionControlRoots.first else {
+            return .outsideMissionControl("scene-marker-not-found-mc-root")
+        case .unavailable:
             observedMissionControlRoot = nil
-            return .outsideMissionControl(sceneDiagnosticCode(
-                prefix: missionControlRoots.isEmpty
-                    ? "scene-marker-not-found-mc-root"
-                    : "scene-marker-not-found-ambiguous-mc-root",
-                visitedCount: directDockChildren.count,
-                visitedByProvider: ["dock-direct": directDockChildren.count],
-                roles: [],
-                hints: dockRootIdentifiers
-            ))
+            return .indeterminate("scene-mc-root-unavailable")
         }
-
-        let rootHash = CFHash(missionControlRoot)
-        if observedMissionControlRoot?.hash != rootHash {
-            observedMissionControlRoot = (rootHash, started)
+        if observedMissionControlRoot?.identity != scene.identity {
+            observedMissionControlRoot = (scene.identity, started)
         }
         guard let rootObservation = observedMissionControlRoot,
               started &- rootObservation.firstSeenNanoseconds >=
@@ -848,7 +892,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         runReadOnlySceneProbe(
             point: point,
             dockPID: dockPID,
-            missionControlRoot: missionControlRoot,
+            missionControlRoot: scene.elements[0],
             now: started
         )
 #endif
@@ -861,7 +905,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         // same identity + frame model used by WINS' scene detector, without
         // relying on titles or guessing from the anonymous AX button order.
         //
-        // Keep the concrete `mc` AX root above as the session gate. That makes
+        // Keep the concrete system scene roots above as the session gate. That makes
         // a transient desktop/window animation incapable of becoming a
         // destructive Mission Control target. Only fall back to the legacy AX
         // subtree resolver if WindowServer fails to return an inventory at all.
@@ -881,7 +925,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         var observedRoles = Set<String>()
         var observedMarkerHints = Set<String>()
 
-        var pending: [(element: AXUIElement, depth: Int)] = [(missionControlRoot, 0)]
+        var pending: [(element: AXUIElement, depth: Int)] = scene.elements.map { ($0, 0) }
         var visitedHashes = Set<CFHashCode>()
 
         while !pending.isEmpty {
@@ -894,7 +938,7 @@ private final class MissionControlAXResolver: @unchecked Sendable {
             let hash = CFHash(next.element)
             guard visitedHashes.insert(hash).inserted else { continue }
             visitedCount += 1
-            visitedByProvider["dock-mc", default: 0] += 1
+            visitedByProvider[scene.provider.rawValue, default: 0] += 1
 
             let role = stringAttribute(
                 kAXRoleAttribute,
@@ -3085,16 +3129,8 @@ final class MissionControlInteractionMonitor {
     /// the hover resolver completed its first sample.
     private func missionControlRootIsCurrentlyPresent() -> Bool {
         guard let dockPID = resolvedDockPID() else { return false }
-        let dockApplication = AXUIElementCreateApplication(dockPID)
-        AXUIElementSetMessagingTimeout(dockApplication, 0.025)
-        return childAttributeElements(
-            kAXChildrenAttribute,
-            of: dockApplication
-        ).contains {
-            (stringAttribute("AXIdentifier", of: $0) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased() == "mc"
-        }
+        // A failed read is not evidence that an ordinary-window close is safe.
+        return MissionControlSceneRoots.read(dockPID: dockPID, timeout: 0.025).presence != .absent
     }
 
     private func resolveExactWindow(
