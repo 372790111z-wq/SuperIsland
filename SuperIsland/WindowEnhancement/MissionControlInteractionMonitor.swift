@@ -318,6 +318,38 @@ enum MissionControlWindowManagerFrameMatch {
     }
 }
 
+enum MissionControlStandardWindowPolicy {
+    static func allows(activationPolicy: NSApplication.ActivationPolicy,
+                       isOwnApplication: Bool, isStandardWindow: Bool, canClose: Bool) -> Bool {
+        guard activationPolicy != .prohibited else { return false }
+        if isOwnApplication || activationPolicy == .accessory {
+            return isStandardWindow && canClose
+        }
+        return activationPolicy == .regular
+    }
+}
+
+/// WindowManager's outline may enclose app-owned auxiliary dialogs as well as
+/// the main thumbnail. Bind to the system's actual thumbnail instead of widening
+/// the legacy outline margins or selecting an arbitrary window behind it.
+enum MissionControlSystemThumbnailMatch {
+    static func accepts(systemFrame: CGRect, windowFrame: CGRect,
+                        identifier: String, bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty,
+              identifier.hasPrefix(bundleIdentifier + ".space."),
+              UInt64(identifier.dropFirst((bundleIdentifier + ".space.").count)) != nil,
+              [systemFrame.minX, systemFrame.minY, systemFrame.maxX, systemFrame.maxY,
+               windowFrame.minX, windowFrame.minY, windowFrame.maxX, windowFrame.maxY]
+                .allSatisfy(\.isFinite),
+              systemFrame.width >= 24, systemFrame.height >= 24,
+              windowFrame.width >= 24, windowFrame.height >= 24 else { return false }
+        return abs(systemFrame.minX - windowFrame.minX) <= 2 &&
+            abs(systemFrame.minY - windowFrame.minY) <= 2 &&
+            abs(systemFrame.maxX - windowFrame.maxX) <= 2 &&
+            abs(systemFrame.maxY - windowFrame.maxY) <= 2
+    }
+}
+
 private final class MissionControlMouseIngress: @unchecked Sendable {
     private let lock = NSLock()
     private var pendingDelivery: (@Sendable () -> Void)?
@@ -779,12 +811,11 @@ private final class MissionControlAXResolver: @unchecked Sendable {
     ) -> MissionControlAXResolution {
         guard windowNumber > 0,
               ownerPID > 0,
-              ownerPID != dockPID,
-              ownerPID != ProcessInfo.processInfo.processIdentifier else {
+              ownerPID != dockPID else {
             return .indeterminate("close-invalid-identity")
         }
 
-        guard case .present = MissionControlSceneRoots.read(dockPID: dockPID, timeout: 0.025) else {
+        guard case let .present(scene) = MissionControlSceneRoots.read(dockPID: dockPID, timeout: 0.025) else {
             return .missionControlWithoutExactTarget("close-mc-root-unavailable")
         }
 
@@ -826,6 +857,14 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                   liveWindow: liveWindow
               ) else {
             return .missionControlWithoutExactTarget("close-exact-target-changed")
+        }
+
+        if scene.provider == .windowManager {
+            let center = CGPoint(x: currentFrame.midX, y: currentFrame.midY)
+            guard case let .valid(thumbnail) = systemThumbnail(in: scene, at: center),
+                  thumbnail.matches(frame: currentFrame, ownerPID: ownerPID) else {
+                return .missionControlWithoutExactTarget("close-system-thumbnail-changed")
+            }
         }
 
         return canonicalized(.valid(MissionControlAXHit(
@@ -897,21 +936,20 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         )
 #endif
 
-        // Tahoe's Mission Control AX thumbnail buttons intentionally expose no
-        // original-window identity. The WindowServer inventory does: while
-        // Mission Control is active, the public description for each live
-        // layer-zero window keeps its original CGWindowID / owner PID and uses
-        // the transformed thumbnail rectangle as kCGWindowBounds. This is the
-        // same identity + frame model used by WINS' scene detector, without
-        // relying on titles or guessing from the anonymous AX button order.
-        //
-        // Keep the concrete system scene roots above as the session gate. That makes
-        // a transient desktop/window animation incapable of becoming a
-        // destructive Mission Control target. Only fall back to the legacy AX
-        // subtree resolver if WindowServer fails to return an inventory at all.
+        let systemTarget: SystemThumbnail?
+        if scene.provider == .windowManager {
+            switch systemThumbnail(in: scene, at: point) {
+            case let .valid(thumbnail): systemTarget = thumbnail
+            case .absent: return .missionControlWithoutExactTarget("system-thumbnail-no-hit")
+            case .unavailable: return .indeterminate("system-thumbnail-unavailable")
+            }
+        } else {
+            systemTarget = nil
+        }
+        // Scene geometry never supplies window identity. The exact WindowServer
+        // ID, its owner, live AX window and material transform remain required.
         if let windowServerResolution = resolveFromWindowServerSnapshot(
-            point: point,
-            dockPID: dockPID
+            point: point, dockPID: dockPID, systemThumbnail: systemTarget
         ) {
             return windowServerResolution
         }
@@ -1063,9 +1101,52 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         return .valid(nearest)
     }
 
+    private struct SystemThumbnail {
+        let frame: CGRect
+        let identifier: String
+
+        func matches(frame windowFrame: CGRect, ownerPID: pid_t) -> Bool {
+            MissionControlSystemThumbnailMatch.accepts(
+                systemFrame: frame, windowFrame: windowFrame, identifier: identifier,
+                bundleIdentifier: NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier
+            )
+        }
+    }
+
+    private enum SystemThumbnailResult {
+        case valid(SystemThumbnail)
+        case absent
+        case unavailable
+    }
+
+    private func systemThumbnail(in scene: MissionControlSceneRoots.Snapshot,
+                                 at point: CGPoint) -> SystemThumbnailResult {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ 60_000_000
+        var hits: [SystemThumbnail] = []
+        var visited = 0
+        for root in scene.elements {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(root, kAXChildrenAttribute as CFString, &value) == .success,
+                  let children = value as? [AXUIElement], children.count <= 64 else { return .unavailable }
+            for child in children {
+                visited += 1
+                guard visited <= 128, DispatchTime.now().uptimeNanoseconds < deadline else { return .unavailable }
+                AXUIElementSetMessagingTimeout(child, 0.015)
+                guard let role = stringAttribute(kAXRoleAttribute, of: child) else { return .unavailable }
+                guard role == kAXButtonRole else { continue }
+                guard let frame = visibleFrame(of: child),
+                      let identifier = stringAttribute("AXIdentifier", of: child) else { return .unavailable }
+                if frame.contains(point) { hits.append(SystemThumbnail(frame: frame, identifier: identifier)) }
+            }
+        }
+        guard DispatchTime.now().uptimeNanoseconds < deadline, hits.count <= 1 else { return .unavailable }
+        return hits.first.map { .valid($0) } ?? .absent
+    }
+
     private func resolveFromWindowServerSnapshot(
         point: CGPoint,
-        dockPID: pid_t
+        dockPID: pid_t,
+        systemThumbnail: SystemThumbnail?
     ) -> MissionControlAXResolution? {
         let options: CGWindowListOption = [
             .optionOnScreenOnly,
@@ -1107,7 +1188,6 @@ private final class MissionControlAXResolver: @unchecked Sendable {
             guard windowNumber > 0,
                   ownerPID > 0,
                   ownerPID != dockPID,
-                  ownerPID != ProcessInfo.processInfo.processIdentifier,
                   frame.insetBy(dx: -2, dy: -2).contains(point) else {
                 continue
             }
@@ -1121,7 +1201,10 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 windowManagerFrame = frame
                 continue
             }
-            if let windowManagerFrame,
+            if let systemThumbnail, !systemThumbnail.matches(frame: frame, ownerPID: ownerPID) {
+                return .missionControlWithoutExactTarget("system-thumbnail-window-mismatch")
+            }
+            if systemThumbnail == nil, let windowManagerFrame,
                !MissionControlWindowManagerFrameMatch.accepts(
                    wrapper: windowManagerFrame,
                    thumbnail: frame
@@ -2307,6 +2390,18 @@ final class MissionControlInteractionMonitor {
             preferences.publishFeedback("窗口状态已变化，未执行关闭")
             return
         }
+        if freshTarget.application.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            guard let window = ownClosableStandardWindow(number: freshTarget.windowNumber) else {
+                clearTarget(clearPendingKeyboardTarget: true)
+                preferences.publishFeedback("窗口状态已变化，未执行关闭")
+                return
+            }
+            window.performClose(nil)
+            clearTarget(clearPendingKeyboardTarget: true)
+            schedulePostActionInspection()
+            preferences.publishFeedback("已请求关闭")
+            return
+        }
         guard let closeButton = elementAttribute(
             kAXCloseButtonAttribute,
             of: freshTarget.window
@@ -2355,6 +2450,10 @@ final class MissionControlInteractionMonitor {
         guard let target = revalidatedTarget(actionTarget) else {
             clearTarget(clearPendingKeyboardTarget: true)
             return .failed("窗口状态已变化，请重新选择")
+        }
+        guard target.application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              target.application.activationPolicy == .regular else {
+            return .failed("此窗口仅支持关闭")
         }
         let alert = NSAlert()
         alert.messageText = "退出“\(target.applicationName)”？"
@@ -2863,15 +2962,29 @@ final class MissionControlInteractionMonitor {
     }
 
     private func target(from hit: MissionControlAXHit) -> Target? {
-        guard hit.ownerPID != ProcessInfo.processInfo.processIdentifier,
-              hit.ownerPID != resolvedDockPID(),
+        guard hit.ownerPID != resolvedDockPID(),
               let application = NSRunningApplication(processIdentifier: hit.ownerPID),
-              application.activationPolicy == .regular,
               !application.isTerminated,
               !preferences.isExcluded(application),
               let applicationIdentity = WindowThumbnailApplicationIdentity(
                 application: application
               ) else { return nil }
+        let isOwn = hit.ownerPID == ProcessInfo.processInfo.processIdentifier
+        let isStandard: Bool
+        if isOwn {
+            isStandard = ownClosableStandardWindow(number: hit.windowNumber) != nil
+        } else if application.activationPolicy == .accessory {
+            var subrole: CFTypeRef?
+            isStandard = AXUIElementCopyAttributeValue(
+                hit.window, kAXSubroleAttribute as CFString, &subrole
+            ) == .success && subrole as? String == kAXStandardWindowSubrole
+        } else {
+            isStandard = false
+        }
+        guard MissionControlStandardWindowPolicy.allows(
+            activationPolicy: application.activationPolicy, isOwnApplication: isOwn,
+            isStandardWindow: isStandard, canClose: hit.canClose
+        ) else { return nil }
         return Target(
             application: application,
             applicationIdentity: applicationIdentity,
@@ -3092,8 +3205,19 @@ final class MissionControlInteractionMonitor {
         }
     }
 
+    private func ownClosableStandardWindow(number: CGWindowID) -> NSWindow? {
+        let matches = NSApp.windows.filter {
+            $0.windowNumber == Int(number) && !($0 is NSPanel) &&
+                $0.level == .normal && $0.styleMask.contains(.closable) && $0.isVisible
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     private func isExactTargetCurrent(_ target: Target) -> Bool {
         guard isApplicationIdentityCurrent(target) else { return false }
+        if target.application.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            return ownClosableStandardWindow(number: target.windowNumber) != nil
+        }
         return resolveExactWindow(
             processIdentifier: target.application.processIdentifier,
             windowNumber: target.windowNumber
