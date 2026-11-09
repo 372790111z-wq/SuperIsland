@@ -23,6 +23,12 @@ enum MusicPlaybackMode: String, CaseIterable, Sendable {
 struct MusicAdvancedSnapshot: Equatable, Sendable {
     var favorite: Bool?
     var mode: MusicPlaybackMode?
+    var availableModes: [MusicPlaybackMode] = []
+    var nextMode: MusicPlaybackMode? {
+        let ordered = MusicPlaybackMode.allCases.filter { availableModes.contains($0) }
+        guard ordered.count > 1, let mode, let index = ordered.firstIndex(of: mode) else { return nil }
+        return ordered[(index + 1) % ordered.count]
+    }
     var canFavorite = false
     var canSetMode = false
     var message: String?
@@ -85,6 +91,12 @@ final class NowPlayingAdvancedControls: ObservableObject {
         isBusy = false
     }
 
+    /// Reuses the owning module's existing refresh cadence; no hidden polling.
+    func refreshIfVisible() {
+        guard !viewers.isEmpty else { return }
+        refresh()
+    }
+
     /// Explicit read retry; an ambiguous toggle is never automatically resent.
     func refresh() {
         guard !isBusy, isSupported, let context else { return }
@@ -106,8 +118,8 @@ final class NowPlayingAdvancedControls: ObservableObject {
     }
 
     func cycleMode() {
-        guard snapshot.canSetMode, let mode = snapshot.mode else { return }
-        perform(.mode(mode.next))
+        guard snapshot.canSetMode, let target = snapshot.nextMode else { return }
+        perform(.mode(target))
     }
 
     private func perform(_ action: MusicAdvancedAction) {

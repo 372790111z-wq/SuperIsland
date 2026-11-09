@@ -29,7 +29,7 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
                         guard before.canFavorite, before.favorite != nil else { throw Failure.unavailable }
                         target = try session.favoriteMenuItem(isFavorite: before.favorite!)
                     case .mode(let mode):
-                        guard before.canSetMode, before.mode != nil else { throw Failure.unavailable }
+                        guard before.availableModes.contains(mode), before.mode != nil else { throw Failure.unavailable }
                         target = try session.modeMenuItem(mode)
                     }
                     // Revalidate both process identity and exact playback-bar metadata immediately
@@ -44,7 +44,7 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
                         try session.check()
                         let after = try session.read()
                         let writeReady: Bool
-                        switch action { case .favorite: writeReady = after.canFavorite; case .mode: writeReady = after.canSetMode }
+                        switch action { case .favorite: writeReady = after.canFavorite; case .mode(let target): writeReady = after.availableModes.contains(target) }
                         // QQ updates the playback label before its menu. Wait for both so a
                         // successful favorite can immediately be undone without a stale menu.
                         if action.matches(after), writeReady { continuation.resume(returning: after); return }
@@ -56,7 +56,7 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
         }
     }
 
-    private enum Failure: Error { case permission, process, version, track, unavailable, timeout, cancelled }
+    private enum Failure: Error { case permission, process, version, track, windowUnavailable, ambiguousWindow, controlsUnavailable, unavailable, timeout, cancelled }
     private static func unavailable(_ error: Error) -> MusicAdvancedSnapshot {
         let message: String
         switch error as? Failure {
@@ -64,8 +64,11 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
         case .process: message = "QQ 音乐已退出或重新启动，请重新读取"
         case .version: message = "此 QQ 音乐版本尚未验证，请在播放器中操作"
         case .track: message = "无法核对当前歌曲，请打开 QQ 音乐后重试"
+        case .windowUnavailable: message = "收藏和模式暂不可读：QQ 主窗口未就绪"
+        case .ambiguousWindow: message = "收藏和模式暂不可读：无法唯一确认 QQ 主窗口"
+        case .controlsUnavailable: message = "收藏和模式暂不可读：未找到 QQ 播放控制栏"
         case .timeout: message = "读取超时；操作结果未知，请重新读取"
-        default: message = "暂时无法读取 QQ 控制，请打开播放器后重新读取"
+        default: message = "QQ 收藏或模式状态暂不可读，基础播放控制仍可用"
         }
         return .init(message: message)
     }
@@ -127,14 +130,28 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
             return matches[0]
         }
         func playbackChildren() throws -> [AXUIElement] {
-            let windows = try value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-            guard windows.count <= 8 else { throw Failure.unavailable }
-            let main = try unique(windows) { try text($0, kAXIdentifierAttribute) == "QQMianWindow" }
-            let bar = try unique(children(main)) { try text($0, kAXDescriptionAttribute) == "播放控制栏" }
-            return try children(bar)
+            var windows = try value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            guard windows.count <= 8 else { throw Failure.ambiguousWindow }
+            // QQ may publish its main/focused window before AXWindows after reopening.
+            let hasMain = try windows.contains { try text($0, kAXIdentifierAttribute) == "QQMianWindow" }
+            if !hasMain {
+                for attribute in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
+                    if let raw = try? value(app, attribute), CFGetTypeID(raw) == AXUIElementGetTypeID() {
+                        let window = unsafeBitCast(raw, to: AXUIElement.self)
+                        if !windows.contains(where: { CFEqual($0, window) }) { windows.append(window) }
+                    }
+                }
+            }
+            let matches = try windows.filter { try text($0, kAXIdentifierAttribute) == "QQMianWindow" }
+            guard !matches.isEmpty else { throw Failure.windowUnavailable }
+            guard matches.count == 1 else { throw Failure.ambiguousWindow }
+            let bars = try children(matches[0]).filter { try text($0, kAXDescriptionAttribute) == "播放控制栏" }
+            guard bars.count == 1 else { throw Failure.controlsUnavailable }
+            return try children(bars[0])
         }
-        func verifyTrack() throws {
-            let matching = try playbackChildren().filter {
+        func verifyTrack(in nodes: [AXUIElement]? = nil) throws {
+            let candidates = try nodes ?? playbackChildren()
+            let matching = try candidates.filter {
                 QQMusicControlAdapter.trackMatches(description: try text($0, kAXDescriptionAttribute), title: context.title, artist: context.artist)
             }
             guard matching.count == 1 else { throw Failure.track }
@@ -148,10 +165,13 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
         func favoriteMenuItem(isFavorite: Bool) throws -> AXUIElement {
             try unique(children(playbackMenu())) { try text($0, kAXTitleAttribute) == (isFavorite ? "取消喜欢" : "喜欢歌曲") }
         }
-        func modeMenuItem(_ mode: MusicPlaybackMode) throws -> AXUIElement {
+        func modeMenuItems() throws -> [AXUIElement] {
             let item = try unique(children(playbackMenu())) { try text($0, kAXTitleAttribute) == "播放模式" }
             let menu = try unique(children(item)) { try text($0, kAXRoleAttribute) == kAXMenuRole }
-            return try unique(children(menu)) { try text($0, kAXTitleAttribute) == mode.rawValue }
+            return try children(menu)
+        }
+        func modeMenuItem(_ mode: MusicPlaybackMode) throws -> AXUIElement {
+            try unique(modeMenuItems()) { try text($0, kAXTitleAttribute) == mode.rawValue }
         }
         func isPressable(_ e: AXUIElement) throws -> Bool {
             guard try value(e, kAXEnabledAttribute) as? Bool == true else { return false }
@@ -161,15 +181,28 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
             return (actions as? [String] ?? []).contains(kAXPressAction)
         }
         func read() throws -> MusicAdvancedSnapshot {
-            try verifyTrack()
-            let descriptions = try playbackChildren().map { try text($0, kAXDescriptionAttribute) }
+            let nodes = try playbackChildren()
+            try verifyTrack(in: nodes)
+            let descriptions = try nodes.map { try text($0, kAXDescriptionAttribute) }
             let favorites = descriptions.compactMap { QQMusicControlAdapter.favoriteState(description: $0) }
             let modes = descriptions.compactMap { QQMusicControlAdapter.playbackMode(description: $0) }
             var state = MusicAdvancedSnapshot(favorite: favorites.count == 1 ? favorites[0] : nil,
                                               mode: modes.count == 1 ? modes[0] : nil)
             state.canFavorite = state.favorite != nil && ((try? isPressable(favoriteMenuItem(isFavorite: state.favorite ?? false))) == true)
-            state.canSetMode = state.mode != nil && MusicPlaybackMode.allCases.allSatisfy { (try? isPressable(modeMenuItem($0))) == true }
-            if !state.canFavorite || !state.canSetMode { state.message = "部分状态不可用，请重新读取或在 QQ 音乐中操作" }
+            if let items = try? modeMenuItems() {
+                // Missing options are a legitimate QQ scene capability, not a read error.
+                state.availableModes = MusicPlaybackMode.allCases.filter { mode in
+                    guard let item = try? unique(items, { try text($0, kAXTitleAttribute) == mode.rawValue }) else { return false }
+                    return (try? isPressable(item)) == true
+                }
+            }
+            state.canSetMode = state.nextMode != nil
+            var issues: [String] = []
+            if !state.canFavorite { issues.append("收藏暂不可用") }
+            if state.mode == nil || state.availableModes.isEmpty || !state.availableModes.contains(state.mode!) {
+                issues.append("播放模式暂不可用")
+            }
+            state.message = issues.isEmpty ? nil : issues.joined(separator: "；")
             return state
         }
     }

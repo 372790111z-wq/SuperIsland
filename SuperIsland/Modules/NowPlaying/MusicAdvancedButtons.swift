@@ -28,7 +28,8 @@ struct MusicAdvancedButtons: View {
             .disabled(controls.isBusy || !controls.snapshot.canSetMode)
             .accessibilityLabel(controls.snapshot.mode?.rawValue ?? "播放模式未知")
             .accessibilityIdentifier("data-annotation-id=now-playing-playback-mode")
-            .help(controls.snapshot.mode.map { "\($0.rawValue)，点击切换为\($0.next.rawValue)" } ?? "模式未知，请重新读取")
+            .help(controls.snapshot.nextMode.map { "\(controls.snapshot.mode?.rawValue ?? "")，点击切换为\($0.rawValue)" }
+                ?? (controls.snapshot.mode == nil ? "模式未知，请重新读取" : "当前场景没有其他可用模式"))
         }
         .buttonStyle(.plain)
         .font(.system(size: 14, weight: .medium))
