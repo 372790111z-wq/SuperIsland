@@ -143,6 +143,8 @@ def main():
     parser.add_argument('--output-dir', required=True, type=Path)
     parser.add_argument('--signing-identity', default='SuperIsland WE1 Debug Local Code Signing')
     parser.add_argument('--pause-refresh-trial', action='store_true', help='Seal the authorized one-shot 79–85 percent pause trial; receipt must enable only BATTERY_PAUSE_REFRESH')
+    parser.add_argument('--mission-control-diagnostics', action='store_true',
+                        help='Opt this WE1 package into bounded local Mission Control state diagnostics; no window content')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     receipt = json.loads(args.build_receipt.read_text())
@@ -200,6 +202,10 @@ def main():
     info.pop('CFBundleURLTypes', None)
     if args.pause_refresh_trial:
         info['WE1PauseRefreshTrial'] = True
+    # Never inherit opt-in diagnostics from an input build accidentally.
+    info.pop('WE1MissionControlDiagnostics', None)
+    if args.mission_control_diagnostics:
+        info['WE1MissionControlDiagnostics'] = True
     (candidate / 'Contents/Info.plist').write_bytes(plistlib.dumps(info, sort_keys=False))
     symbol_stripping = strip_release_symbols(candidate)
     # --deep may replace a raw nested executable's identifier with its file
@@ -240,6 +246,7 @@ def main():
                     source_binary_sha256=sha(binary), source_app_sha256=receipt['sourceAppSHA256'],
                     zip_sha256=sha(archive),
                     signed=True, installed=False, notarized=False, nested_identifiers=nested_identifiers,
+                    mission_control_diagnostics=args.mission_control_diagnostics,
                     symbol_stripping=symbol_stripping)
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     (output / 'SHA256SUMS.txt').write_text(f'{sha(archive)}  {archive.name}\n')

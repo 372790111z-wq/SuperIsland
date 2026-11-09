@@ -64,8 +64,10 @@ struct WindowInteractionDiagnosticLimiter {
 }
 
 enum WindowInteractionDiagnosticAdmission {
-    static func allows(bundleIdentifier: String?, component: String, debugBuild: Bool) -> Bool {
+    static func allows(bundleIdentifier: String?, component: String, debugBuild: Bool,
+                       missionControlDiagnostics: Bool = false) -> Bool {
         guard WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: bundleIdentifier) else { return false }
+        if component == "mission_control", missionControlDiagnostics { return true }
         return debugBuild || ["fullScreenDisplayMove", "chromeFullScreenRequest", "chromeBaselineMenu",
                               "chromeBaselineFailure", "chromeBaselineProbe", "chromeBaselineShortcut"].contains(component)
     }
@@ -73,6 +75,9 @@ enum WindowInteractionDiagnosticAdmission {
 
 final class WindowInteractionDiagnosticRecorder: @unchecked Sendable {
     static let shared = WindowInteractionDiagnosticRecorder()
+    static let missionControlDiagnosticsEnabled =
+        WindowInventoryDiagnosticGate.isEnabled(bundleIdentifier: Bundle.main.bundleIdentifier) &&
+        Bundle.main.object(forInfoDictionaryKey: "WE1MissionControlDiagnostics") as? Bool == true
 
     private struct Record: Encodable {
         let schemaVersion = 1
@@ -90,6 +95,7 @@ final class WindowInteractionDiagnosticRecorder: @unchecked Sendable {
     private let maximumFileBytes: UInt64
     private let sessionID = UUID().uuidString
     private let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+    private let missionControlDiagnostics = missionControlDiagnosticsEnabled
     private let lock = NSLock()
     private var limiter = WindowInteractionDiagnosticLimiter()
     private let queue = DispatchQueue(
@@ -124,7 +130,8 @@ final class WindowInteractionDiagnosticRecorder: @unchecked Sendable {
         let debugBuild = false
 #endif
         guard WindowInteractionDiagnosticAdmission.allows(
-            bundleIdentifier: bundleIdentifier, component: component, debugBuild: debugBuild
+            bundleIdentifier: bundleIdentifier, component: component, debugBuild: debugBuild,
+            missionControlDiagnostics: missionControlDiagnostics
         ), let fileURL, metadata.count <= 16,
            metadata.allSatisfy({
                WindowInteractionDiagnosticLimiter.isStateCode($0.key) && $0.value.isAllowed

@@ -3,6 +3,21 @@ import XCTest
 @testable import SuperIsland
 
 final class WindowInteractionDiagnosticTests: XCTestCase {
+    func testOptimizedMissionControlDiagnosticsRequireExplicitWE1OptIn() {
+        let we1 = WindowInventoryDiagnosticGate.debugBundleIdentifier
+        XCTAssertFalse(WindowInteractionDiagnosticAdmission.allows(
+            bundleIdentifier: we1, component: "mission_control", debugBuild: false))
+        XCTAssertTrue(WindowInteractionDiagnosticAdmission.allows(
+            bundleIdentifier: we1, component: "mission_control", debugBuild: false,
+            missionControlDiagnostics: true))
+        XCTAssertFalse(WindowInteractionDiagnosticAdmission.allows(
+            bundleIdentifier: "com.workview.SuperIsland", component: "mission_control",
+            debugBuild: false, missionControlDiagnostics: true))
+        XCTAssertFalse(WindowInteractionDiagnosticAdmission.allows(
+            bundleIdentifier: we1, component: "cmdTab", debugBuild: false,
+            missionControlDiagnostics: true))
+    }
+
     func testGlobalRateDoesNotBurstAcrossAClockWindowBoundary() {
         var limiter = WindowInteractionDiagnosticLimiter()
         for index in 0..<12 {
