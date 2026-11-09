@@ -2,6 +2,49 @@ import XCTest
 @testable import SuperIsland
 
 final class MissionControlRecoveryTests: XCTestCase {
+    func testObservedCodexThumbnailMatchesExactWindowDespiteWiderSystemOutline() {
+        let system = CGRect(x: 543.7664, y: 543.1385, width: 477.6456, height: 279.8902)
+        let window = CGRect(x: 543, y: 543, width: 479, height: 281)
+        XCTAssertFalse(MissionControlWindowManagerFrameMatch.accepts(
+            wrapper: CGRect(x: 537, y: 536, width: 503, height: 294), thumbnail: window))
+        XCTAssertTrue(MissionControlSystemThumbnailMatch.accepts(
+            systemFrame: system, windowFrame: window,
+            identifier: "com.openai.codex.space.1", bundleIdentifier: "com.openai.codex"))
+        XCTAssertFalse(MissionControlSystemThumbnailMatch.accepts(
+            systemFrame: system, windowFrame: CGRect(x: 928, y: 567, width: 106, height: 89),
+            identifier: "com.openai.codex.space.1", bundleIdentifier: "com.openai.codex"))
+    }
+
+    func testSystemThumbnailRejectsWrongOwnerMalformedSpaceAndUnrelatedGeometry() {
+        let frame = CGRect(x: 543, y: 543, width: 479, height: 281)
+        for identifier in ["com.other.app.space.1", "com.openai.codex.space.x", "mc.spaces", "com.openai.codex.space."] {
+            XCTAssertFalse(MissionControlSystemThumbnailMatch.accepts(
+                systemFrame: frame, windowFrame: frame,
+                identifier: identifier, bundleIdentifier: "com.openai.codex"))
+        }
+        XCTAssertFalse(MissionControlSystemThumbnailMatch.accepts(
+            systemFrame: frame, windowFrame: frame.offsetBy(dx: 3, dy: 0),
+            identifier: "com.openai.codex.space.1", bundleIdentifier: "com.openai.codex"))
+        XCTAssertFalse(MissionControlSystemThumbnailMatch.accepts(
+            systemFrame: CGRect(x: CGFloat.nan, y: 0, width: 100, height: 100), windowFrame: frame,
+            identifier: "com.openai.codex.space.1", bundleIdentifier: "com.openai.codex"))
+    }
+
+    func testAccessoryAndOwnAppsRequireClosableStandardWindows() {
+        for own in [false, true] {
+            XCTAssertTrue(MissionControlStandardWindowPolicy.allows(
+                activationPolicy: .accessory, isOwnApplication: own, isStandardWindow: true, canClose: true))
+            XCTAssertFalse(MissionControlStandardWindowPolicy.allows(
+                activationPolicy: .accessory, isOwnApplication: own, isStandardWindow: false, canClose: true))
+            XCTAssertFalse(MissionControlStandardWindowPolicy.allows(
+                activationPolicy: .accessory, isOwnApplication: own, isStandardWindow: true, canClose: false))
+        }
+        XCTAssertFalse(MissionControlStandardWindowPolicy.allows(
+            activationPolicy: .prohibited, isOwnApplication: false, isStandardWindow: true, canClose: true))
+        XCTAssertTrue(MissionControlStandardWindowPolicy.allows(
+            activationPolicy: .regular, isOwnApplication: false, isStandardWindow: false, canClose: false))
+    }
+
     func testSceneRootsSupportLegacyDockAndMultipleWindowManagerDisplays() {
         XCTAssertTrue(MissionControlSceneRootPolicy.isRoot(provider: .dock, identifier: "mc", role: nil))
         XCTAssertEqual(MissionControlSceneRootPolicy.presence(provider: .dock, rootCount: 1), .present)
