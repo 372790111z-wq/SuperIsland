@@ -48,6 +48,12 @@ python3 scripts/package-local-release.py \
 新本地安装包不自动成为远端更新。现有更新渠道的 `we1-` tag 和
 `SuperIsland-WE1-*.dmg` 文件名保持兼容；本次没有发布或迁移远端更新协议。
 
+定位调度中心问题时，可显式加 `--mission-control-diagnostics`，为 WE1 优化包
+启用受限的本地状态诊断，不记录窗口标题或正文。常用包省略该选项；打包器会
+先移除输入包继承的诊断标记，防止意外持续启用。manifest 中的
+`mission_control_diagnostics` 记录实际选项。最近的修复与验证边界见
+[调度中心关闭窗口验收](checkpoints/2026-11-09-mission-control-close.md)。
+
 统一 WE1 包的电池 launchd/Mach service 使用 `com.workview.SuperIsland.WE1Debug.BatteryControl`，
 区别于旧 Review 的服务标识。两份启动声明都必须打入：新的用于登记，旧的仅用于注销移交。
 helper 二进制签名仍为 `com.workview.SuperIsland.BatteryManagementHelper`；不能把服务名替换进
