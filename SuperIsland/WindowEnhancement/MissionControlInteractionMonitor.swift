@@ -859,12 +859,9 @@ private final class MissionControlAXResolver: @unchecked Sendable {
             return .missionControlWithoutExactTarget("close-exact-target-changed")
         }
 
-        if scene.provider == .windowManager {
-            let center = CGPoint(x: currentFrame.midX, y: currentFrame.midY)
-            guard case let .valid(thumbnail) = systemThumbnail(in: scene, at: center),
-                  thumbnail.matches(frame: currentFrame, ownerPID: ownerPID) else {
-                return .missionControlWithoutExactTarget("close-system-thumbnail-changed")
-            }
+        if scene.provider == .windowManager,
+           !systemThumbnailMatches(scene: scene, frame: currentFrame, ownerPID: ownerPID) {
+            return .missionControlWithoutExactTarget("close-system-thumbnail-changed")
         }
 
         return canonicalized(.valid(MissionControlAXHit(
@@ -936,20 +933,11 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         )
 #endif
 
-        let systemTarget: SystemThumbnail?
-        if scene.provider == .windowManager {
-            switch systemThumbnail(in: scene, at: point) {
-            case let .valid(thumbnail): systemTarget = thumbnail
-            case .absent: return .missionControlWithoutExactTarget("system-thumbnail-no-hit")
-            case .unavailable: return .indeterminate("system-thumbnail-unavailable")
-            }
-        } else {
-            systemTarget = nil
-        }
-        // Scene geometry never supplies window identity. The exact WindowServer
-        // ID, its owner, live AX window and material transform remain required.
+        // Preserve the established exact-window path. System thumbnail proof
+        // is needed only if the legacy outline margins do not identify it.
         if let windowServerResolution = resolveFromWindowServerSnapshot(
-            point: point, dockPID: dockPID, systemThumbnail: systemTarget
+            point: point, dockPID: dockPID,
+            scene: scene.provider == .windowManager ? scene : nil
         ) {
             return windowServerResolution
         }
@@ -1101,52 +1089,41 @@ private final class MissionControlAXResolver: @unchecked Sendable {
         return .valid(nearest)
     }
 
-    private struct SystemThumbnail {
-        let frame: CGRect
-        let identifier: String
-
-        func matches(frame windowFrame: CGRect, ownerPID: pid_t) -> Bool {
-            MissionControlSystemThumbnailMatch.accepts(
-                systemFrame: frame, windowFrame: windowFrame, identifier: identifier,
-                bundleIdentifier: NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier
-            )
-        }
-    }
-
-    private enum SystemThumbnailResult {
-        case valid(SystemThumbnail)
-        case absent
-        case unavailable
-    }
-
-    private func systemThumbnail(in scene: MissionControlSceneRoots.Snapshot,
-                                 at point: CGPoint) -> SystemThumbnailResult {
+    private func systemThumbnailMatches(scene: MissionControlSceneRoots.Snapshot,
+                                        frame expectedFrame: CGRect, ownerPID: pid_t) -> Bool {
+        guard let bundleIdentifier = NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier
+        else { return false }
+        let prefix = bundleIdentifier + ".space."
         let deadline = DispatchTime.now().uptimeNanoseconds &+ 60_000_000
-        var hits: [SystemThumbnail] = []
+        var matches = 0
         var visited = 0
         for root in scene.elements {
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(root, kAXChildrenAttribute as CFString, &value) == .success,
-                  let children = value as? [AXUIElement], children.count <= 64 else { return .unavailable }
+                  let children = value as? [AXUIElement], children.count <= 64 else { return false }
             for child in children {
                 visited += 1
-                guard visited <= 128, DispatchTime.now().uptimeNanoseconds < deadline else { return .unavailable }
+                guard visited <= 128, DispatchTime.now().uptimeNanoseconds < deadline else { return false }
                 AXUIElementSetMessagingTimeout(child, 0.015)
-                guard let role = stringAttribute(kAXRoleAttribute, of: child) else { return .unavailable }
-                guard role == kAXButtonRole else { continue }
-                guard let frame = visibleFrame(of: child),
-                      let identifier = stringAttribute("AXIdentifier", of: child) else { return .unavailable }
-                if frame.contains(point) { hits.append(SystemThumbnail(frame: frame, identifier: identifier)) }
+                // Unrelated thumbnails and small helper controls are not this
+                // target. Do not require their visibility/geometry to validate it.
+                guard let identifier = stringAttribute("AXIdentifier", of: child),
+                      identifier.hasPrefix(prefix) else { continue }
+                guard stringAttribute(kAXRoleAttribute, of: child) == kAXButtonRole,
+                      let systemFrame = frame(of: child) else { return false }
+                if MissionControlSystemThumbnailMatch.accepts(
+                    systemFrame: systemFrame, windowFrame: expectedFrame,
+                    identifier: identifier, bundleIdentifier: bundleIdentifier
+                ) { matches += 1 }
             }
         }
-        guard DispatchTime.now().uptimeNanoseconds < deadline, hits.count <= 1 else { return .unavailable }
-        return hits.first.map { .valid($0) } ?? .absent
+        return DispatchTime.now().uptimeNanoseconds < deadline && matches == 1
     }
 
     private func resolveFromWindowServerSnapshot(
         point: CGPoint,
         dockPID: pid_t,
-        systemThumbnail: SystemThumbnail?
+        scene: MissionControlSceneRoots.Snapshot?
     ) -> MissionControlAXResolution? {
         let options: CGWindowListOption = [
             .optionOnScreenOnly,
@@ -1201,17 +1178,12 @@ private final class MissionControlAXResolver: @unchecked Sendable {
                 windowManagerFrame = frame
                 continue
             }
-            if let systemThumbnail, !systemThumbnail.matches(frame: frame, ownerPID: ownerPID) {
-                return .missionControlWithoutExactTarget("system-thumbnail-window-mismatch")
-            }
-            if systemThumbnail == nil, let windowManagerFrame,
-               !MissionControlWindowManagerFrameMatch.accepts(
-                   wrapper: windowManagerFrame,
-                   thumbnail: frame
-               ) {
-                return .missionControlWithoutExactTarget(
-                    "window-server-system-frame-mismatch"
-                )
+            if let windowManagerFrame,
+               !MissionControlWindowManagerFrameMatch.accepts(wrapper: windowManagerFrame, thumbnail: frame) {
+                guard let scene,
+                      systemThumbnailMatches(scene: scene, frame: frame, ownerPID: ownerPID) else {
+                    return .missionControlWithoutExactTarget("window-server-system-frame-mismatch")
+                }
             }
 
             // The all-window snapshot already provides the window ID and its
