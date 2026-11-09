@@ -1,0 +1,176 @@
+import AppKit
+import ApplicationServices
+
+/// Reads only QQ's main playback bar and its Playback Control menu. No coordinates,
+/// account API, library traversal, activation, or automatic repeat of an action.
+final class QQMusicControlAdapter: MusicAdvancedAdapter {
+    static let bundleID = "com.tencent.QQMusicMac"
+    private let queue = DispatchQueue(label: "superisland.qqmusic.controls", qos: .userInitiated)
+
+    func read(_ context: MusicControlContext, fence: MusicControlFence) async -> MusicAdvancedSnapshot {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try Session(context, fence: fence).read()) }
+                catch { continuation.resume(returning: Self.unavailable(error)) }
+            }
+        }
+    }
+
+    func apply(_ action: MusicAdvancedAction, context: MusicControlContext, fence: MusicControlFence) async -> MusicAdvancedSnapshot {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                do {
+                    let session = try Session(context, fence: fence)
+                    let before = try session.read()
+                    if action.matches(before) { continuation.resume(returning: before); return }
+                    let target: AXUIElement
+                    switch action {
+                    case .favorite:
+                        guard before.canFavorite, before.favorite != nil else { throw Failure.unavailable }
+                        target = try session.favoriteMenuItem(isFavorite: before.favorite!)
+                    case .mode(let mode):
+                        guard before.canSetMode, before.mode != nil else { throw Failure.unavailable }
+                        target = try session.modeMenuItem(mode)
+                    }
+                    // Revalidate both process identity and exact playback-bar metadata immediately
+                    // before the single send. A cross-process atomic guarantee is not possible.
+                    try session.verifyTrack()
+                    try session.check()
+                    guard try session.isPressable(target) else { throw Failure.unavailable }
+                    let sent = AXUIElementPerformAction(target, kAXPressAction as CFString)
+                    // Even AX timeout can mean the action was sent: ONLY read afterwards.
+                    for _ in 0..<8 {
+                        Thread.sleep(forTimeInterval: 0.15)
+                        try session.check()
+                        let after = try session.read()
+                        let writeReady: Bool
+                        switch action { case .favorite: writeReady = after.canFavorite; case .mode: writeReady = after.canSetMode }
+                        // QQ updates the playback label before its menu. Wait for both so a
+                        // successful favorite can immediately be undone without a stale menu.
+                        if action.matches(after), writeReady { continuation.resume(returning: after); return }
+                    }
+                    let reason = sent == .success ? "操作结果尚未确认，请重新读取或打开 QQ 音乐检查" : "无法确认操作结果，请先重新读取状态"
+                    continuation.resume(returning: .init(message: reason))
+                } catch { continuation.resume(returning: Self.unavailable(error)) }
+            }
+        }
+    }
+
+    private enum Failure: Error { case permission, process, version, track, unavailable, timeout, cancelled }
+    private static func unavailable(_ error: Error) -> MusicAdvancedSnapshot {
+        let message: String
+        switch error as? Failure {
+        case .permission: message = "需要辅助功能权限，请在系统设置中检查"
+        case .process: message = "QQ 音乐已退出或重新启动，请重新读取"
+        case .version: message = "此 QQ 音乐版本尚未验证，请在播放器中操作"
+        case .track: message = "无法核对当前歌曲，请打开 QQ 音乐后重试"
+        case .timeout: message = "读取超时；操作结果未知，请重新读取"
+        default: message = "暂时无法读取 QQ 控制，请打开播放器后重新读取"
+        }
+        return .init(message: message)
+    }
+
+    /// Pure parsers also used by regression tests. Unknown labels never imply a default.
+    static func favoriteState(description: String) -> Bool? {
+        if description == "添加到我喜欢" { return false }
+        if description == "从我喜欢删除" { return true }
+        return nil
+    }
+    static func playbackMode(description: String) -> MusicPlaybackMode? {
+        MusicPlaybackMode.allCases.first { description == "播放模式（\($0.rawValue)）" }
+    }
+    static func trackMatches(description: String, title: String, artist: String) -> Bool {
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return description == "歌曲名：\(title) - 歌手名：\(artist)"
+    }
+
+    private final class Session {
+        let context: MusicControlContext
+        let fence: MusicControlFence
+        let app: AXUIElement
+        let deadline = ProcessInfo.processInfo.systemUptime + 3.5
+        init(_ context: MusicControlContext, fence: MusicControlFence) throws {
+            self.context = context; self.fence = fence
+            guard AXIsProcessTrusted() else { throw Failure.permission }
+            app = AXUIElementCreateApplication(context.processID)
+            AXUIElementSetMessagingTimeout(app, 0.15)
+            try check()
+        }
+        func check() throws {
+            guard fence.isValid else { throw Failure.cancelled }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw Failure.timeout }
+            guard context.bundleID == QQMusicControlAdapter.bundleID,
+                  let running = NSRunningApplication(processIdentifier: context.processID),
+                  !running.isTerminated, running.bundleIdentifier == context.bundleID,
+                  running.launchDate == context.launchDate else { throw Failure.process }
+            guard let url = running.bundleURL,
+                  Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "11.10.5" else { throw Failure.version }
+        }
+        func value(_ element: AXUIElement, _ key: String) throws -> CFTypeRef? {
+            try check()
+            var result: CFTypeRef?
+            AXUIElementSetMessagingTimeout(element, 0.15)
+            let error = AXUIElementCopyAttributeValue(element, key as CFString, &result)
+            if error == .cannotComplete { throw Failure.timeout }
+            return error == .success ? result : nil
+        }
+        func text(_ e: AXUIElement, _ key: String) throws -> String { try value(e, key) as? String ?? "" }
+        func children(_ e: AXUIElement) throws -> [AXUIElement] {
+            let result = try value(e, kAXChildrenAttribute) as? [AXUIElement] ?? []
+            guard result.count <= 64 else { throw Failure.unavailable }
+            return result
+        }
+        func unique(_ elements: [AXUIElement], _ predicate: (AXUIElement) throws -> Bool) throws -> AXUIElement {
+            let matches = try elements.filter(predicate)
+            guard matches.count == 1 else { throw Failure.unavailable }
+            return matches[0]
+        }
+        func playbackChildren() throws -> [AXUIElement] {
+            let windows = try value(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            guard windows.count <= 8 else { throw Failure.unavailable }
+            let main = try unique(windows) { try text($0, kAXIdentifierAttribute) == "QQMianWindow" }
+            let bar = try unique(children(main)) { try text($0, kAXDescriptionAttribute) == "播放控制栏" }
+            return try children(bar)
+        }
+        func verifyTrack() throws {
+            let matching = try playbackChildren().filter {
+                QQMusicControlAdapter.trackMatches(description: try text($0, kAXDescriptionAttribute), title: context.title, artist: context.artist)
+            }
+            guard matching.count == 1 else { throw Failure.track }
+        }
+        func playbackMenu() throws -> AXUIElement {
+            guard let raw = try value(app, kAXMenuBarAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { throw Failure.unavailable }
+            let menuBar = unsafeBitCast(raw, to: AXUIElement.self)
+            let item = try unique(children(menuBar)) { try text($0, kAXTitleAttribute) == "播放控制" }
+            return try unique(children(item)) { try text($0, kAXRoleAttribute) == kAXMenuRole }
+        }
+        func favoriteMenuItem(isFavorite: Bool) throws -> AXUIElement {
+            try unique(children(playbackMenu())) { try text($0, kAXTitleAttribute) == (isFavorite ? "取消喜欢" : "喜欢歌曲") }
+        }
+        func modeMenuItem(_ mode: MusicPlaybackMode) throws -> AXUIElement {
+            let item = try unique(children(playbackMenu())) { try text($0, kAXTitleAttribute) == "播放模式" }
+            let menu = try unique(children(item)) { try text($0, kAXRoleAttribute) == kAXMenuRole }
+            return try unique(children(menu)) { try text($0, kAXTitleAttribute) == mode.rawValue }
+        }
+        func isPressable(_ e: AXUIElement) throws -> Bool {
+            guard try value(e, kAXEnabledAttribute) as? Bool == true else { return false }
+            try check()
+            var actions: CFArray?
+            guard AXUIElementCopyActionNames(e, &actions) == .success else { return false }
+            return (actions as? [String] ?? []).contains(kAXPressAction)
+        }
+        func read() throws -> MusicAdvancedSnapshot {
+            try verifyTrack()
+            let descriptions = try playbackChildren().map { try text($0, kAXDescriptionAttribute) }
+            let favorites = descriptions.compactMap { QQMusicControlAdapter.favoriteState(description: $0) }
+            let modes = descriptions.compactMap { QQMusicControlAdapter.playbackMode(description: $0) }
+            var state = MusicAdvancedSnapshot(favorite: favorites.count == 1 ? favorites[0] : nil,
+                                              mode: modes.count == 1 ? modes[0] : nil)
+            state.canFavorite = state.favorite != nil && ((try? isPressable(favoriteMenuItem(isFavorite: state.favorite ?? false))) == true)
+            state.canSetMode = state.mode != nil && MusicPlaybackMode.allCases.allSatisfy { (try? isPressable(modeMenuItem($0))) == true }
+            if !state.canFavorite || !state.canSetMode { state.message = "部分状态不可用，请重新读取或在 QQ 音乐中操作" }
+            return state
+        }
+    }
+}

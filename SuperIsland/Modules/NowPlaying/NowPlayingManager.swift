@@ -60,8 +60,12 @@ final class NowPlayingManager: ObservableObject {
         initializedInstance?.shutdownExternalProcesses()
     }
 
-    @Published var title: String = ""
-    @Published var artist: String = ""
+    static func synchronizeAdvancedControlsIfInitialized() {
+        initializedInstance?.updateAdvancedControlContext()
+    }
+
+    @Published var title: String = "" { didSet { updateAdvancedControlContext() } }
+    @Published var artist: String = "" { didSet { updateAdvancedControlContext() } }
     @Published var album: String = ""
     @Published var albumArt: NSImage?
     @Published var albumArtColor: NSColor?
@@ -74,6 +78,28 @@ final class NowPlayingManager: ObservableObject {
     @Published private(set) var isOpeningPlaybackSource = false
     @Published private var failedPlaybackSource: NowPlayingSourceOpener.Snapshot?
     private let sourceOpener = NowPlayingSourceOpener()
+    let advancedControls = NowPlayingAdvancedControls()
+    var hasAdvancedMusicControls: Bool { currentBundleIdentifier == QQMusicControlAdapter.bundleID }
+
+    private func updateAdvancedControlContext() {
+        let supportsAdvanced = hasAdvancedMusicControls
+        if AppState.shared.musicPreviewSupportsAdvancedControls != supportsAdvanced {
+            AppState.shared.musicPreviewSupportsAdvancedControls = supportsAdvanced
+        }
+        guard AppState.shared.nowPlayingEnabled else {
+            advancedControls.updateContext(nil)
+            return
+        }
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: currentBundleIdentifier)
+        guard !title.isEmpty, apps.count == 1, let app = apps.first else {
+            advancedControls.updateContext(nil)
+            return
+        }
+        advancedControls.updateContext(.init(bundleID: currentBundleIdentifier,
+            processID: app.processIdentifier, launchDate: app.launchDate,
+            trackID: currentTrackIdentifier, title: title, artist: artist))
+    }
+
     @Published var browserDetectionTestMessage: String = ""
     @Published var browserDetectionEnabled: Bool = UserDefaults.standard.bool(forKey: nowPlayingBrowserDetectionEnabledKey) {
         didSet {
@@ -101,7 +127,7 @@ final class NowPlayingManager: ObservableObject {
     private var currentAlbumArtist: String = ""
     private var currentArtworkURL: String?
     private var currentArtworkIdentity: String?
-    private var currentTrackIdentifier: String = ""
+    private var currentTrackIdentifier: String = "" { didSet { updateAdvancedControlContext() } }
     private var currentTrackIsLocalFile = false
 
     private var handle: UnsafeMutableRawPointer?
@@ -123,7 +149,7 @@ final class NowPlayingManager: ObservableObject {
     // Track the most recent Chrome media tab and the last one paused by our controls.
     private var currentChromeTabURL: String = ""
     private var lastPausedChromeTabURL: String = ""
-    private var currentBundleIdentifier: String = ""
+    @Published private var currentBundleIdentifier: String = "" { didSet { updateAdvancedControlContext() } }
     private var lastPlaybackUpdateDate: Date = .distantPast
     private var recentTrackChangeDate: Date = .distantPast
     private var lastKnownSnapshot: NowPlayingSnapshot?
@@ -1902,6 +1928,7 @@ final class NowPlayingManager: ObservableObject {
     /// process-lifetime singleton, so relying on `deinit` leaves the Perl
     /// MediaRemote stream orphaned when AppKit terminates the application.
     func shutdownExternalProcesses() {
+        advancedControls.shutdown()
         adapterStreamTask?.cancel()
         adapterStreamTask = nil
         if let adapterProcess {

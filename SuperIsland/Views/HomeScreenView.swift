@@ -121,8 +121,15 @@ private struct HomeNowPlayingPanel: View {
                                 .padding(.bottom, 4)
                         }
 
-                        controlsRow
-                            .frame(maxWidth: .infinity, alignment: .center)
+                        VStack(spacing: 4) {
+                            controlsRow
+                                .accessibilityIdentifier("data-annotation-id=now-playing-transport")
+                            if manager.hasAdvancedMusicControls {
+                                MusicAdvancedButtons()
+                                MusicControlStatusView()
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
                     }
 
                     sliderSection
@@ -192,6 +199,7 @@ private struct HomeNowPlayingPanel: View {
                 manager.seek(to: manager.duration * newProgress)
             }
             .frame(height: 14)
+            .accessibilityIdentifier("data-annotation-id=now-playing-seek")
 
             HStack {
                 Text(manager.formattedElapsedTime)

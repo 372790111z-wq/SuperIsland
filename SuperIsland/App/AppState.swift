@@ -266,7 +266,9 @@ final class AppState: ObservableObject {
     @Published private(set) var presentationHasNotch: Bool = false
     @Published private(set) var presentationNotchRect: NSRect? = nil
     // Module enabled states (persisted via UserDefaults)
-    @AppStorage("module.nowPlaying.enabled") var nowPlayingEnabled = true
+    @AppStorage("module.nowPlaying.enabled") var nowPlayingEnabled = true {
+        didSet { NowPlayingManager.synchronizeAdvancedControlsIfInitialized() }
+    }
     @AppStorage("module.volumeHUD.enabled") var volumeHUDEnabled = true
     @AppStorage("module.brightnessHUD.enabled") var brightnessHUDEnabled = true
     @AppStorage("module.battery.enabled") var batteryEnabled = true
@@ -372,8 +374,14 @@ final class AppState: ObservableObject {
         return true
     }
 
-    init(synchronizesRuntimeEnergyState: Bool = true) {
+    private let musicHoverSnapshot: @MainActor () -> (playing: Bool, title: String)
+
+    init(synchronizesRuntimeEnergyState: Bool = true,
+         musicHoverSnapshot: @escaping @MainActor () -> (playing: Bool, title: String) = {
+             (NowPlayingManager.shared.isPlaying, NowPlayingManager.shared.title)
+         }) {
         self.synchronizesRuntimeEnergyState = synchronizesRuntimeEnergyState
+        self.musicHoverSnapshot = musicHoverSnapshot
     }
 
     /// A lease never dismisses an existing presentation or interrupts input.
@@ -559,6 +567,8 @@ final class AppState: ObservableObject {
 
         return false
     }
+
+    @Published var musicPreviewSupportsAdvancedControls = false
 
     // MARK: - State Transitions
 
@@ -999,6 +1009,22 @@ final class AppState: ObservableObject {
                 return
             }
 
+            // A visible music preview remains half-expanded, including when paused.
+            if self.currentState == .expanded, self.activeBuiltInModule == .nowPlaying {
+                return
+            }
+            let music = self.musicHoverSnapshot()
+            if self.currentState == .compact,
+               self.compactPresentationModule == .builtIn(.nowPlaying),
+               MusicHoverPolicy.showsPreview(enabled: self.nowPlayingEnabled,
+                   playing: music.playing, title: music.title) {
+                self.cancelAutoDismiss()
+                self.cancelFullExpandedDismiss()
+                self.previousModule = self.activeModule
+                self.activeModule = .builtIn(.nowPlaying)
+                self.expand()
+                return
+            }
             self.open()
         }
 
@@ -1389,6 +1415,10 @@ final class AppState: ObservableObject {
                 height: baseSize.height
             )
         case .expanded:
+            if activeBuiltInModule == .nowPlaying {
+                return CGSize(width: Constants.expandedSize.width,
+                    height: musicPreviewSupportsAdvancedControls ? 134 : 100)
+            }
             return Constants.expandedSize
         case .fullExpanded:
             var base = Constants.fullExpandedSize
