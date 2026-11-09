@@ -47,6 +47,20 @@ final class MusicHoverPolicyTests: XCTestCase {
         XCTAssertFalse(QQMusicControlAdapter.trackMatches(description: description, title: "Song", artist: ""))
         XCTAssertFalse(QQMusicControlAdapter.trackMatches(description: "推荐：" + description, title: "Song", artist: "Artist"))
     }
+    func testQQMultiArtistCreditsAllowSystemLeadArtist() {
+        let description = "歌曲名：Song (original ver) - 歌手名：Lead/Guest"
+        XCTAssertTrue(QQMusicControlAdapter.trackMatches(description: description, title: "Song (original ver)", artist: "Lead"))
+        XCTAssertTrue(QQMusicControlAdapter.trackMatches(description: description, title: "Song (original ver)", artist: "Lead/Guest"))
+        XCTAssertFalse(QQMusicControlAdapter.trackMatches(description: description, title: "Song", artist: "Lead"))
+        XCTAssertFalse(QQMusicControlAdapter.trackMatches(description: description, title: "Song (original ver)", artist: "Guest"))
+        XCTAssertFalse(QQMusicControlAdapter.trackMatches(description: description, title: "Song (original ver)", artist: "Lea"))
+    }
+    func testQQArtistCompatibilityRejectsMalformedAndUnknownSeparators() {
+        for credits in ["Lead/", "/Lead", "Lead//Guest", "Lead & Guest", "Lead, Guest", "LeadX/Guest"] {
+            XCTAssertFalse(QQMusicControlAdapter.trackMatches(description: "歌曲名：Song - 歌手名：\(credits)", title: "Song", artist: "Lead"), credits)
+        }
+        XCTAssertTrue(QQMusicControlAdapter.trackMatches(description: "歌曲名：Song - 歌手名：Lead / Guest", title: "Song", artist: "Lead"))
+    }
 }
 
 private actor ControlledMusicAdapter: MusicAdvancedAdapter {

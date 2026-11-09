@@ -85,13 +85,24 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
     static func trackMatches(description: String, title: String, artist: String) -> Bool {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        return description == "歌曲名：\(title) - 歌手名：\(artist)"
+        let prefix = "歌曲名：\(title) - 歌手名："
+        guard description.hasPrefix(prefix) else { return false }
+        let qqArtist = String(description.dropFirst(prefix.count))
+        if qqArtist == artist { return true }
+        // QQ 11.10.5 publishes only the lead artist to system media metadata,
+        // while its playback bar joins the full credits with '/'. Do not accept
+        // arbitrary substrings, later collaborators, or unobserved separators.
+        let credits = qqArtist.components(separatedBy: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return credits.count > 1 && credits.allSatisfy { !$0.isEmpty }
+            && credits.first == artist
     }
 
     private final class Session {
         let context: MusicControlContext
         let fence: MusicControlFence
         let app: AXUIElement
+        private var verifiedPlaybackDescription: String?
         let deadline = ProcessInfo.processInfo.systemUptime + 3.5
         init(_ context: MusicControlContext, fence: MusicControlFence) throws {
             self.context = context; self.fence = fence
@@ -151,10 +162,16 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
         }
         func verifyTrack(in nodes: [AXUIElement]? = nil) throws {
             let candidates = try nodes ?? playbackChildren()
-            let matching = try candidates.filter {
-                QQMusicControlAdapter.trackMatches(description: try text($0, kAXDescriptionAttribute), title: context.title, artist: context.artist)
+            let matching = try candidates.map { try text($0, kAXDescriptionAttribute) }.filter {
+                QQMusicControlAdapter.trackMatches(description: $0, title: context.title, artist: context.artist)
             }
             guard matching.count == 1 else { throw Failure.track }
+            // Pin the full QQ identity across the read → send → readback session,
+            // even when the system exposes only the first artist.
+            if let verifiedPlaybackDescription, verifiedPlaybackDescription != matching[0] {
+                throw Failure.track
+            }
+            verifiedPlaybackDescription = matching[0]
         }
         func playbackMenu() throws -> AXUIElement {
             guard let raw = try value(app, kAXMenuBarAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { throw Failure.unavailable }
