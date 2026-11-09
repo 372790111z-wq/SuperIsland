@@ -118,6 +118,15 @@ struct IslandContainerView: View {
                     )
                 )
 
+            if contentMode == .production, appState.currentState == .expanded,
+               appState.activeBuiltInModule == .nowPlaying {
+                Color.clear.contentShape(islandShape)
+                    .onTapGesture {
+                        guard appState.canHandleIslandInput(generation: inputGeneration) else { return }
+                        appState.open()
+                    }
+            }
+
             islandContent
                 .frame(width: surfaceSize.width, height: surfaceSize.height, alignment: .top)
         }
@@ -500,6 +509,8 @@ struct IslandContainerView: View {
             return
         }
 
+        // Music owns its own blank/title taps so child controls never trigger expansion.
+        if appState.currentState == .expanded, appState.activeBuiltInModule == .nowPlaying { return }
         switch appState.currentState {
         case .compact, .expanded:
             appState.open()

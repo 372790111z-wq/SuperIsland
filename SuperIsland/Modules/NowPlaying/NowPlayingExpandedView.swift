@@ -14,44 +14,60 @@ struct NowPlayingExpandedView: View {
         }
     }
 
-    // MARK: - Compact Expanded (360x80)
+    // MARK: - Music hover preview
 
     private var compactExpandedView: some View {
-        HStack(spacing: 12) {
-            // Album art
-            NowPlayingSourceButton {
-                AlbumArtView(image: manager.albumArt, size: 56)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(manager.title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-
-                Text(manager.artist)
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.7))
-                    .lineLimit(1)
-
-                // Progress bar
-                ProgressBar(
-                    progress: manager.progress,
-                    trackHeight: 3,
-                    knobSize: 8
-                ) { newProgress in
-                    manager.seek(to: manager.duration * newProgress)
+        VStack(spacing: 4) {
+            HStack(spacing: 10) {
+                NowPlayingSourceButton {
+                    AlbumArtView(image: manager.albumArt, size: 48)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Button(action: appState.open) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(manager.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                            Text(manager.artist).font(.system(size: 11)).foregroundStyle(.white.opacity(0.7))
+                        }
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("展开音乐面板")
+                    ProgressBar(progress: manager.progress, trackHeight: 3, knobSize: 8,
+                        onSeek: manager.duration > 0 ? { manager.seek(to: manager.duration * $0) } : nil)
+                        .accessibilityIdentifier("data-annotation-id=now-playing-seek")
                 }
             }
-
-            // Play/Pause button
-            Button(action: { manager.togglePlayPause() }) {
-                Image(systemName: manager.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 18))
-                    .foregroundColor(.white)
+            HStack(spacing: 8) {
+                if manager.hasAdvancedMusicControls { MusicAdvancedButtons() }
+                Spacer(minLength: 0)
+                previewTransport("backward.fill", label: "上一首", action: manager.previousTrack)
+                previewTransport(manager.isPlaying ? "pause.fill" : "play.fill",
+                    label: manager.isPlaying ? "暂停" : "播放", action: manager.togglePlayPause)
+                previewTransport("forward.fill", label: "下一首", action: manager.nextTrack)
             }
-            .buttonStyle(.plain)
+            .accessibilityIdentifier("data-annotation-id=now-playing-transport")
+            if manager.hasAdvancedMusicControls { MusicControlStatusView() }
         }
+        .background {
+            Color.clear.contentShape(Rectangle()).onTapGesture { appState.open() }
+        }
+        .accessibilityIdentifier("data-annotation-id=now-playing-hover-preview")
+    }
+
+    private func previewTransport(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .help(label)
+        .hoverPointer()
     }
 
     // MARK: - Full Expanded (400x200+)

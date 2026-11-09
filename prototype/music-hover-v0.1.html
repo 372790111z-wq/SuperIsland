@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SuperIsland · 音乐悬停交互稿</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:#f1f1f3;background:#141416}*{box-sizing:border-box}body{margin:0}main{max-width:1000px;margin:0 auto;padding:42px 28px}header small{color:#b5a5f6;letter-spacing:.12em}h1{font-size:28px;margin:12px 0}p{color:#aaaab1;line-height:1.7}button,select,input{font:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:2px solid #c5b5ff;outline-offset:4px}.toolbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:26px 0 16px}.toolbar select,.toolbar button{background:#28282c;color:inherit;border:1px solid #44444a;padding:9px 12px;border-radius:9px}.toolbar label{font-size:14px}.scene{position:relative;height:360px;border-radius:16px;background:radial-gradient(ellipse at 15% 100%,#3b3650,transparent 65%),linear-gradient(130deg,#262c3b,#464054);border:1px solid #4b4755;overflow:hidden}.menubar{height:30px;padding:6px 15px;font-size:11px;color:#bcbcc7;background:#ffffff07;display:flex;justify-content:space-between}.stage{position:absolute;inset:0;pointer-events:none}.island{pointer-events:auto;position:relative;margin:0 auto;width:200px;height:36px;background:#050505;border-radius:0 0 18px 18px;box-shadow:0 15px 32px #0005;transition:width .25s,height .25s,border-radius .25s;overflow:hidden;cursor:pointer;color:#fff}.island[data-state="half"]{width:408px;height:100px;border-radius:0 0 22px 22px}.island[data-state="full"]{width:min(658px,100%);height:244px;border-radius:0 0 36px 36px}.compact{height:36px;display:flex;align-items:center;justify-content:space-between;padding:0 13px}.mini-art{width:22px;height:22px;border-radius:5px;background:linear-gradient(35deg,#7491a2,#b9abc0)}.wave{color:#b7a4d5;letter-spacing:2px;font-size:18px}.player{padding:23px 16px 12px;display:flex;align-items:center;gap:12px}.cover{flex-shrink:0;width:56px;height:56px;border:0;border-radius:8px;background:linear-gradient(30deg,#6c93a5,#c1adc1);color:#263344;font-size:23px}.copy{flex:1;min-width:0}.title{font-size:13px;font-weight:600;margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.artist{font-size:11px;color:#aaa;margin-bottom:5px}.play{border:0;background:none;color:white;font-size:21px;width:38px;height:38px;flex-shrink:0;border-radius:10px}.play:hover{background:#ffffff12}input[type="range"]{display:block;width:100%;height:16px;margin:0;accent-color:#fff;cursor:ew-resize}.tabs{display:flex;gap:26px;padding:16px 22px 0;font-size:12px;color:#777}.tabs strong{color:white}.full .player{padding:20px 26px 10px}.full .cover{width:80px;height:80px;font-size:35px}.full .title{font-size:16px}.full .artist{font-size:13px}.full .album{font-size:11px;color:#888;margin-bottom:10px}.more{display:flex;align-items:center;justify-content:center;gap:35px}.more button{color:white;border:0;background:transparent;font-size:23px}.more .play{font-size:30px}.empty{padding:50px 25px;text-align:center;color:#bbb;font-size:14px}.desktop-note{position:absolute;bottom:32px;left:24px;right:24px;text-align:center;color:#cbc7d3;font-size:13px;pointer-events:none}.status{min-height:46px;padding:14px 0;font-size:13px;color:#c6b7ee}.rules{display:grid;grid-template-columns:1fr 1fr;gap:28px;border-top:1px solid #333;padding-top:22px}.rules h2{font-size:15px}.rules p{font-size:13px;margin:8px 0}.tag{display:inline-block;padding:3px 7px;border:1px solid #56505f;color:#c9bbdf;border-radius:5px;font-size:11px}.foot{font-size:12px;margin-top:26px} [hidden]{display:none!important}@media(max-width:600px){main{padding:24px 14px}.rules{grid-template-columns:1fr;gap:8px}.island[data-state="half"]{width:min(408px,100%)}.scene{height:330px}.toolbar{gap:10px}h1{font-size:24px}.tabs{gap:18px}}
+.transport{display:flex;align-items:center;gap:1px;flex-shrink:0}.transport button{width:30px;height:36px;padding:6px;border:0;border-radius:8px;background:none;color:#fff;display:grid;place-items:center}.transport .play{width:34px;font-size:21px}.transport button:hover{background:#ffffff18}.skip svg{width:17px;height:17px;fill:currentColor}.more .skip{width:34px;height:38px;display:grid;place-items:center}.more .skip svg{width:23px;height:23px}.cover:hover{filter:brightness(1.15)}
+.qq-actions{display:flex;align-items:center;gap:4px;margin-top:2px}.qq-actions button{border:0;color:#aaa;background:none;border-radius:5px;width:27px;height:25px;padding:3px;display:grid;place-items:center}.qq-actions button:hover{background:#ffffff18;color:white}.qq-actions button[aria-pressed="true"]{color:#ff718c}.qq-actions svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.qq-actions .favorite[aria-pressed="true"] svg{fill:currentColor}.mode-wrap{position:relative;display:flex}.mode-one{position:absolute;left:8px;top:5px;font-size:8px;background:#050505;line-height:9px}.half .artist{margin-bottom:0}.qq-actions small{font-size:10px;color:#777}.island[data-state="half"].qq{height:118px}.half .player{align-items:center}.full .qq-actions{margin-top:4px}
+.qq-actions button:disabled{opacity:.45;cursor:default}.qq-actions button.unknown{position:relative}.qq-actions button.unknown::after{content:"?";position:absolute;right:0;bottom:0;background:#171717;color:#ddd;font-size:10px;border-radius:4px}.qq-actions .mode-label{white-space:nowrap}.qq-actions button[aria-busy="true"]{opacity:.5}
+</style>
+<main>
+<header><small>SUPERISLAND · 交互需求稿 v0.1</small><h1>先看一条，再展开更多</h1><p>音乐播放时，悬停显示音乐横条；点击歌曲信息或横条空白区域，再打开完整面板。</p></header>
+<div class="toolbar"><label>初始场景 <select id="scenario"><option value="playing">音乐正在播放</option><option value="paused">音乐已暂停</option><option value="empty">没有音乐信息</option><option value="disabled">音乐模块已关闭</option></select></label><label>播放来源 <select id="source"><option value="qq">QQ 音乐（能力演示）</option><option value="other">其他播放器（基础控制）</option></select></label><label>QQ 控制模拟 <select id="result"><option value="ok">成功回读</option><option value="unknown">状态读取失败</option><option value="failure">操作失败</option></select></label><button id="reset">重置演示</button><span class="tag">虚构曲目 · 不控制真实音乐</span></div>
+<section class="scene" aria-label="桌面交互演示">
+<div class="menubar"><span>SuperIsland</span><span>桌面预览</span></div>
+<div class="stage"><div id="island" class="island" data-state="compact" tabindex="0" role="group" aria-label="灵动岛：悬停预览，点击空白处展开">
+<div class="compact"><span class="mini-art"></span><span class="wave" id="wave">▂▆▃▅</span></div>
+<div class="half" hidden><div class="player">
+<button class="cover" title="打开播放来源" aria-label="打开播放来源（演示）">♫</button><div class="copy"><div class="title">午后漫步</div><div class="artist">示例音乐人</div><input type="range" class="seek" min="0" max="100" value="34" aria-label="播放进度"><div class="qq-actions"><button class="favorite" aria-label="收藏当前歌曲（演示）" title="收藏当前歌曲" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/></svg></button><button class="repeat-mode" aria-label="列表循环（演示）；切换为单曲循环" title="列表循环；点击切换"><span class="mode-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 2 4 4-4 4M4 11V9a3 3 0 0 1 3-3h13M8 22l-4-4 4-4m12-1v2a3 3 0 0 1-3 3H4"/></svg><span class="mode-one" hidden>1</span></span></button><small class="mode-label">顺序播放</small></div></div><div class="transport"><button class="skip" data-direction="-1" aria-label="上一首" title="上一首"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h3v14H4zM20 5v14L8 12z"/></svg></button><button class="play" aria-label="暂停" title="播放／暂停">Ⅱ</button><button class="skip" data-direction="1" aria-label="下一首" title="下一首"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5h3v14h-3zM4 5l12 7-12 7z"/></svg></button></div>
+</div></div>
+<div class="full" hidden><div class="tabs"><span>首页</span><strong>正在播放</strong><span>其他模块</span></div><div class="player"><button class="cover" title="打开播放来源" aria-label="打开播放来源（演示）">♫</button><div class="copy"><div class="title">午后漫步</div><div class="artist">示例音乐人</div><div class="album">慢行时光 · 演示专辑</div><input type="range" class="seek" min="0" max="100" value="34" aria-label="播放进度"><div class="qq-actions"><button class="favorite" aria-label="收藏当前歌曲（演示）" title="收藏当前歌曲" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/></svg></button><button class="repeat-mode" aria-label="列表循环（演示）；切换为单曲循环" title="列表循环；点击切换"><span class="mode-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 2 4 4-4 4M4 11V9a3 3 0 0 1 3-3h13M8 22l-4-4 4-4m12-1v2a3 3 0 0 1-3 3H4"/></svg><span class="mode-one" hidden>1</span></span></button><small class="mode-label">顺序播放</small></div></div></div><div class="more"><button class="skip" data-direction="-1" aria-label="上一首" title="上一首"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h3v14H4zM20 5v14L8 12z"/></svg></button><button class="play" aria-label="暂停">Ⅱ</button><button class="skip" data-direction="1" aria-label="下一首" title="下一首"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5h3v14h-3zM4 5l12 7-12 7z"/></svg></button></div></div>
+<div class="empty" hidden>完整面板 · 沿用现有首页入口</div>
+</div></div>
+<div class="desktop-note" id="outside">把鼠标移到顶部黑色灵动岛，停留 0.3 秒。移开约 1 秒后收起。</div>
+</section>
+<div class="status" id="status" role="status" aria-live="polite">已收起 · 等待悬停</div>
+<section class="rules"><div><h2>本次明确调整</h2><p>正在播放：收起 → 悬停 → 音乐横条 → 点击信息／空白处 → 完整面板。</p><p>停留在横条上不会自动升级为完整面板。直接点击收起的灵动岛，仍可直接全展开。</p></div><div><h2>沿用行为与待确认边界</h2><p>封面图标可点击打开播放来源；上一首、播放／暂停、下一首和进度拖动都可独立操作，不触发全展开。QQ 音乐额外显示收藏与顺序／单曲循环／随机播放模式，其他来源仅展示基础操作。状态未知时禁用对应按钮；操作失败保留原状态，允许重试。条内暂停后保持横条，避免操作中途跳变。</p><p>暂停后移开再悬停、没有曲目信息或音乐模块关闭时，沿用现有全展开。时延沿用设置，演示采用 0.3 秒／1 秒。</p></div></section>
+<p class="foot">这是浏览器交互模拟，尺寸与布局参考当前 Swift 实现；QQ 音乐收藏与循环状态仅为模拟，真实接口尚未验证；已只读确认 QQ 客户端包含顺序播放、单曲循环、随机播放；实际操作与状态回读仍待验证。完整面板仅展示相关区域。尚未修改或安装原生应用。通知、拖窗和系统交互抑制仍需原生实现回归。</p>
+</main>
+<script>
+const island=document.querySelector('#island'),status=document.querySelector('#status');
+const scenario=document.querySelector('#scenario'),source=document.querySelector('#source'),result=document.querySelector('#result');
+const tracks=['午后漫步','傍晚海风','夜色微光'];
+const modes=['顺序播放','单曲循环','随机播放'];
+const repeatPath='<path d="m16 2 4 4-4 4M4 11V9a3 3 0 0 1 3-3h13M8 22l-4-4 4-4m12-1v2a3 3 0 0 1-3 3H4"/>';
+const shufflePath='<path d="M3 6h3c4 0 8 12 12 12h3m-4-4 4 4-4 4M3 18h3c4 0 8-12 12-12h3m-4-4 4 4-4 4"/>';
+let favorites=new Set(),mode=0,pending=null,epoch=0;
+let state='compact',playing=true,hasTrack=true,enabled=true,hoverTimer,leaveTimer,seek=34,track=0;
+function message(t){status.textContent=t}
+function render(){
+ const qq=source.value==='qq',unknown=result.value==='unknown';island.classList.toggle('qq',qq);
+ result.disabled=!qq;document.querySelectorAll('.qq-actions').forEach(x=>x.hidden=!qq);
+ document.querySelectorAll('.favorite').forEach(b=>{
+  b.disabled=unknown||pending!==null;b.classList.toggle('unknown',unknown);
+  b.setAttribute('aria-pressed',unknown?'mixed':favorites.has(track)?'true':'false');
+  b.setAttribute('aria-busy',String(pending==='favorite'));
+  b.title=unknown?'收藏状态暂不可用':favorites.has(track)?'取消收藏':'收藏当前歌曲';
+  b.setAttribute('aria-label',b.title+'（演示）');
+ });
+ document.querySelectorAll('.repeat-mode').forEach(b=>{
+  b.disabled=unknown||pending!==null;b.classList.toggle('unknown',unknown);
+  b.setAttribute('aria-busy',String(pending==='mode'));
+  b.title=unknown?'播放模式暂不可用':modes[mode]+'；切换为'+modes[(mode+1)%modes.length];
+  b.setAttribute('aria-label',b.title+'（演示）');
+  b.querySelector('svg').innerHTML=mode===2?shufflePath:repeatPath;
+  b.querySelector('.mode-one').hidden=unknown||mode!==1;
+ });
+ document.querySelectorAll('.mode-label').forEach(x=>x.textContent=unknown?'状态未知':modes[mode]);
+ island.dataset.state=state;
+ island.querySelector('.compact').hidden=state!=='compact';island.querySelector('.half').hidden=state!=='half';
+ island.querySelector('.full').hidden=state!=='full'||!enabled||!hasTrack;
+ island.querySelector('.empty').hidden=state!=='full'||(enabled&&hasTrack);
+ document.querySelectorAll('.play').forEach(b=>{b.textContent=playing?'Ⅱ':'▶';b.setAttribute('aria-label',playing?'暂停':'播放')});
+ document.querySelectorAll('.seek').forEach(x=>x.value=seek);
+ document.querySelectorAll('.title').forEach(x=>x.textContent=tracks[track]);
+ document.querySelector('#wave').textContent=playing&&hasTrack&&enabled?'▂▆▃▅':'···';
+}
+function setState(next){state=next;render();message(next==='compact'?'已收起 · 等待悬停':next==='half'?'音乐横条 · 悬停保持，点击信息或空白处全展开':'完整面板 · 移开后收起')}
+function invalidate(){epoch++;pending=null}
+function reset(){clearTimeout(hoverTimer);clearTimeout(leaveTimer);invalidate();playing=scenario.value==='playing';hasTrack=scenario.value!=='empty';enabled=scenario.value!=='disabled';seek=34;track=0;favorites.clear();mode=0;setState('compact')}
+source.addEventListener('change',reset);scenario.addEventListener('change',reset);document.querySelector('#reset').addEventListener('click',reset);
+result.addEventListener('change',()=>{invalidate();render();message(result.value==='unknown'?'演示：状态读取失败，QQ 专属操作暂不可用；切回“成功回读”可重试':'已切换模拟结果，未操作真实 QQ 音乐')});
+island.addEventListener('pointerenter',()=>{clearTimeout(leaveTimer);clearTimeout(hoverTimer);if(state!=='compact')return;hoverTimer=setTimeout(()=>setState(playing&&hasTrack&&enabled?'half':'full'),300)});
+island.addEventListener('pointerleave',()=>{clearTimeout(hoverTimer);leaveTimer=setTimeout(()=>setState('compact'),1000)});
+island.addEventListener('click',e=>{if(e.target.closest('button,input'))return;clearTimeout(hoverTimer);setState('full')});
+island.addEventListener('keydown',e=>{if(e.key==='Escape'){clearTimeout(hoverTimer);clearTimeout(leaveTimer);setState('compact')}else if(e.target===island&&(e.key==='Enter'||e.key===' ')){e.preventDefault();clearTimeout(hoverTimer);setState('full')}});
+document.querySelectorAll('.play').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();playing=!playing;render();message((playing?'已播放':'已暂停')+' · 保持当前面板')}));
+document.querySelectorAll('.seek').forEach(x=>{x.addEventListener('click',e=>e.stopPropagation());x.addEventListener('input',()=>{seek=Number(x.value);render();message('播放进度 '+seek+'% · 保持当前面板')})});
+document.querySelectorAll('.cover').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();message('演示：打开播放来源 · 未启动真实应用')}));
+document.querySelectorAll('.skip').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();invalidate();track=(track+Number(b.dataset.direction)+tracks.length)%tracks.length;seek=0;render();message((Number(b.dataset.direction)<0?'上一首':'下一首')+'：'+tracks[track]+' · 保持当前面板')}));
+function requestControl(kind){
+ if(source.value!=='qq'||result.value==='unknown'||pending!==null)return;
+ const generation=epoch,song=track,shouldFavorite=!favorites.has(track),nextMode=(mode+1)%modes.length;
+ const fail=result.value==='failure';pending=kind;render();message('演示：正在等待播放器确认…');
+ setTimeout(()=>{
+  if(generation!==epoch||song!==track||source.value!=='qq')return;
+  pending=null;
+  if(fail){render();message('演示：操作失败，原状态未改变；可重试或打开 QQ 音乐处理');return}
+  if(kind==='favorite'){if(shouldFavorite)favorites.add(song);else favorites.delete(song)}else mode=nextMode;
+  render();message('演示：'+(kind==='favorite'?(shouldFavorite?'已收藏':'已取消收藏'):modes[mode])+' · 未同步到 QQ 音乐');
+ },350);
+}
+document.querySelectorAll('.favorite').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();requestControl('favorite')}));
+document.querySelectorAll('.repeat-mode').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();requestControl('mode')}));
+render();
+</script>
+</html>
