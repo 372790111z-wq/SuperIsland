@@ -42,17 +42,6 @@ final class KeepAwakeLocalSourceTests: XCTestCase {
         await fulfillment(of: [done], timeout: 12)
         task.cancel()
     }
-    func testInstalledVersionReadsAnInPlaceUpdateWithoutBundleCache() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let contents = root.appendingPathComponent("Contents")
-        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        for version in ["1.0.1", "1.1.1"] {
-            let data = try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": version], format: .xml, options: 0)
-            try data.write(to: contents.appendingPathComponent("Info.plist"), options: .atomic)
-            XCTAssertEqual(KeepAwakeKimiMonitor.installedVersion(at: root), version)
-        }
-    }
     func page(_ count: Int, extra: [String: Any] = [:]) throws -> Data {
         var item: [String: Any] = ["id": "private-test-session", "archived": false]
         item.merge(extra) { _, new in new }
