@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// Read-only adapter for the installed Kimi Code Desktop 1.0.1 local server.
+/// Read-only adapter for the Kimi Code Desktop local server contract.
 /// The ID-only projection excludes prompts, titles, paths and reply content.
 /// CLI uses a separate source and is never inferred from the desktop process.
 enum KeepAwakeKimiMonitor {
@@ -61,13 +61,6 @@ enum KeepAwakeKimiMonitor {
             return port
         })).sorted().prefix(16).map { $0 }
     }
-    static func installedVersion(at appURL: URL) -> String? {
-        // Bundle caches its Info.plist. Re-read the file so an in-place app
-        // update cannot retain a previously accepted version in this process.
-        guard let data = try? Data(contentsOf: appURL.appendingPathComponent("Contents/Info.plist")),
-              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
-        return info["CFBundleShortVersionString"] as? String
-    }
     static func listeningPorts(pid: pid_t) async -> [Int] {
         await withCheckedContinuation { continuation in
           DispatchQueue.global(qos: .utility).async {
@@ -109,9 +102,6 @@ enum KeepAwakeKimiMonitor {
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.kimi.code.desktop")
         guard apps.count == 1, let app = apps.first, !app.isTerminated else {
             return .init(state: nil, message: "Kimi 未运行或实例不唯一；等待本机来源")
-        }
-        guard let url = app.bundleURL, installedVersion(at: url) == "1.0.1" else {
-            return .init(state: nil, message: "Kimi 当前版本尚未核验；未读取任务接口")
         }
         let pid = app.processIdentifier, launchDate = app.launchDate
         let ports = await listeningPorts(pid: pid)

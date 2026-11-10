@@ -1,16 +1,49 @@
 import AppKit
 import ApplicationServices
 
+/// The production AX boundary also lets tests exercise the real read/send/readback
+/// flow without relying on the machine's permissions or changing a user's player.
+struct QQMusicAccessibility {
+    var isTrusted: () -> Bool
+    var processMatches: (MusicControlContext) -> Bool
+    var value: (AXUIElement, String) -> (AXError, CFTypeRef?)
+    var actions: (AXUIElement) -> (AXError, [String])
+    var press: (AXUIElement) -> AXError
+
+    static let live = Self(
+        isTrusted: { AXIsProcessTrusted() },
+        processMatches: { context in
+            guard let running = NSRunningApplication(processIdentifier: context.processID) else { return false }
+            return !running.isTerminated && running.bundleIdentifier == context.bundleID
+                && running.launchDate == context.launchDate
+        },
+        value: { element, key in
+            AXUIElementSetMessagingTimeout(element, 0.15)
+            var result: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, key as CFString, &result)
+            return (error, result)
+        },
+        actions: { element in
+            var result: CFArray?
+            let error = AXUIElementCopyActionNames(element, &result)
+            return (error, result as? [String] ?? [])
+        },
+        press: { AXUIElementPerformAction($0, kAXPressAction as CFString) }
+    )
+}
+
 /// Reads only QQ's main playback bar and its Playback Control menu. No coordinates,
 /// account API, library traversal, activation, or automatic repeat of an action.
 final class QQMusicControlAdapter: MusicAdvancedAdapter {
     static let bundleID = "com.tencent.QQMusicMac"
+    private let accessibility: QQMusicAccessibility
+    init(accessibility: QQMusicAccessibility = .live) { self.accessibility = accessibility }
     private let queue = DispatchQueue(label: "superisland.qqmusic.controls", qos: .userInitiated)
 
     func read(_ context: MusicControlContext, fence: MusicControlFence) async -> MusicAdvancedSnapshot {
         await withCheckedContinuation { continuation in
-            queue.async {
-                do { continuation.resume(returning: try Session(context, fence: fence).read()) }
+            queue.async { [accessibility] in
+                do { continuation.resume(returning: try Session(context, fence: fence, accessibility: accessibility).read()) }
                 catch { continuation.resume(returning: Self.unavailable(error)) }
             }
         }
@@ -18,9 +51,9 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
 
     func apply(_ action: MusicAdvancedAction, context: MusicControlContext, fence: MusicControlFence) async -> MusicAdvancedSnapshot {
         await withCheckedContinuation { continuation in
-            queue.async {
+            queue.async { [accessibility] in
                 do {
-                    let session = try Session(context, fence: fence)
+                    let session = try Session(context, fence: fence, accessibility: accessibility)
                     let before = try session.read()
                     if action.matches(before) { continuation.resume(returning: before); return }
                     let target: AXUIElement
@@ -37,7 +70,10 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
                     try session.verifyTrack()
                     try session.check()
                     guard try session.isPressable(target) else { throw Failure.unavailable }
-                    let sent = AXUIElementPerformAction(target, kAXPressAction as CFString)
+                    // AX action discovery can yield while the source exits or the
+                    // owner cancels. Recheck after that last cross-process call.
+                    try session.check()
+                    let sent = accessibility.press(target)
                     // Even AX timeout can mean the action was sent: ONLY read afterwards.
                     for _ in 0..<8 {
                         Thread.sleep(forTimeInterval: 0.15)
@@ -56,13 +92,12 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
         }
     }
 
-    private enum Failure: Error { case permission, process, version, track, windowUnavailable, ambiguousWindow, controlsUnavailable, unavailable, timeout, cancelled }
+    private enum Failure: Error { case permission, process, track, windowUnavailable, ambiguousWindow, controlsUnavailable, unavailable, timeout, cancelled }
     private static func unavailable(_ error: Error) -> MusicAdvancedSnapshot {
         let message: String
         switch error as? Failure {
         case .permission: message = "需要辅助功能权限，请在系统设置中检查"
         case .process: message = "QQ 音乐已退出或重新启动，请重新读取"
-        case .version: message = "此 QQ 音乐版本尚未验证，请在播放器中操作"
         case .track: message = "无法核对当前歌曲，请打开 QQ 音乐后重试"
         case .windowUnavailable: message = "收藏和模式暂不可读：QQ 主窗口未就绪"
         case .ambiguousWindow: message = "收藏和模式暂不可读：无法唯一确认 QQ 主窗口"
@@ -89,7 +124,7 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
         guard description.hasPrefix(prefix) else { return false }
         let qqArtist = String(description.dropFirst(prefix.count))
         if qqArtist == artist { return true }
-        // QQ 11.10.5 publishes only the lead artist to system media metadata,
+        // QQ can publish only the lead artist to system media metadata,
         // while its playback bar joins the full credits with '/'. Do not accept
         // arbitrary substrings, later collaborators, or unobserved separators.
         let credits = qqArtist.components(separatedBy: "/")
@@ -102,30 +137,26 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
         let context: MusicControlContext
         let fence: MusicControlFence
         let app: AXUIElement
+        let accessibility: QQMusicAccessibility
         private var verifiedPlaybackDescription: String?
         let deadline = ProcessInfo.processInfo.systemUptime + 3.5
-        init(_ context: MusicControlContext, fence: MusicControlFence) throws {
-            self.context = context; self.fence = fence
-            guard AXIsProcessTrusted() else { throw Failure.permission }
+        init(_ context: MusicControlContext, fence: MusicControlFence, accessibility: QQMusicAccessibility) throws {
+            self.context = context; self.fence = fence; self.accessibility = accessibility
+            guard accessibility.isTrusted() else { throw Failure.permission }
             app = AXUIElementCreateApplication(context.processID)
-            AXUIElementSetMessagingTimeout(app, 0.15)
             try check()
         }
         func check() throws {
             guard fence.isValid else { throw Failure.cancelled }
             guard ProcessInfo.processInfo.systemUptime < deadline else { throw Failure.timeout }
             guard context.bundleID == QQMusicControlAdapter.bundleID,
-                  let running = NSRunningApplication(processIdentifier: context.processID),
-                  !running.isTerminated, running.bundleIdentifier == context.bundleID,
-                  running.launchDate == context.launchDate else { throw Failure.process }
-            guard let url = running.bundleURL,
-                  Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "11.10.5" else { throw Failure.version }
+                  accessibility.processMatches(context) else { throw Failure.process }
+            // Compatibility is established by bounded, unique semantic controls
+            // and confirmed state below, never by a marketing version string.
         }
         func value(_ element: AXUIElement, _ key: String) throws -> CFTypeRef? {
             try check()
-            var result: CFTypeRef?
-            AXUIElementSetMessagingTimeout(element, 0.15)
-            let error = AXUIElementCopyAttributeValue(element, key as CFString, &result)
+            let (error, result) = accessibility.value(element, key)
             if error == .cannotComplete { throw Failure.timeout }
             return error == .success ? result : nil
         }
@@ -191,11 +222,11 @@ final class QQMusicControlAdapter: MusicAdvancedAdapter {
             try unique(modeMenuItems()) { try text($0, kAXTitleAttribute) == mode.rawValue }
         }
         func isPressable(_ e: AXUIElement) throws -> Bool {
-            guard try value(e, kAXEnabledAttribute) as? Bool == true else { return false }
+            guard try text(e, kAXRoleAttribute) == kAXMenuItemRole,
+                  try value(e, kAXEnabledAttribute) as? Bool == true else { return false }
             try check()
-            var actions: CFArray?
-            guard AXUIElementCopyActionNames(e, &actions) == .success else { return false }
-            return (actions as? [String] ?? []).contains(kAXPressAction)
+            let (error, actions) = accessibility.actions(e)
+            return error == .success && actions.contains(kAXPressAction)
         }
         func read() throws -> MusicAdvancedSnapshot {
             let nodes = try playbackChildren()
