@@ -26,3 +26,5 @@
 ## 交付范围
 
 本轮生成本地代码和 Release 候选包，安装、GitHub 同步与其他设备实测另行处理。当前安装版本保持原样。回滚可弃用该候选分支/包；无设置格式迁移或原始图片删除。
+
+Release 候选已完成：版本 `20261112171859`，Apple Silicon，源码 `03b39f69edf87729640696f5a896145f6e636ecd`。ZIP SHA-256：`feb60b5ab06565bda3daee4a7f78f4bbafe3197ef6c3bb1e4adccdcaee2f9607`。构建回执、签名及解包校验记录在 `build/ScreenshotClipboardRelease.noindex/`；沿用本机签名，未公证，未安装，未发布。
