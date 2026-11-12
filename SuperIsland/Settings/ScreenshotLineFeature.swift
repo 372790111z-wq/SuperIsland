@@ -310,7 +310,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     private var interactionInProgress = false
     private var revealed = false
     private var started = false
-    private var lastClipboardChange = 0
+    private var clipboardSampler = ScreenshotClipboardSampler(changeCount: 0)
     private var screenObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
     private var watchedSystemFolder: URL?
@@ -354,7 +354,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         self.writeCapture = writeCapture
         isEnabled = defaults.object(forKey: "screenshotLine.enabled") as? Bool ?? true
         recoveryPending = defaults.bool(forKey: "screenshotLine.recoveryPending")
-        lastClipboardChange = pasteboard.changeCount
+        clipboardSampler = ScreenshotClipboardSampler(changeCount: pasteboard.changeCount)
         watchEnabled = defaults.object(forKey: "screenshotLine.watch") as? Bool ?? true
         clipboardEnabled = defaults.bool(forKey: "screenshotLine.clipboard")
         peekEnabled = defaults.object(forKey: "screenshotLine.peek") as? Bool ?? true
@@ -773,7 +773,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         }
         pb.clearContents()
         let wrote = pb.writeObjects(objects)
-        lastClipboardChange = pb.changeCount
+        clipboardSampler = ScreenshotClipboardSampler(changeCount: pb.changeCount)
         guard wrote else {
             if let exportedURL { try? FileManager.default.trashItem(at: exportedURL, resultingItemURL: nil) }
             setStatus(SL("复制失败。")); return
@@ -902,7 +902,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
 
     private func refreshClipboard() {
         clipboardTimer?.invalidate(); clipboardTimer = nil
-        lastClipboardChange = pasteboard.changeCount
+        clipboardSampler = ScreenshotClipboardSampler(changeCount: pasteboard.changeCount)
         guard started, isEnabled, clipboardEnabled else { return }
         clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.readClipboard() }
@@ -912,16 +912,12 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     private func readClipboard() {
         guard started, isEnabled, clipboardEnabled else { return }
         let pb = pasteboard
-        guard pb.changeCount != lastClipboardChange else { return }
-        lastClipboardChange = pb.changeCount
-        guard let entries = pb.pasteboardItems, entries.count == 1, let entry = entries.first else { return }
-        let types = Set(entry.types)
-        guard !types.contains(.string), !types.contains(.fileURL), !types.contains(.URL),
-              !types.contains(NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")),
-              !types.contains(NSPasteboard.PasteboardType("org.nspasteboard.TransientType")) else { return }
-        guard let data = entry.data(forType: .png) ?? entry.data(forType: .tiff), data.count <= 64 * 1024 * 1024,
-              let image = NSImage(data: data), let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) else { return }
+        let generation = pb.changeCount
+        let entries = pb.pasteboardItems ?? []
+        let transient = entries.contains { $0.types.contains(ScreenshotClipboardImage.transient) }
+        guard clipboardSampler.shouldRead(changeCount: generation, transient: transient),
+              let png = ScreenshotClipboardImage.png(from: entries),
+              pb.changeCount == generation else { return }
         // Another app may temporarily replace the clipboard (for example, for
         // dictation) and then restore the same image with a new changeCount.
         // Keep the existing card instead of treating that restoration as a capture.
@@ -1298,7 +1294,7 @@ extension ScreenshotLineFeature: NSMenuDelegate {
         action(SL("查看较早项目")) { [weak self] in self?.older() }
         action(SL("查看较新项目")) { [weak self] in self?.newer() }
         menu.addItem(.separator())
-        let clipboard = action(SL("接收纯图片剪贴板")) { [weak self] in if let self, self.isEnabled { self.clipboardEnabled.toggle() } }
+        let clipboard = action(SL("接收剪贴板图片")) { [weak self] in if let self, self.isEnabled { self.clipboardEnabled.toggle() } }
         clipboard.state = clipboardEnabled ? .on : .off
         let keep = action(SL("Finder 拖后保留")) { [weak self] in if let self, self.isEnabled { self.keepAfterFinder.toggle() } }
         keep.state = keepAfterFinder ? .on : .off
@@ -1977,8 +1973,9 @@ struct ScreenshotLineSettingsView: View {
                     Button(SL("选择目录…")) { line.chooseWatchFolder() }.disabled(line.takeoverActive)
                     Button(SL("跟随系统")) { line.resetWatchFolder() }.disabled(line.takeoverActive)
                 }
-                Toggle(SL("接收纯图片剪贴板"), isOn: $line.clipboardEnabled)
+                Toggle(SL("接收剪贴板图片"), isOn: $line.clipboardEnabled)
                     .accessibilityIdentifier(line.accessibilityPrefix + "clipboard-toggle")
+                    .help(SL("接收内嵌图片，可附带文字、链接或元数据；不读取链接目标。隐私和自动生成内容不接收，临时图片稳定后接收。"))
                 Toggle(SL("清空挂绳前询问"), isOn: Binding(get: { line.askBeforeClearAll }, set: { _ = line.setAskBeforeClearAll($0) }))
                     .disabled(line.clearInProgress)
                     .dataAnnotationID("si.sc.clear-ask-before")
