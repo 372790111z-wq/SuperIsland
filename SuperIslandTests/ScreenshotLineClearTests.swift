@@ -351,6 +351,72 @@ final class ScreenshotLineClearTests: XCTestCase {
         publishImage(image(200))
         XCTAssertEqual(line.items.count, 2, "A different image must still enter the lanyard")
     }
+    private final class ReplacingImageProvider: NSObject, NSPasteboardItemDataProvider {
+        let data: Data
+        var requested = false
+        init(_ data: Data) { self.data = data }
+        func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem,
+                        provideDataForType type: NSPasteboard.PasteboardType) {
+            requested = true
+            item.setData(data, forType: type)
+            pasteboard?.clearContents()
+            pasteboard?.setString("newer clipboard content", forType: .string)
+        }
+    }
+    @MainActor func testClipboardReplacementDuringLazyImageReadIsNotImported() throws {
+        let f = try Fixture(); defer { f.dispose() }
+        f.defaults.set(true, forKey: "screenshotLine.clipboard")
+        let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        memset(rep.bitmapData!, 80, rep.bytesPerRow * rep.pixelsHigh)
+        let data = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        let provider = ReplacingImageProvider(data), entry = NSPasteboardItem()
+        entry.setDataProvider(provider, forTypes: [.png])
+        f.pasteboard.clearContents(); XCTAssertTrue(f.pasteboard.writeObjects([entry]))
+        RunLoop.current.run(until: Date().addingTimeInterval(1.4))
+        XCTAssertTrue(provider.requested)
+        XCTAssertTrue(line.items.isEmpty, "Never import a snapshot replaced during lazy decoding")
+        let fresh = NSPasteboardItem(); fresh.setData(data, forType: .png)
+        f.pasteboard.clearContents(); XCTAssertTrue(f.pasteboard.writeObjects([fresh]))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.75))
+        XCTAssertEqual(line.items.count, 1, "A discarded race must not stop future arrivals")
+    }
+    @MainActor func testMixedTransientClipboardImportPreservesLifecycleAndPrivacy() throws {
+        let f = try Fixture(); defer { f.dispose() }
+        f.defaults.set(true, forKey: "screenshotLine.clipboard")
+        func publish(_ byte: UInt8, marker: NSPasteboard.PasteboardType? = nil) {
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            memset(rep.bitmapData!, Int32(byte), rep.bytesPerRow * rep.pixelsHigh)
+            let e = NSPasteboardItem()
+            e.setData(rep.representation(using: .png, properties: [:])!, forType: .png)
+            e.setString("file:///must-not-read.png", forType: .fileURL)
+            e.setString("unrelated text", forType: .string)
+            e.setString("", forType: ScreenshotClipboardImage.transient)
+            if let marker { e.setString("", forType: marker) }
+            f.pasteboard.clearContents(); XCTAssertTrue(f.pasteboard.writeObjects([e]))
+        }
+        func poll() { RunLoop.current.run(until: Date().addingTimeInterval(1.4)) }
+        publish(20)
+        let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
+        poll(); XCTAssertTrue(line.items.isEmpty, "Starting must not import clipboard history")
+        publish(60); poll(); XCTAssertEqual(line.items.count, 1)
+        let imported = try XCTUnwrap(line.items.first)
+        XCTAssertEqual(imported.url.deletingLastPathComponent(), f.root.appendingPathComponent("Clipboard"))
+        XCTAssertNotNil(NSBitmapImageRep(data: try Data(contentsOf: imported.url)))
+        publish(60); poll(); XCTAssertEqual(line.items.count, 1, "Mixed images must still deduplicate")
+        publish(100, marker: ScreenshotClipboardImage.concealed); poll()
+        publish(120, marker: ScreenshotClipboardImage.automatic); poll()
+        XCTAssertEqual(line.items.count, 1, "Privacy and automatic markers override image capability")
+        line.clipboardEnabled = false; publish(160); poll()
+        line.clipboardEnabled = true; poll()
+        XCTAssertEqual(line.items.count, 1, "Re-enabling must not import disabled-period history")
+        publish(200); poll(); XCTAssertEqual(line.items.count, 2)
+        line.copy(imported); poll(); XCTAssertEqual(line.items.count, 2, "Own copy must not reimport")
+    }
     @MainActor func testDisableDuringConfirmationCancelsWithoutSavingPreference() async throws {
         let f = try Fixture(); defer { f.dispose() }; let item = try f.file("one.png"); try f.index()
         let line = f.line(); line.start(appName: "SC2Test", installUI: false); defer { line.stop() }
