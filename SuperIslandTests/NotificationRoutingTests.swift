@@ -129,4 +129,25 @@ final class NotificationRoutingTests: XCTestCase {
         XCTAssertEqual(activations.last, true)
         XCTAssertTrue(manager.recentNotifications.isEmpty)
     }
+    func testIndependentTaskCompletionsNeverMergeOrSuppressAfterDismissal() async {
+        let state = AppState.shared
+        let oldEnabled = state.notificationsEnabled, oldSources = state.enabledNotificationSourceIDs
+        defer { state.notificationsEnabled = oldEnabled; state.enabledNotificationSourceIDs = oldSources }
+        state.notificationsEnabled = true; state.enabledNotificationSourceIDs = []
+        let manager = NotificationManager(startMonitoring: false, macSourceActivation: { _ in })
+        manager.applyFeedPreferences()
+        func completion(_ id: String) -> IslandNotification {
+            .init(sourceID: "task-completion:" + id, appName: "Codex", bundleIdentifier: nil, appIcon: "checkmark.circle", appIconURL: nil,
+                title: "Codex · 任务完成", body: "本次任务已完成。", senderName: nil, previewText: nil, avatarURL: nil, timestamp: Date(), tapAction: nil)
+        }
+        manager.addNotification(completion("first")); manager.addNotification(completion("second"))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(manager.recentNotifications.count, 2, "Same wording does not make independent tasks duplicates")
+        manager.clearAll()
+        manager.addNotification(completion("third"))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(manager.recentNotifications.map(\.sourceID), ["task-completion:third"])
+        manager.clearAll()
+    }
+
 }

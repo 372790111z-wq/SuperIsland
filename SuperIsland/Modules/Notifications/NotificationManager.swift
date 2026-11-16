@@ -1500,7 +1500,8 @@ final class NotificationManager: ObservableObject {
         if existing.sourceID == incoming.sourceID {
             return true
         }
-        if existing.sourceID.hasPrefix("macOS:") || incoming.sourceID.hasPrefix("macOS:") { return false }
+        // Equal wording is not identity for independent system or task events.
+        if [existing.sourceID, incoming.sourceID].contains(where: { $0.hasPrefix("macOS:") || $0.hasPrefix("task-completion:") }) { return false }
 
         if existing.appName.localizedCaseInsensitiveCompare(incoming.appName) == .orderedSame &&
             existing.title == incoming.title &&
@@ -1535,7 +1536,7 @@ final class NotificationManager: ObservableObject {
         if dismissedNotifications.contains(where: { $0.sourceID == notification.sourceID }) {
             return true
         }
-        if notification.sourceID.hasPrefix("macOS:") { return false }
+        if notification.sourceID.hasPrefix("macOS:") || notification.sourceID.hasPrefix("task-completion:") { return false }
 
         if dismissedNotifications.contains(where: { dismissed in
             notificationsAreSemanticallyEquivalent(notification, dismissed: dismissed)
