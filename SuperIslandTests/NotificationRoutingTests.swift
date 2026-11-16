@@ -1,62 +1,8 @@
 import XCTest
-import UserNotifications
 @testable import SuperIsland
 
 @MainActor
 final class NotificationRoutingTests: XCTestCase {
-    func testMasterSwitchConsumesDisabledEventsAndDeduplicatesEnabledEvents() {
-        var enabled = false, shown: [IslandNotification] = [], sent: [UNNotificationRequest] = []
-        let router = TaskCompletionNotifications(enabled: { enabled }, show: { shown.append($0) },
-            submit: { sent.append($0); $1() }, removePending: { _ in }, removeDelivered: { _ in })
-        router.receive(.init(id: "task-completion:off", sourceName: "Codex"))
-        enabled = true; router.synchronize()
-        router.receive(.init(id: "task-completion:off", sourceName: "Codex"))
-        XCTAssertTrue(shown.isEmpty); XCTAssertTrue(sent.isEmpty)
-        for _ in 0..<3 { router.receive(.init(id: "task-completion:on", sourceName: "Other source")) }
-        XCTAssertEqual(shown.count, 1); XCTAssertEqual(sent.count, 1)
-        XCTAssertEqual(shown.first?.sourceID, sent.first?.identifier)
-        enabled = false; router.synchronize()
-        router.receive(.init(id: "task-completion:off-again", sourceName: "Codex"))
-        XCTAssertEqual(sent.count, 1)
-    }
-
-    func testInflightRequestIsRemovedEvenIfSwitchReopensBeforeCallback() async {
-        var enabled = true, finished: (() -> Void)?, removed: [String] = [], delivered: [String] = []
-        let router = TaskCompletionNotifications(enabled: { enabled }, show: { _ in }, submit: { _, done in finished = done },
-            removePending: { removed += $0 }, removeDelivered: { delivered += $0 })
-        router.receive(.init(id: "old", sourceName: "Codex"))
-        enabled = false; router.synchronize()
-        XCTAssertEqual(removed, ["old"])
-        enabled = true; router.synchronize(); finished?()
-        for _ in 0..<10 { await Task.yield() }
-        XCTAssertEqual(delivered, ["old"])
-    }
-
-    func testReentrantDisableBeforeSystemSubmissionDoesNotSend() {
-        var enabled = true, sent = 0
-        let router = TaskCompletionNotifications(enabled: { enabled }, show: { _ in enabled = false },
-            submit: { _, _ in sent += 1 }, removePending: { _ in }, removeDelivered: { _ in })
-        router.receive(.init(id: "one", sourceName: "Codex"))
-        XCTAssertEqual(sent, 0)
-    }
-
-    func testSystemEchoSuppressionDoesNotHideOtherAppOrUnrelatedMessage() throws {
-        var shown: IslandNotification?
-        let router = TaskCompletionNotifications(enabled: { true }, show: { shown = $0 },
-            submit: { _, done in done() }, removePending: { _ in }, removeDelivered: { _ in })
-        router.receive(.init(id: "one", sourceName: "Codex"))
-        let message = try XCTUnwrap(shown)
-        func banner(_ source: String, bundle: String? = nil, title: String? = nil) -> IslandNotification {
-            .init(sourceID: source, appName: "Mac 通知", bundleIdentifier: bundle, appIcon: "app", appIconURL: nil,
-                  title: title ?? message.title, body: message.body, senderName: nil, previewText: nil,
-                  avatarURL: nil, timestamp: message.timestamp, tapAction: nil)
-        }
-        XCTAssertTrue(router.isEcho(banner("macOS:echo")))
-        XCTAssertFalse(router.isEcho(banner("macOS:other", bundle: "example.other")))
-        XCTAssertFalse(router.isEcho(banner("macOS:unrelated", title: "Another task")))
-        XCTAssertFalse(router.isEcho(banner("extension:one")))
-    }
-
     func testCompletionRequiresObservedMatchingTaskAndExplicitSuccessAcrossSources() throws {
         for source in ["codex-desktop", "codex-cli", "claude-code", "zcode-desktop"] {
             for flag in [true, false] {
@@ -129,25 +75,39 @@ final class NotificationRoutingTests: XCTestCase {
         XCTAssertEqual(activations.last, true)
         XCTAssertTrue(manager.recentNotifications.isEmpty)
     }
-    func testIndependentTaskCompletionsNeverMergeOrSuppressAfterDismissal() async {
+    func testSyntheticTaskEventsAreRejectedForEverySourceWhileRealNotificationsRemainVisible() async {
         let state = AppState.shared
         let oldEnabled = state.notificationsEnabled, oldSources = state.enabledNotificationSourceIDs
         defer { state.notificationsEnabled = oldEnabled; state.enabledNotificationSourceIDs = oldSources }
-        state.notificationsEnabled = true; state.enabledNotificationSourceIDs = []
+        state.notificationsEnabled = true
+        state.enabledNotificationSourceIDs = ["macOS", "compatibleApps", "extensions"]
         let manager = NotificationManager(startMonitoring: false, macSourceActivation: { _ in })
         manager.applyFeedPreferences()
-        func completion(_ id: String) -> IslandNotification {
-            .init(sourceID: "task-completion:" + id, appName: "Codex", bundleIdentifier: nil, appIcon: "checkmark.circle", appIconURL: nil,
-                title: "Codex · 任务完成", body: "本次任务已完成。", senderName: nil, previewText: nil, avatarURL: nil, timestamp: Date(), tapAction: nil)
+        func event(_ id: String, source: String) -> IslandNotification {
+            .init(sourceID: id, appName: source, bundleIdentifier: "example.fixture", appIcon: "app", appIconURL: nil,
+                  title: source + " · 任务完成", body: "本次任务已完成。", senderName: nil,
+                  previewText: nil, avatarURL: nil, timestamp: Date(), tapAction: nil)
         }
-        manager.addNotification(completion("first")); manager.addNotification(completion("second"))
+        // No app-name allowlist: all current sources and an unknown future source.
+        for source in KeepAwakeSource.all.map(\.id) + ["future-app"] {
+            manager.addNotification(event("task-completion:" + source, source: source))
+        }
         for _ in 0..<10 { await Task.yield() }
-        XCTAssertEqual(manager.recentNotifications.count, 2, "Same wording does not make independent tasks duplicates")
-        manager.clearAll()
-        manager.addNotification(completion("third"))
-        for _ in 0..<10 { await Task.yield() }
-        XCTAssertEqual(manager.recentNotifications.map(\.sourceID), ["task-completion:third"])
-        manager.clearAll()
-    }
+        XCTAssertTrue(manager.recentNotifications.isEmpty)
+        XCTAssertNil(manager.latestNotification)
 
+        // Identical wording from a real ingress must not be suppressed as an echo.
+        manager.addNotification(event("macOS:actual", source: "Codex"))
+        manager.addNotification(event("extension:actual", source: "Future App"))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(Set(manager.recentNotifications.map(\.sourceID)), ["macOS:actual", "extension:actual"])
+        manager.clearAll()
+
+        state.enabledNotificationSourceIDs = []
+        manager.applyFeedPreferences()
+        manager.addNotification(event("macOS:disabled", source: "Codex"))
+        manager.addNotification(event("task-completion:disabled", source: "Future App"))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(manager.recentNotifications.isEmpty)
+    }
 }

@@ -125,10 +125,6 @@ final class NotificationManager: ObservableObject {
     private var feedEnabled: Bool?
     private var feedSources: Set<String>?
     private let macSourceActivation: ((Bool) -> Void)?
-    private lazy var taskCompletions = TaskCompletionNotifications(
-        enabled: { AppState.shared.notificationsEnabled },
-        show: { [weak self] in self?.addNotification($0) })
-    func receiveTaskCompletion(_ event: TaskCompletionEvent) { taskCompletions.receive(event) }
 
     init(startMonitoring: Bool = true, macSourceActivation: ((Bool) -> Void)? = nil) {
         self.macSourceActivation = macSourceActivation
@@ -1133,9 +1129,9 @@ final class NotificationManager: ObservableObject {
 
     func addNotification(_ notification: IslandNotification) {
         let normalized = normalizedNotification(notification)
-        let enabled = AppState.shared.notificationsEnabled, allowed = isNotificationAllowed(normalized), echo = taskCompletions.isEcho(normalized)
-        SystemFeedbackDiagnostics.write("notificationDelivery", fields: ["stage": "received", "macOS": normalized.sourceID.hasPrefix("macOS:"), "enabled": enabled, "allowed": allowed, "echo": echo])
-        guard enabled, allowed, !echo else { return }
+        let enabled = AppState.shared.notificationsEnabled, allowed = isNotificationAllowed(normalized)
+        SystemFeedbackDiagnostics.write("notificationDelivery", fields: ["stage": "received", "macOS": normalized.sourceID.hasPrefix("macOS:"), "enabled": enabled, "allowed": allowed])
+        guard enabled, allowed else { return }
 
         let generation = feedGeneration
         DispatchQueue.main.async { [weak self] in
@@ -1200,7 +1196,6 @@ final class NotificationManager: ObservableObject {
             feedEnabled = enabled; feedSources = sources; feedGeneration &+= 1
         }
         applyMacNotificationSource()
-        taskCompletions.synchronize()
         guard AppState.shared.notificationsEnabled else {
             clearAll()
             if AppState.shared.activeBuiltInModule == .notifications { AppState.shared.dismiss() }
@@ -1304,7 +1299,10 @@ final class NotificationManager: ObservableObject {
     }
 
     private func isNotificationAllowed(_ notification: IslandNotification) -> Bool {
-        notification.sourceID.hasPrefix("task-completion:") || AppState.shared.isNotificationSourceEnabled(feedSource(for: notification))
+        // Old synthetic task events must not bypass source preferences or re-enter the feed.
+        // Actual notifications (including task-completion wording) follow normal sources.
+        !notification.sourceID.hasPrefix("task-completion:")
+            && AppState.shared.isNotificationSourceEnabled(feedSource(for: notification))
     }
 
     private func feedSource(for notification: IslandNotification) -> NotificationFeedSource {
@@ -1509,7 +1507,7 @@ final class NotificationManager: ObservableObject {
             return true
         }
         // Equal wording is not identity for independent system or task events.
-        if [existing.sourceID, incoming.sourceID].contains(where: { $0.hasPrefix("macOS:") || $0.hasPrefix("task-completion:") }) { return false }
+        if [existing.sourceID, incoming.sourceID].contains(where: { $0.hasPrefix("macOS:") }) { return false }
 
         if existing.appName.localizedCaseInsensitiveCompare(incoming.appName) == .orderedSame &&
             existing.title == incoming.title &&
@@ -1544,7 +1542,7 @@ final class NotificationManager: ObservableObject {
         if dismissedNotifications.contains(where: { $0.sourceID == notification.sourceID }) {
             return true
         }
-        if notification.sourceID.hasPrefix("macOS:") || notification.sourceID.hasPrefix("task-completion:") { return false }
+        if notification.sourceID.hasPrefix("macOS:") { return false }
 
         if dismissedNotifications.contains(where: { dismissed in
             notificationsAreSemanticallyEquivalent(notification, dismissed: dismissed)

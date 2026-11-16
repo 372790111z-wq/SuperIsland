@@ -89,7 +89,8 @@ final class KeepAwakeService: ObservableObject {
             }
         }
     }
-    static let shared = KeepAwakeService(completionSink: { NotificationManager.shared.receiveTaskCompletion($0) })
+    // Task state drives power management and recap, never notification synthesis.
+    static let shared = KeepAwakeService()
     @Published private(set) var engine = KeepAwakeEngine()
     @Published private(set) var decision = KeepAwakeEngine.Decision(hold: false, title: "保持唤醒已关闭", detail: "打开自动模式或开始手动计时。")
     @Published private(set) var environment = KeepAwakeEngine.Environment()
