@@ -20,3 +20,10 @@
 - 保留原需求与历史归档，按BM1-S01无电池边界及KA1桌面能力约束修正实现；现有si.bm.simple、si.ka.status/menu标识沿用，没有改PRD或制造新设计版本。
 - 没有改变电池控制、机盖内核控制、系统权限或通知合成策略；没有修改用户已保存的模块开关。
 - 用户家中Mac mini未直接连接或实测。上述能力注入不等于该机器验收；当前未安装本机、未发布GitHub。修改保存在隔离worktree，可按文件差异恢复基线，不影响已发布20261116183302。
+
+## 安装阶段发现的所有权错误及修复
+
+- 候选 20261116222334 启动崩溃，符号化定位 BatteryManager.updateBatteryInfo。此前改造误把 IOPSGetPowerSourceDescription 的借用返回值用 takeRetainedValue 接收；SDK 说明该字典由 snapshot 持有、调用者不得释放。
+- 改为 takeUnretainedValue，并提取只读 readDescriptions 供生产与真实 IOPS 回归共用。原始两处 Copy API 仍使用 takeRetainedValue。
+- build/BatterySnapshotOwnership.xcresult：15 项通过，包含连续保留 100 份真实电源快照后访问字典；另以 swiftc -O 独立运行生产读取函数，1000 份实际快照可正常访问。此前纯字典能力测试没有覆盖系统 CF 所有权，不能代替此验证。
+- 失败候选已退出并恢复 20261116183302；修正版重新构建安装结果以本机安装回执为准。

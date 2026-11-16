@@ -35,6 +35,15 @@ enum BatteryPresence: Equatable {
         guard descriptions.allSatisfy({ $0?[kIOPSTypeKey] is String }) else { return .unknown }
         return hasBatteryHardware ? .unknown : .absent
     }
+    static func readDescriptions() -> [[String: Any]?]? {
+        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [Any] else { return nil }
+        return sources.map { source in
+            // Get returns a borrowed dictionary owned by snapshot, unlike the
+            // two Copy APIs above. Bridge it while snapshot is still alive.
+            IOPSGetPowerSourceDescription(snapshot, source as CFTypeRef)?.takeUnretainedValue() as? [String: Any]
+        }
+    }
     var offersBatteryUI: Bool { self != .absent }
 }
 
@@ -125,13 +134,7 @@ final class BatteryManager: ObservableObject {
     func updateBatteryInfo() {
         let wasPluggedIn = isPluggedIn
 
-        let descriptions: [[String: Any]?]?
-        if let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-           let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [Any] {
-            descriptions = sources.map { source in
-                IOPSGetPowerSourceDescription(snapshot, source as CFTypeRef)?.takeRetainedValue() as? [String: Any]
-            }
-        } else { descriptions = nil }
+        let descriptions = BatteryPresence.readDescriptions()
         let batteryHardware = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         presence = BatteryPresence.detect(descriptions, hasBatteryHardware: batteryHardware != 0)
         if batteryHardware != 0 { IOObjectRelease(batteryHardware) }

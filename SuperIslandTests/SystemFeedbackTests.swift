@@ -6,6 +6,17 @@ import IOKit.ps
 
 @MainActor
 final class SystemFeedbackTests: XCTestCase {
+    func testNativePowerSourceSnapshotsSurviveRepeatedReads() {
+        // Exercise actual CF ownership; synthetic dictionaries cannot catch an
+        // over-release of the dictionary borrowed from the IOPS snapshot.
+        let retainedSnapshots = (0..<100).map { _ in BatteryPresence.readDescriptions() }
+        for snapshot in retainedSnapshots {
+            for description in snapshot ?? [] {
+                if let description { XCTAssertFalse(description.isEmpty) }
+            }
+        }
+    }
+
     func testNonNotchedFeedbackUsesFullCapsuleAndKeepsItsSize() {
         let state = AppState(synchronizesRuntimeEnergyState: false)
         state.updatePresentationContext(screen: nil)
