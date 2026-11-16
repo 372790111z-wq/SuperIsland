@@ -1133,11 +1133,17 @@ final class NotificationManager: ObservableObject {
 
     func addNotification(_ notification: IslandNotification) {
         let normalized = normalizedNotification(notification)
-        guard AppState.shared.notificationsEnabled, isNotificationAllowed(normalized), !taskCompletions.isEcho(normalized) else { return }
+        let enabled = AppState.shared.notificationsEnabled, allowed = isNotificationAllowed(normalized), echo = taskCompletions.isEcho(normalized)
+        SystemFeedbackDiagnostics.write("notificationDelivery", fields: ["stage": "received", "macOS": normalized.sourceID.hasPrefix("macOS:"), "enabled": enabled, "allowed": allowed, "echo": echo])
+        guard enabled, allowed, !echo else { return }
 
         let generation = feedGeneration
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.feedGeneration == generation else { return }
+            guard let self else { return }
+            guard self.feedGeneration == generation else {
+                SystemFeedbackDiagnostics.write("notificationDelivery", fields: ["stage": "obsolete-generation"])
+                return
+            }
             self.recentNotifications = self.recentNotifications
                 .map { self.normalizedNotification($0) }
                 .filter { self.isNotificationAllowed($0) }
@@ -1150,6 +1156,7 @@ final class NotificationManager: ObservableObject {
 
             guard AppState.shared.notificationsEnabled, self.isNotificationAllowed(normalized),
                   !self.shouldSuppressIncomingNotification(normalized) else {
+                SystemFeedbackDiagnostics.write("notificationDelivery", fields: ["stage": "filtered-before-insert", "enabled": AppState.shared.notificationsEnabled, "allowed": self.isNotificationAllowed(normalized)])
                 return
             }
 
@@ -1177,6 +1184,7 @@ final class NotificationManager: ObservableObject {
             if self.recentNotifications.count > self.maxRetainedNotifications {
                 self.recentNotifications.removeLast(self.recentNotifications.count - self.maxRetainedNotifications)
             }
+            SystemFeedbackDiagnostics.write("notificationDelivery", fields: ["stage": "inserted", "macOS": normalized.sourceID.hasPrefix("macOS:"), "retained": self.recentNotifications.count])
             let eventID = mergedNotification.sourceID
             AppState.shared.presentIncomingNotification(eventID) { [weak self] in
                 guard let self, let event = self.recentNotifications.first(where: { $0.sourceID == eventID }) else { return false }

@@ -782,7 +782,9 @@ final class AppState: ObservableObject {
     /// Notification data already lives in NotificationManager; queue only its ID
     /// and a fresh availability check so removed/disabled events cannot replay.
     func presentIncomingNotification(_ id: String, isAvailable: @escaping () -> Bool) {
-        guard notificationsEnabled, !isZilanInteractionSuppressed, isAvailable() else { return }
+        let available = isAvailable()
+        SystemFeedbackDiagnostics.write("notificationPresentation", fields: ["enabled": notificationsEnabled, "available": available, "suppressed": isZilanInteractionSuppressed, "systemFeedback": compactSystemFeedback != nil, "hovering": isHovering, "shelfDrag": isShelfDragActive, "emojiInteraction": isSystemEmojiInteractionActive, "held": presentationHoldModule != nil, "compact": currentState == .compact, "automaticReturn": automaticNotificationReturn != nil])
+        guard notificationsEnabled, !isZilanInteractionSuppressed, available else { return }
         if compactSystemFeedback != nil {
             pendingNotificationPresentation = (id, isAvailable)
             return
