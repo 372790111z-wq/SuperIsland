@@ -1,6 +1,5 @@
 import AppKit
 import Combine
-import UserNotifications
 import Darwin
 
 /// Explicit opt-in, app-owned acceptance recording. It never controls power,
@@ -101,7 +100,6 @@ final class KeepAwakeService: ObservableObject {
     @Published private(set) var sourceRestorationIssues: Set<String> = []
     @Published private(set) var receivedSources: Set<String> = []
     @Published private(set) var activity: [String] = []
-    @Published private(set) var notificationStatus = "尚未检查通知权限"
     @Published private(set) var localSourceStatus = "等待首次只读检查"
     @Published private(set) var recoveryInProgress = false
     @Published private(set) var codexStatus = "当前任务状态通道未接通"
@@ -287,7 +285,6 @@ final class KeepAwakeService: ObservableObject {
                 }
             })
         }
-        refreshNotificationPermission()
     }
     func shutdown() {
         recap.shutdown()
@@ -573,7 +570,6 @@ final class KeepAwakeService: ObservableObject {
         pollLocalSource(now: now)
         pollCodexSource(now: now)
         for event in mailbox.read() where connections.contains(event.source) {
-            let previous = engine.sessions[event.storageKey]
             if engine.receive(event, now: now) {
                 if event.taskID == KeepAwakeHookContract.codexSessionEnded {
                     updateRecap(sessions: Array(engine.sessions.values.filter { $0.event.source == event.source && $0.event.session == event.session }), complete: false)
@@ -583,10 +579,6 @@ final class KeepAwakeService: ObservableObject {
                     "taskHash": event.taskID.map(KeepAwakeHookContract.anonymousIdentity) ?? "legacy",
                     "state": event.state.rawValue, "startsTask": event.startsTask ?? false])
                 receivedSources.insert(event.source)
-                if previous?.isUnfinished == true && event.state == .completed && engine.enabled &&
-                    !KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) {
-                    notifyCompletion(source: event.source, session: event.session, sequence: event.sequence)
-                }
             }
         }
         pollZCodeSource(now: now)
@@ -815,14 +807,9 @@ final class KeepAwakeService: ObservableObject {
             self.nextCodexPoll = arrived + 5
             self.codexSequence &+= 1
             for event in self.codexLedger.consume(snapshot: snapshot, now: arrived, sequence: self.codexSequence) {
-                let previous = self.engine.sessions[event.storageKey]
                 if self.engine.receive(event, now: arrived) {
                     if let session = self.engine.sessions[event.storageKey] { self.updateRecap(sessions: [session], complete: false) }
                     self.receivedSources.insert(source)
-                    if previous?.isUnfinished == true && event.state == .completed && self.engine.enabled &&
-                        !KeepAwakeHookContract.isAuxiliaryTask(source: event.source, taskID: event.taskID) {
-                        self.notifyCompletion(source: source, session: event.session, sequence: event.sequence)
-                    }
                 }
             }
             let unfinished = self.engine.sessions.values.filter { $0.event.source == source && $0.isUnfinished }
@@ -949,9 +936,6 @@ final class KeepAwakeService: ObservableObject {
                         "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
                         "taskHash": KeepAwakeHookContract.anonymousIdentity(result.identity.taskHash),
                         "state": state.rawValue, "startsTask": false, "evidence": "exact-codex-turn-status"])
-                    if state == .completed && self.engine.enabled {
-                        self.notifyCompletion(source: source, session: event.session, sequence: event.sequence)
-                    }
                 }
             }
             self.tick()
@@ -984,9 +968,6 @@ final class KeepAwakeService: ObservableObject {
                     "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
                     "taskHash": KeepAwakeHookContract.anonymousIdentity(result.identity.taskHash),
                     "state": event.state.rawValue, "startsTask": false, "evidence": "exact-turn-status"])
-                if event.state == .completed && self.engine.enabled {
-                    self.notifyCompletion(source: source, session: event.session, sequence: event.sequence)
-                }
             }
             self.tick()
         }
@@ -1028,26 +1009,5 @@ final class KeepAwakeService: ObservableObject {
     private func record(_ message: String) {
         activity.insert(Date().formatted(date: .omitted, time: .standard) + " · " + message, at: 0)
         if activity.count > 40 { activity.removeLast(activity.count - 40) }
-    }
-    func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] _, _ in
-            Task { @MainActor [weak self] in self?.refreshNotificationPermission() }
-        }
-    }
-    private func refreshNotificationPermission() {
-        UNUserNotificationCenter.current().getNotificationSettings { [weak self] value in
-            Task { @MainActor [weak self] in
-                self?.notificationStatus = value.authorizationStatus == .authorized ? "系统已允许通知" : "系统尚未允许通知；不影响保持唤醒"
-            }
-        }
-    }
-    private func notifyCompletion(source: String, session: String, sequence: UInt64) {
-        guard preferences.notifyCompletion, let name = KeepAwakeSource.all.first(where: { $0.id == source })?.name else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "SuperIsland · 任务完成"
-        content.body = name + " 的本次任务已完成。"
-        content.categoryIdentifier = "superisland.keep-awake.completion"
-        // NotificationManager does not turn notifications into new source events.
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "ka1.\(source).\(session).\(sequence)", content: content, trigger: nil))
     }
 }

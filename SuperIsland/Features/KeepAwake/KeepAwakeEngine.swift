@@ -14,6 +14,8 @@ struct KeepAwakeEngine: Equatable {
         var minimumBattery = 20
         var respectLowPower = true
         var screen: ScreenPolicy = .system
+        // Retained solely for old preference decoding and rollback compatibility.
+        // Completion events no longer send system notifications on any hardware.
         var notifyCompletion = true
     }
     struct Environment: Equatable {

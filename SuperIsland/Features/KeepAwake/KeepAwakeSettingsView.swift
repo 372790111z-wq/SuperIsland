@@ -218,12 +218,14 @@ struct KeepAwakeSettingsView: View {
                 }
                 HStack { Text("过热保护"); Spacer(); Text("始终开启").foregroundStyle(.secondary) }.padding(16)
                 SettingRowDivider()
-                SettingToggleRow(title: "任务完成提醒", description: "仅包含来源和状态，不含任务正文。", isOn: preference(\.notifyCompletion))
-                    .dataAnnotationID("si.ka.notify")
-                HStack {
-                    Text(service.notificationStatus).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Button("申请通知权限") { service.requestNotificationPermission() }
-                }.padding(16)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("任务完成后")
+                    Text(service.isNotebook
+                         ? "不额外发送完成通知。合盖期间的任务结果可在开盖回顾中查看。"
+                         : "不额外发送完成通知。任务状态仍会正常更新。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                    .dataAnnotationID("si.ka.completion-info")
             }.disabled(!service.engine.enabled)
                 .accessibilityElement(children: .contain).dataAnnotationID("si.ka.protection")
             controls
