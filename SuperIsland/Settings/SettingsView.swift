@@ -23,7 +23,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .windowEnhancement: "窗口增强"
         case .screenshotLine: "截图挂绳"
         case .keepAwake: "保持唤醒"
-        case .batteryManagement: "电池管理"
+        case .batteryManagement: "电池保护"
         case .advanced:   "高级"
         }
     }

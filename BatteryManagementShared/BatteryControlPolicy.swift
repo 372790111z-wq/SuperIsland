@@ -104,6 +104,7 @@ struct BatteryControlPreferences: Codable, Equatable {
 }
 
 struct BatteryControlRequest: Codable, Equatable {
+    var simpleProtectionVersion: Int? = 1
     var owner: UUID
     var preferences: BatteryControlPreferences
     var mode: BatteryControlMode = .automatic
@@ -300,7 +301,7 @@ struct BatteryControlReport: Codable, Equatable {
     var completedOperationID: UUID?
     var completionReason: BatteryOperationCompletionReason?
     var completionReceiptsSupported: Bool? = true
-    static let currentProtocolVersion = 18
+    static let currentProtocolVersion = 19
     // Optional so older helpers can be decoded and rejected before any renew.
     var protocolVersion: Int? = currentProtocolVersion
     var controlEpoch: UUID? = UUID()
@@ -351,6 +352,7 @@ struct BatteryControlReport: Codable, Equatable {
     var recoveryPending = false
     var requiresManualRetry: Bool? = false
     var manualRetryID: UUID?
+    var controlHeld: Bool?
     var exitHoldReady: Bool?
     var leaseHeldByRequester: Bool?
     var timestamp = Date()

@@ -153,11 +153,7 @@ final class BatteryScheduleService: ObservableObject {
             runs[i].verification = nil
         }
     }
-    func start() {
-        guard token == nil else { return }
-        token = ModuleRefreshScheduler.shared.register(id: "battery.management.schedules", name: "Battery scheduled tasks", module: nil, policy: .interval(60, tolerance: 5), enabled: { true }) { [weak self] in self?.evaluate() }
-        evaluate()
-    }
+    func start() { /* Archived schedules are never started by the reduced product. */ }
     func save(_ task: BatteryScheduledTask) throws {
         configurationError = nil
         guard !task.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -217,55 +213,9 @@ final class BatteryScheduleService: ObservableObject {
         }
     }
 
-    @discardableResult func evaluate(now: Date? = nil) -> Task<Void, Never>? {
-        let now = now ?? nowProvider()
-        verifyPending(now: now)
-        guard !executing else { return nil }
-        let due = tasks.filter { $0.enabled && ($0.nextDue.map { $0 <= now } ?? false) }
-        guard !due.isEmpty else { return nil }
-        executing = true
-        return Task {
-            defer { executing = false }
-            for task in due {
-                // Earlier requests may suspend while the user edits, disables
-                // or deletes a later task. Only dispatch the still-current
-                // occurrence; never advance or execute an outdated snapshot.
-                guard !Task.isCancelled else { break }
-                guard let current = tasks.first(where: { $0.id == task.id }),
-                      current.enabled, current == task else { continue }
-                let dispatchTime = max(now, nowProvider())
-                guard let fire = task.catchUp ? task.latestDue(at: dispatchTime) : task.nextDue else { continue }
-                let id = task.id.uuidString + ":" + String(fire.timeIntervalSince1970)
-                guard !runs.contains(where: { $0.id == id }) else { advance(task, after: dispatchTime); continue }
-                var run = BatteryScheduleRun(id: id, taskID: task.id, name: task.name, due: fire, timestamp: dispatchTime, status: "请求中", detail: "控制尚未确认")
-                let late = dispatchTime.timeIntervalSince(fire)
-                if late > 90 && (!task.catchUp || late > 86_400) {
-                    run.status = "已跳过"; run.detail = "错过计划时间；未开启24小时内补做或已超期"
-                }
-                runs.insert(run, at: 0); advance(task, after: dispatchTime)
-                guard persist() else { updateRun(id, status: "未执行", detail: "无法保存执行实例；没有提交硬件请求"); continue }
-                guard run.status == "请求中" else { continue }
-                do { _ = try await submit(task, runID: id) }
-                catch { recordFailure(id, error: error) }
-            }
-        }
-    }
+    @discardableResult func evaluate(now: Date? = nil) -> Task<Void, Never>? { nil }
     func runNow(_ task: BatteryScheduledTask) async throws -> String {
-        guard !executing else { throw BatteryControlError.conflict("已有任务正在提交，请稍后运行。") }
-        guard (20...100).contains(task.target), task.action != .discharge || task.target < 100 else {
-            throw BatteryControlError.invalid("放电目标需为20–99%，上限需为20–100%。")
-        }
-        executing = true
-        defer { executing = false }
-        let now = nowProvider(), id = "manual:" + UUID().uuidString
-        runs.insert(.init(id: id, taskID: task.id, name: task.name, due: now, timestamp: now,
-                          status: "请求中", detail: "手动运行；控制尚未确认"), at: 0)
-        guard persist() else {
-            updateRun(id, status: "未执行", detail: "无法保存执行实例；没有提交硬件请求")
-            throw BatteryControlError.unavailable("无法保存执行记录，未运行任务。")
-        }
-        do { return try await submit(task, runID: id) }
-        catch { recordFailure(id, error: error); throw error }
+        throw BatteryControlError.unavailable(BatterySimpleProtectionPolicy.removedMessage)
     }
 
     private func validateTaskCapability(_ task: BatteryScheduledTask) throws {

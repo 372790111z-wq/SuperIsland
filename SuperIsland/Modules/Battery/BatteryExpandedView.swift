@@ -30,7 +30,6 @@ struct BatteryExpandedView: View {
 
     private var expandedContent: AnyView {
         if appState.currentState == .fullExpanded { return AnyView(fullExpandedView) }
-        if control.notice != nil { return AnyView(BatteryStartupNotice()) }
         return AnyView(defaultExpandedView)
     }
 

@@ -41,6 +41,14 @@ struct BatteryReadOnlyQueries {
     }
 
     func limit() throws -> Int {
+        if let data = defaults.data(forKey: BatterySimplePreferences.key) {
+            guard let settings = try? JSONDecoder().decode(BatterySimplePreferences.self, from: data),
+                  !settings.needsLimitChoice, (80...100).contains(settings.limit) else {
+                throw BatteryControlError.unavailable("保存的充电上限需要确认；没有改写偏好。")
+            }
+            return settings.limit
+        }
+        // Before migration, read the historical value without creating settings.
         guard let data = defaults.data(forKey: "batteryManagement.preferences") else {
             return BatteryControlPreferences().limit
         }

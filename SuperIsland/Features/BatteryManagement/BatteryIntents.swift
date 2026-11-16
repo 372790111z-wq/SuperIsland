@@ -14,6 +14,7 @@ extension BatteryEnergyScope: AppEnum {
 }
 
 struct BatteryTopUpIntent: AppIntent {
+    static var isDiscoverable = false
     static var title: LocalizedStringResource = "充满电池"
     static var description = IntentDescription("临时充至100%，保持至断开电源。返回实际控制状态，达到电量目标需继续观察。")
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
@@ -21,6 +22,7 @@ struct BatteryTopUpIntent: AppIntent {
     }
 }
 struct BatteryPauseIntent: AppIntent {
+    static var isDiscoverable = false
     static var title: LocalizedStringResource = "暂停充电"
     static var description = IntentDescription("临时暂停充电，保留长期上限和低限值许可。")
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
@@ -28,6 +30,7 @@ struct BatteryPauseIntent: AppIntent {
     }
 }
 struct BatteryDischargeIntent: AppIntent {
+    static var isDiscoverable = false
     static var title: LocalizedStringResource = "放电至目标"
     static var description = IntentDescription("按设备支持的通道放电至目标；原生限值通道最低80%，不支持的低值会明确拒绝。")
     @Parameter(title: "目标电量（%）", default: 80, inclusiveRange: (20, 99)) var percentage: Int
@@ -36,6 +39,7 @@ struct BatteryDischargeIntent: AppIntent {
     }
 }
 struct BatteryCalibrateIntent: AppIntent {
+    static var isDiscoverable = false
     static var title: LocalizedStringResource = "开始电池校准"
     static var description = IntentDescription("执行100%→10%→100%→保持→原上限的校准；需持续接电，耗时较长。设备或辅助程序不支持时明确拒绝。")
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
@@ -43,6 +47,7 @@ struct BatteryCalibrateIntent: AppIntent {
     }
 }
 struct BatterySetLimitIntent: AppIntent {
+    static var isDiscoverable = false
     static var title: LocalizedStringResource = "设置充电上限"
     @Parameter(title: "长期上限（%）", default: 80, inclusiveRange: (20, 100)) var percentage: Int
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
@@ -84,6 +89,7 @@ struct BatteryTemperatureIntent: AppIntent {
     }
 }
 struct BatteryLEDIntent: AppIntent {
+    static var isDiscoverable = false
     static var title: LocalizedStringResource = "设置MagSafe灯色"
     @Parameter(title: "灯色", default: .system) var color: BatteryLED
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
@@ -94,6 +100,7 @@ struct BatteryLEDIntent: AppIntent {
     }
 }
 struct BatteryLowPowerIntent: AppIntent {
+    static var isDiscoverable = false
     static var title: LocalizedStringResource = "设置低功耗模式"
     @Parameter(title: "生效范围", default: .never) var scope: BatteryEnergyScope
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
@@ -101,6 +108,7 @@ struct BatteryLowPowerIntent: AppIntent {
     }
 }
 struct BatteryHighPowerIntent: AppIntent {
+    static var isDiscoverable = false
     static var title: LocalizedStringResource = "设置高功率模式"
     @Parameter(title: "生效范围", default: .never) var scope: BatteryEnergyScope
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
@@ -111,8 +119,6 @@ struct BatteryHighPowerIntent: AppIntent {
 struct BatteryAppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: BatteryLevelIntent(), phrases: ["用\(.applicationName)查看电池电量"], shortTitle: "电池电量", systemImageName: "battery.100")
-        AppShortcut(intent: BatteryTopUpIntent(), phrases: ["用\(.applicationName)充满电池"], shortTitle: "充满电池", systemImageName: "battery.100.bolt")
-        AppShortcut(intent: BatteryPauseIntent(), phrases: ["用\(.applicationName)暂停充电"], shortTitle: "暂停充电", systemImageName: "pause.circle")
         AppShortcut(intent: BatteryStatusIntent(), phrases: ["用\(.applicationName)查看充电状态"], shortTitle: "充电状态", systemImageName: "battery.75percent")
     }
 }

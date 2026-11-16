@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-16",
+  "branch": "feat/battery-simple-20261116",
+  "base": "d20736278873f500641df913fc97e42e825ebabe",
+  "tests": [
+    {
+      "name": "main-regression",
+      "testCount": 198,
+      "failed": 0,
+      "countedAgain": false
+    },
+    {
+      "name": "system-feedback",
+      "testCount": 11,
+      "failed": 0,
+      "countedAgain": false
+    },
+    {
+      "name": "review-recheck",
+      "testCount": 19,
+      "failed": 0,
+      "countedAgain": true
+    },
+    {
+      "name": "discharge-readback",
+      "testCount": 1,
+      "failed": 0,
+      "countedAgain": false
+    },
+    {
+      "name": "final-safety-recheck",
+      "testCount": 20,
+      "failed": 0,
+      "countedAgain": true
+    }
+  ],
+  "distinctTestsPassed": 210,
+  "scope": "Targeted suites; not a full repository test run. All battery service tests use injected transports and isolated defaults.",
+  "hardwareAcceptance": "pending",
+  "installed": false,
+  "published": false,
+  "installedBuildUnchanged": "20261116154816",
+  "releaseBuild": "passed, CODE_SIGNING_ALLOWED=NO; not installed",
+  "releaseLogSHA256": "524480575b9362ebc4cfb16ab9717b3c4030497a93d18818c090758594392952"
+}

@@ -2084,7 +2084,7 @@ private final class BatteryPanelAXProbe {
             if object.responds(to: selector), let children = object.perform(selector)?.takeUnretainedValue() as? [NSObject] { children.forEach(visit) }
             if let view = object as? NSView { view.subviews.forEach(visit) }
         }
-        if allVisibleWindows { NSApp.windows.filter(\.isVisible).forEach(visit) } else { visit(window) }
+        if allVisibleWindows { NSApp.windows.filter(\.isVisible).forEach(visit) } else { visit(window); visit(host) }
         return result
     }
     var text: String {
@@ -2447,6 +2447,10 @@ final class BatteryDisplayCompletionTests: XCTestCase {
     }
     @MainActor
     func testNativeSupplyUnknownIsNeverPresentedAsBatteryPower() async throws {
+        let policy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.regular)
+        defer { NSApp.setActivationPolicy(policy) }
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
         let name = "BatteryUnknownSupply.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name)); defer { defaults.removePersistentDomain(forName: name) }
         var sample = BatteryTelemetry(); sample.hasBattery = true

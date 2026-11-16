@@ -1426,6 +1426,7 @@ final class AppState: ObservableObject {
             return Constants.expandedSize
         case .fullExpanded:
             var base = Constants.fullExpandedSize
+            if fullExpandedSelectedTab == .module(.builtIn(.battery)) { base.height = 350 }
             if fullExpandedSelectedTab == .module(.builtIn(.shelf)) {
                 base.width = shelfFullExpandedWidth
             }

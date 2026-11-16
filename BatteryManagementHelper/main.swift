@@ -22,6 +22,8 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
     private var policy = BatteryControlPolicy()
     private var verification = BatteryControlVerification()
     private var nativeDrainVerification = BatteryNativeDrainVerification()
+    private var powerObserver: BatterySystemPowerObserver?
+    private var sleepState = BatterySimpleSleepState()
     private var timer: DispatchSourceTimer?
     private var report = BatteryControlReport()
     private var manualRetry: BatteryManualRetry?
@@ -356,6 +358,7 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
         report.timestamp = Date()
         report.requiresManualRetry = manualRetry?.required ?? true
         report.manualRetryID = manualRetry?.faultID
+        report.controlHeld = recoveryUnknown ? nil : (lease?.journal != nil || cutoff?.record != nil)
         report.exitHoldReady = lease?.journal?.detachedExitHold == true
         report.calibration = calibration?.record?.status
         report.ownedAdapterCutoff = owner.map { (try? ownedCutoff(owner: $0)) == true }
@@ -390,6 +393,32 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
         report.available = false; report.message = error.localizedDescription
         // The watchdog still attempts restoration, even after a write failed.
     }
+    func observeSystemPower() {
+        guard !diagnosticOnly else { return }
+        powerObserver = BatterySystemPowerObserver(queue: queue) { [weak self] sleeping in
+            guard let self else { return }
+            if sleeping { self.sleepState.willSleep(self.request) }
+            else { self.sleepState.didWake() }
+            do {
+                if let request = self.request, let lease = self.lease, lease.journal?.owner == request.owner {
+                    if sleeping && ProcessInfo.processInfo.systemUptime >= lease.expires {
+                        _ = try self.releaseControl(reason: .timeout)
+                        return
+                    }
+                    // Renew only an already-owned lease; wake grants the client
+                    // one normal 45-second window, never a detached lease.
+                    try lease.renew(owner: request.owner, now: ProcessInfo.processInfo.systemUptime)
+                    self.request = self.sleepState.normalize(request)
+                }
+                self.tick()
+            } catch {
+                self.record(error)
+                do { _ = try self.releaseControl(reason: .permissionLost) }
+                catch { self.report.message += "；睡眠恢复尚未确认：" + error.localizedDescription }
+            }
+        }
+    }
+
     private func tick() {
         refreshIdleCapabilities(explicit: false)
         guard !BatteryPreferences79Identity.pending else { return }
@@ -424,6 +453,9 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
             if lease.journal?.detachedExitHold == true { return } // Explicit successful graceful-exit transfer only.
             if let preparing = exitHoldVerification, ProcessInfo.processInfo.systemUptime - preparing.started > 150 {
                 _ = try releaseControl(reason: .timeout); return
+            }
+            if sleepState.sleeping, let owner = lease.journal?.owner, request?.owner == owner, !failed {
+                try lease.renew(owner: owner, now: ProcessInfo.processInfo.systemUptime)
             }
             if lease.journal != nil, ProcessInfo.processInfo.systemUptime >= lease.expires {
                 _ = try releaseControl(reason: .timeout); return
@@ -500,6 +532,10 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
                     operationID: request.operationID, now: ProcessInfo.processInfo.systemUptime,
                     maximumDuration: driver.nativeCutoffReviewTrial ? BatteryNativeCutoffTrial.maximumDuration : nil)
             }
+            // SMC inhibition cannot wake the machine to enforce a later SOC.
+            // Hold charging during sleep; native limit backends retain their
+            // hardware-enforced upper limit. Neither path prevents sleep.
+            if sleepState.sleeping && request.preferences.limit < 100 && (driver.mechanism == .modern || driver.mechanism == .legacy) { decision.inhibit = true }
             let targets = try driver.targets(for: decision, request: request, telemetry: telemetry, ownedKeys: Set(lease.journal?.entries.keys.map { $0 } ?? []))
             var effectiveTargets = targets
             report.systemCalibration = BatterySystemCalibration.isActive
@@ -827,7 +863,13 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
                 // Reject malformed/range/capability requests before a detached
                 // hold can cause any restoration write.
                 let incoming = try JSONDecoder().decode(BatteryControlRequest.self, from: data)
-                try incoming.validate()
+                try BatterySimpleProtectionPolicy.validate(incoming)
+                guard self.powerObserver != nil else {
+                    throw BatteryControlError.unavailable("系统睡眠监听未就绪，未启用电池控制。")
+                }
+                guard !self.sleepState.sleeping || lease.journal?.owner == incoming.owner else {
+                    throw BatteryControlError.unavailable("睡眠期间不接受新的控制所有权。")
+                }
                 try incoming.validateEpoch(self.report.controlEpoch)
                 guard let manualRetry = self.manualRetry else { throw BatteryControlError.recovery("故障确认服务未就绪。") }
                 let recovered = !self.recoveryUnknown && self.cutoff?.record == nil && lease.journal == nil
@@ -840,7 +882,7 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
                 }
                 guard self.exitHoldVerification == nil else { throw BatteryControlError.conflict("退出暂停正在确认；请先取消退出或等待完成。") }
                 let semantic = incoming.withoutFaultAcknowledgment
-                let request = self.completedRequest?.normalize(semantic) ?? semantic
+                let request = self.sleepState.normalize(self.completedRequest?.normalize(semantic) ?? semantic)
                 try request.validate()
                 if self.driver.nativeCutoffReviewTrial {
                     try BatteryNativeCutoffTrial.validate(request, level: BatteryTelemetry.read().level)
@@ -917,55 +959,12 @@ final class BatteryManagementDaemon: NSObject, NSXPCListenerDelegate, BatteryMan
     }
     func prepareExitHold(owner: String, reply: @escaping (Bool, Data) -> Void) {
         queue.async {
-            var beganPreparation = false
-            do {
-                guard !self.diagnosticOnly, !self.failed, !self.recoveryUnknown,
-                      self.driver.capabilities.exitHoldSupported, !BatteryPreferences79Identity.pending,
-                      let owner = UUID(uuidString: owner), let lease = self.lease,
-                      lease.journal?.owner == owner, self.cutoff?.record == nil,
-                      self.calibration?.isActive != true else {
-                    throw BatteryControlError.unavailable("当前控制状态不能准备退出暂停。")
-                }
-                if lease.journal?.detachedExitHold == true { reply(true, self.data(for: owner)); return }
-                let telemetry = BatteryTelemetry.read(), now = ProcessInfo.processInfo.systemUptime
-                if self.exitHoldVerification == nil {
-                    guard self.request != nil, let level = telemetry.level, (20...100).contains(level),
-                          telemetry.powerSupplyObservation == true, self.driver.adapterInputObservation() == true else {
-                        throw BatteryControlError.unavailable("退出暂停需要有效电池控制及适配器输入。")
-                    }
-                    beganPreparation = true
-                    try lease.renew(owner: owner, now: now)
-                    // Restore energy/LED controls; only the typed charge baseline
-                    // is eligible for explicit transfer after physical proof.
-                    try lease.apply([:], owner: owner)
-                    try lease.applyPreferences(target: level, owner: owner)
-                    self.request = nil; self.completedRequest = nil
-                    self.exitHoldVerification = .init(target: level, started: now, submittedAt: Date())
-                    self.lastExitHoldObservation = -Double.infinity
-                }
-                try lease.renew(owner: owner, now: now)
-                if now - self.lastExitHoldObservation < 5 { reply(true, self.data(for: owner)); return }
-                self.lastExitHoldObservation = now
-                var verifier = self.exitHoldVerification!
-                let ready = try verifier.observe(telemetry, registered: self.driver.registeredLimits(fresh: true),
-                    saved: self.driver.savedNativeLimit(), input: self.driver.adapterInputObservation(), now: now, date: Date())
-                self.exitHoldVerification = verifier
-                if ready {
-                    try lease.detachExitHold(owner: owner, confirmed: true)
-                    self.exitHoldVerification = nil
-                    self.report.message = "退出暂停已独立确认；下次启用、后台或系统重启时恢复原设置。"
-                } else { self.report.message = "正在确认退出暂停：等待新的电池读数和一致系统目标，尚未移交。" }
-                reply(true, self.data(for: owner))
-            } catch {
-                self.report.message = error.localizedDescription
-                if beganPreparation || self.exitHoldVerification != nil {
-                    do { _ = try self.releaseControl(reason: .cancelled) }
-                    catch { self.record(error) }
-                }
-                reply(false, self.data())
-            }
+            var response = self.report
+            response.message = BatterySimpleProtectionPolicy.removedMessage
+            reply(false, (try? JSONEncoder().encode(response)) ?? Data())
         }
     }
+
     func release(owner: String, reply: @escaping (Bool, Data) -> Void) {
         queue.async {
             guard !self.diagnosticOnly else { reply(false, self.data()); return }
@@ -1016,6 +1015,7 @@ guard let requirement = KeepAwakeHelperIdentity.requirement(identifiers: permitt
 }) else { exit(78) }
 let daemon = BatteryManagementDaemon()
 daemon.prepare()
+daemon.observeSystemPower()
 let listener = NSXPCListener(machServiceName: BatteryManagementIdentity.label)
 listener.setConnectionCodeSigningRequirement(requirement)
 listener.delegate = daemon; listener.resume()

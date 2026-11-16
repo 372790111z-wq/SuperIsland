@@ -149,6 +149,8 @@ struct BatteryDisplayPreferences: Codable, Equatable {
 @MainActor
 final class BatteryManagementService: ObservableObject {
     static let shared = BatteryManagementService()
+    @Published private(set) var simple: BatterySimplePreferences
+    @Published var limitDraft = 80
     @Published private(set) var preferences: BatteryControlPreferences
     @Published private(set) var display: BatteryDisplayPreferences
     @Published private(set) var telemetry = BatteryTelemetry.read()
@@ -230,10 +232,14 @@ final class BatteryManagementService: ObservableObject {
             }
         })
         self.lidLockController = lidLockController ?? BatteryLidLockController()
-        let stored = defaults.data(forKey: "batteryManagement.preferences").flatMap { try? JSONDecoder().decode(BatteryControlPreferences.self, from: $0) }
-        preferences = stored.flatMap { (try? $0.validate()) != nil ? $0 : nil } ?? .init()
-        display = defaults.data(forKey: "batteryManagement.display").flatMap { try? JSONDecoder().decode(BatteryDisplayPreferences.self, from: $0) } ?? .init()
-        display.normalize()
+        let configuration = BatterySimplePreferences.load(defaults)
+        simple = configuration
+        preferences = BatterySimpleProtectionPolicy.preferences(limit: configuration.limit)
+        limitDraft = configuration.limit
+        display = .init()
+        display.showAtStartup = false
+        display.popupFields = [.percentage, .source, .controls]
+        userDisabledControl = !configuration.enabled
         lidLockObservation = self.lidLockController.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -299,15 +305,14 @@ final class BatteryManagementService: ObservableObject {
     }
 
     var canStopDischarge: Bool {
-        guard mode == .discharge else { return false }
-        if canControl && telemetry.adapterPresent { return true }
-        return enabled && report.available && !busy && !authorizing && !terminationRequested
-            && !report.recoveryPending && mayOwnOverrides && report.leaseHeldByRequester == true
-            && report.ownedAdapterCutoff == true && report.cutoffPhase == .discharging
+        // Stop is a recovery action. Missing adapter/telemetry readings must
+        // not remove it; helper validation and release still arbitrate safety.
+        mode == .discharge && enabled && mayOwnOverrides && !busy && !authorizing
+            && !terminationRequested && !report.recoveryPending
     }
 
     var calibrationActive: Bool { report.calibration?.isActive == true || calibrationCommand != nil }
-    var canStartCalibration: Bool { canControl && mode == .automatic && !calibrationActive && report.capabilities.calibration && telemetry.adapterPresent }
+    var canStartCalibration: Bool { false }
 
     // UI-only context: a requested discharge can precede the helper's reply
     // and OS power notification. This must never authorize hardware control.
@@ -332,19 +337,19 @@ final class BatteryManagementService: ObservableObject {
             // undo the user's choice later in the same process.
             guard automaticallyEnable, automaticStartupDeferred else { return }
             automaticStartupDeferred = false
-            wantsEnabled = true
+            wantsEnabled = simple.enabled && !simple.needsLimitChoice
             revision &+= 1
             synchronizeAtStartup()
             return
         }
         started = true
-        wantsEnabled = automaticallyEnable
+        wantsEnabled = automaticallyEnable && simple.enabled && !simple.needsLimitChoice
         automaticStartupDeferred = !automaticallyEnable
         // Control renewal must not be throttled by an invisible island's UI policy.
         // It is active only while a real helper lease may be owned.
         heartbeat = Self.makeLeaseHeartbeat { [weak self] in
             Task { @MainActor in
-                guard let self, self.wantsEnabled || self.mayOwnOverrides || self.displaySleepController.isHoldingDisplay else { return }
+                guard let self, self.wantsEnabled || self.mayOwnOverrides || self.simple.recoveryPending || self.simple.migrationPending else { return }
                 self.queueSync()
             }
         }
@@ -362,13 +367,13 @@ final class BatteryManagementService: ObservableObject {
         }
         let nc = NSWorkspace.shared.notificationCenter
         observations.append(nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.sleeping = true; self?.updateDisplaySleep(); self?.queueSync() }
+            Task { @MainActor in self?.handleSleep() }
         })
         observations.append(nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.sleeping = false; self.queueSync()
-                if self.schedulesStarted { BatteryScheduleService.shared.evaluate() }
+                // Removed schedules never replay on wake.
             }
         })
         guard automaticallyEnable else {
@@ -378,10 +383,13 @@ final class BatteryManagementService: ObservableObject {
         }
         synchronizeAtStartup()
     }
-    private func startSchedulesIfNeeded() {
-        guard !schedulesStarted else { return }
-        schedulesStarted = true
-        scheduleStarter()
+    private func startSchedulesIfNeeded() { /* No automatic battery tasks. */ }
+    func handleSleep() {
+        sleeping = true
+        if mode == .discharge {
+            mode = .automatic; dischargeTarget = nil; operationID = UUID()
+        }
+        updateDisplaySleep(); queueSync()
     }
     private func synchronizeAtStartup() {
         Task {
@@ -411,24 +419,55 @@ final class BatteryManagementService: ObservableObject {
         metricsVisibleOutsideIsland || (!visibleMetricSurfaces.isDisjoint(with: ["island", "compact", "expanded"]) && AppState.shared.isModuleVisibleForRefresh(.builtIn(.battery)))
     }
     func updatePreferences(_ mutation: (inout BatteryControlPreferences) -> Void) throws {
-        guard !authorizing, !terminationRequested else { throw BatteryControlError.unavailable("正在刷新辅助程序或退出，请稍后设置。") }
-        guard !calibrationActive else { throw BatteryControlError.conflict("校准期间不能修改充电偏好，请先停止校准并确认恢复。") }
-        var next = preferences; mutation(&next); try next.validate()
-        do {
-            try BatteryPreferenceCompatibility.validate(next, report: report)
-        } catch {
-            // A partially repaired stored configuration must never renew a
-            // lease. Only explicit removal of incompatible fields is saved.
-            guard !enabled, !busy, !mayOwnOverrides, !report.recoveryPending,
-                  BatteryPreferenceCompatibility.isPartialRepair(from: preferences, to: next, report: report) else { throw error }
-            preferences = next
-            defaults.set(try JSONEncoder().encode(next), forKey: "batteryManagement.preferences")
-            setEnabled(false)
-            return
+        throw BatteryControlError.unavailable(BatterySimpleProtectionPolicy.removedMessage)
+    }
+    func applySimpleLimit() async throws {
+        guard !busy, !authorizing, !terminationRequested, !sleeping, mode == .automatic,
+              !simple.recoveryPending, !report.recoveryPending,
+              !simple.enabled || enabled else {
+            throw BatteryControlError.unavailable("请先完成当前操作或恢复，再修改上限。")
         }
-        preferences = next
-        defaults.set(try JSONEncoder().encode(next), forKey: "batteryManagement.preferences")
-        queueSync()
+        let proposed = BatterySimpleProtectionPolicy.preferences(limit: limitDraft)
+        try BatterySimpleProtectionPolicy.validate(proposed)
+        let old = preferences
+        preferences = proposed
+        if wantsEnabled {
+            revision &+= 1
+            await synchronize()
+            guard enabled, report.available, !report.recoveryPending else {
+                preferences = old
+                throw BatteryControlError.unavailable(report.message)
+            }
+        }
+        simple.limit = proposed.limit; simple.needsLimitChoice = false
+        simple.save(defaults)
+    }
+    var protectionRequested: Bool { simple.enabled }
+    var simpleRecoveryPending: Bool { simple.recoveryPending || report.recoveryPending }
+    var simpleCanEdit: Bool { !busy && !authorizing && !terminationRequested && !sleeping && !simpleRecoveryPending }
+    var simpleCanDischarge: Bool {
+        canControl && !sleeping && telemetry.level != nil && telemetry.adapterPresent
+            && report.capabilities.minimumDischargeTarget != nil
+            && (telemetry.level ?? 0) > minimumDischargeTarget
+    }
+    var simpleStatus: String {
+        if simpleRecoveryPending { return "等待确认恢复" }
+        if busy { return "正在确认操作结果" }
+        if simple.needsLimitChoice { return "请重新选择充电上限" }
+        if !telemetry.hasBattery { return "没有内置电池" }
+        if telemetry.level == nil || telemetry.chargingObservation == nil { return "读数暂不可用" }
+        if !simple.enabled { return "系统管理充电" }
+        if !enabled { return "保护尚未生效" }
+        if mode == .discharge { return telemetry.current.map { $0 < 0 } == true ? "正在主动放电" : "正在确认放电" }
+        if !telemetry.adapterPresent { return "电池供电" }
+        return telemetry.charging ? "正在充电" : "当前未充电"
+    }
+    var simpleDischargeTarget: Int? { dischargeTarget }
+    var simpleDischargeReason: String {
+        if !simple.enabled { return "先开启电池保护" }
+        if !telemetry.adapterPresent { return "接上电源后可用" }
+        if report.capabilities.minimumDischargeTarget == nil { return "当前设备尚未确认主动放电能力" }
+        return "按指定目标降低电量"
     }
     private func registerMetricsRefresh() {
         metricsToken = ModuleRefreshScheduler.shared.register(id: "battery.management.metrics", name: "Battery instrument snapshot", module: .builtIn(.battery), policy: .interval(Double(display.refreshInterval), tolerance: 1), enabled: { [weak self] in
@@ -437,15 +476,7 @@ final class BatteryManagementService: ObservableObject {
         }, visibleOutsideIsland: { [weak self] in self?.metricsVisibleOutsideIsland == true }) { [weak self] in self?.refreshTelemetry() }
     }
     func updateDisplay(_ mutation: (inout BatteryDisplayPreferences) -> Void) {
-        let previous = display
-        var next = display; mutation(&next); next.normalize()
-        display = next
-        if !next.pauseOnExit { cancelExitPreparation() }
-        defaults.set(try? JSONEncoder().encode(next), forKey: "batteryManagement.display")
-        averagePower = powerWindow.summary(at: telemetry.timestamp, window: Double(next.averageMinutes * 60))
-        updateDisplaySleep()
-        if started && previous.refreshInterval != next.refreshInterval { registerMetricsRefresh() }
-        else if previous.backgroundMetrics != next.backgroundMetrics { ModuleRefreshScheduler.shared.refreshScheduling() }
+        // Legacy customization no longer controls the reduced product.
     }
     var runtimeMinutes: Int? { BatteryRuntimeEstimate.minutes(snapshot: telemetry, mode: display.runtimeMode, average: averagePower) }
     func metricTitle(_ metric: BatteryMetric) -> String { metric == .remaining ? (telemetry.charging ? "预计充满时间" : "预计电池续航") : metric.title }
@@ -468,12 +499,16 @@ final class BatteryManagementService: ObservableObject {
         // An explicit UI action can reach this service before shell bootstrap.
         // Install its observer/heartbeat lifecycle without a default write first.
         if !started { start(automaticallyEnable: false) }
+        if value && simple.needsLimitChoice {
+            report.message = "原充电上限不在80–100%范围内，请先选择并保存新上限。"; return
+        }
+        simple.enabled = value; simple.save(defaults)
         automaticStartupDeferred = false
         userDisabledControl = !value
         wantsEnabled = value
         if value { faultAcknowledged = true; operationID = UUID(); acknowledgedFaultID = nil }
         else { faultAcknowledged = false; acknowledgedFaultID = nil }
-        if !value { enabled = false; report.recoveryPending = mayOwnOverrides; mode = .automatic; dischargeTarget = nil; calibrationCommand = nil }
+        if !value { enabled = false; simple.recoveryPending = simple.recoveryPending || mayOwnOverrides; simple.save(defaults); report.recoveryPending = simple.recoveryPending; mode = .automatic; dischargeTarget = nil; calibrationCommand = nil }
         updateDisplaySleep()
         queueSync()
     }
@@ -512,7 +547,7 @@ final class BatteryManagementService: ObservableObject {
     /// retries retain their existing no-query behavior for an idle controller.
     func recheckStatus() async {
         guard !busy, !authorizing, !terminationRequested else { return }
-        if wantsEnabled || mayOwnOverrides {
+        if wantsEnabled || mayOwnOverrides || simple.enabled || simple.recoveryPending || simple.migrationPending {
             retry()
             return
         }
@@ -551,16 +586,14 @@ final class BatteryManagementService: ObservableObject {
     func retry() {
         guard !authorizing, !terminationRequested else { return }
         capabilityRefreshRequested = true
-        if report.requiresManualRetry == true { faultAcknowledged = true; wantsEnabled = true; operationID = UUID(); acknowledgedFaultID = nil }
+        wantsEnabled = simple.enabled && !simple.needsLimitChoice
+        if report.requiresManualRetry == true && simple.enabled { faultAcknowledged = true; wantsEnabled = true; operationID = UUID(); acknowledgedFaultID = nil }
         queueSync()
     }
     func closeNotice() { notice = nil; dismissNotice() }
     var shouldPrepareForTermination: Bool { mayOwnOverrides || authorizing }
     func prepareForTermination() async -> Bool {
         if exitHoldTransferred { return true }
-        if display.pauseOnExit && enabled && wantsEnabled {
-            return await prepareExitHoldForTermination()
-        }
         terminationRequested = true
         updateDisplaySleep()
         wantsEnabled = false; revision &+= 1; dirty = true
@@ -659,6 +692,10 @@ final class BatteryManagementService: ObservableObject {
 
     func execute(mode requested: BatteryControlMode, target: Int? = nil) async throws -> String {
         guard !busy else { throw BatteryControlError.unavailable("正在同步上一项请求，请稍后。") }
+        guard requested == .automatic || requested == .discharge else {
+            throw BatteryControlError.unavailable(BatterySimpleProtectionPolicy.removedMessage)
+        }
+        guard !sleeping || requested == .automatic else { throw BatteryControlError.unavailable("睡眠期间不能开始主动放电。") }
         guard !calibrationActive else { throw BatteryControlError.conflict("校准正在进行，请先停止校准并确认恢复，再切换模式。") }
         guard requested != .topUp || !reviewTrialActive else {
             throw BatteryControlError.unavailable("本验证包未开放临时充满；未提交控制请求。")
@@ -714,61 +751,7 @@ final class BatteryManagementService: ObservableObject {
     /// Inspect before its explicit action, but never apply a default automatic
     /// request or start unrelated scheduled work as a side effect.
     func performAutomation(_ action: @MainActor () async throws -> String) async throws -> String {
-        guard !automationSessionActive, !authorizing, !terminationRequested else {
-            throw BatteryControlError.conflict("已有自动化请求、授权或退出流程，请稍后。")
-        }
-        guard !userDisabledControl else {
-            throw BatteryControlError.unavailable("本次运行已手动关闭充电控制；请在电池设置中重新启用。")
-        }
-        if !started { start(automaticallyEnable: false) }
-        guard wantsEnabled || automaticStartupDeferred else {
-            throw BatteryControlError.unavailable("本次运行已手动关闭充电控制；请在电池设置中重新启用。")
-        }
-        automationSessionActive = true
-        defer { automationSessionActive = false }
-        let deadline = Date().addingTimeInterval(6)
-        while busy && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
-        guard !busy else { throw BatteryControlError.unavailable("等待上一项控制请求超时，未提交自动化。") }
-        guard wantsEnabled || automaticStartupDeferred else {
-            throw BatteryControlError.unavailable("充电控制已手动关闭，未提交自动化。")
-        }
-        let previousEnabled = enabled, previousWantsEnabled = wantsEnabled
-        let previousSubmissions = controlSubmissionCount
-        if !canControl {
-            refreshTelemetry()
-            guard telemetry.hasBattery, client.authorization == .enabled else {
-                throw BatteryControlError.unavailable("需要内置电池和已批准的辅助程序；未提交自动化。")
-            }
-            if let conflict = conflictChecker() { throw BatteryControlError.conflict("检测到\(conflict)正在运行；未提交自动化。") }
-            let inspectedRevision = revision
-            let (_, observed) = try await client.call(.inspect)
-            guard revision == inspectedRevision, !authorizing, !terminationRequested,
-                  wantsEnabled || automaticStartupDeferred else {
-                throw BatteryControlError.conflict("控制选择已改变，未提交自动化。")
-            }
-            guard observed.protocolVersion == BatteryControlReport.currentProtocolVersion,
-                  observed.available, !observed.recoveryPending,
-                  observed.requiresManualRetry != true else {
-                throw BatteryControlError.unavailable(observed.message + "；请在电池设置中检查后重试。")
-            }
-            report = observed
-            enabled = true; wantsEnabled = true
-        }
-        do {
-            let result = try await action()
-            if !previousWantsEnabled, controlSubmissionCount == previousSubmissions {
-                wantsEnabled = previousWantsEnabled; enabled = previousEnabled
-            }
-            return result
-        } catch {
-            // A validation failure must not leave a cold-started controller
-            // enabled and let its next heartbeat apply unrelated defaults.
-            if !previousWantsEnabled {
-                wantsEnabled = false; enabled = previousEnabled
-                if mayOwnOverrides { await synchronize() }
-            }
-            throw error
-        }
+        throw BatteryControlError.unavailable(BatterySimpleProtectionPolicy.removedMessage)
     }
 
     var scheduleObservation: BatteryScheduleObservation {
@@ -787,17 +770,7 @@ final class BatteryManagementService: ObservableObject {
         return report.message
     }
     func startCalibration() async throws -> String {
-        guard !busy, !calibrationActive else { throw BatteryControlError.conflict("已有控制请求或校准会话，请等待完成或先停止校准。") }
-        refreshTelemetry()
-        guard canStartCalibration else { throw BatteryControlError.unavailable("校准需要已接电、控制就绪且支持完整充放电及恢复的设备。") }
-        mode = .automatic; dischargeTarget = nil
-        calibrationCommand = .start(UUID()); revision &+= 1
-        await synchronize()
-        guard enabled, report.available, report.calibration?.isActive == true else {
-            calibrationCommand = nil
-            throw BatteryControlError.unavailable(report.message)
-        }
-        return report.message
+        throw BatteryControlError.unavailable(BatterySimpleProtectionPolicy.removedMessage)
     }
     func cancelCalibration() async throws -> String {
         guard !busy, let status = report.calibration, status.isActive else {
@@ -826,14 +799,30 @@ final class BatteryManagementService: ObservableObject {
             let currentRevision = revision
             refreshTelemetry()
             do {
+                if (simple.migrationPending || simple.recoveryPending) && !mayOwnOverrides {
+                    guard client.authorization == .enabled else { throw BatteryControlError.unavailable(authorizationDescription) }
+                    let (_, observed) = try await client.call(.inspect)
+                    guard currentRevision == revision else { dirty = true; continue }
+                    report = observed
+                    if observed.controlHeld != false || observed.recoveryPending {
+                        simple.recoveryPending = true; simple.save(defaults)
+                    }
+                    guard observed.protocolVersion == BatteryControlReport.currentProtocolVersion,
+                          observed.controlHeld == false, !observed.recoveryPending else {
+                        throw BatteryControlError.recovery("旧控制尚未确认恢复，或辅助程序需要更新；没有开始新的充电控制。")
+                    }
+                    simple.migrationPending = false; simple.recoveryPending = false; simple.leaseMayExist = false; simple.save(defaults)
+                }
                 if !wantsEnabled {
                     if mayOwnOverrides {
                         let (success, response) = try await client.call(.release(owner))
                         report = response
-                        mayOwnOverrides = response.leaseHeldByRequester ?? !success
-                        guard success else { throw BatteryControlError.recovery(response.message) }
+                        let restored = success && response.leaseHeldByRequester == false && !response.recoveryPending
+                        mayOwnOverrides = !restored
+                        guard restored else { throw BatteryControlError.recovery(response.message) }
                         mayOwnOverrides = false
-                    } else { report.message = incompatiblePreferencesMessage ?? "本次运行已关闭充电控制" }
+                        simple.recoveryPending = false; simple.leaseMayExist = false; simple.save(defaults)
+                    } else { report.message = incompatiblePreferencesMessage ?? "保护已关闭，重启后也保持关闭" }
                     enabled = false
                 } else {
                     guard telemetry.hasBattery else { throw BatteryControlError.unavailable("没有内置电池；充电控制未启用。") }
@@ -872,6 +861,8 @@ final class BatteryManagementService: ObservableObject {
                     guard preferences.highPowerScope == .never || report.highPowerSupported == true else {
                         throw BatteryControlError.unavailable("该辅助程序或设备无法确认高功率能力；没有提交控制请求。")
                     }
+                    try BatterySimpleProtectionPolicy.validate(request)
+                    simple.leaseMayExist = true; simple.save(defaults)
                     mayOwnOverrides = true
                     controlSubmissionCount &+= 1
                     let (success, response) = try await client.call(.renew(request))
@@ -889,20 +880,22 @@ final class BatteryManagementService: ObservableObject {
                         if response.calibration?.isActive != true { calibrationCommand = nil }
                     }
                     guard success else { throw BatteryControlError.unavailable(response.message) }
+                    simple.recoveryPending = false; simple.save(defaults)
                     faultAcknowledged = false; acknowledgedFaultID = nil
                     if currentRevision == revision && wantsEnabled { enabled = true }
                 }
             } catch {
                 faultAcknowledged = false; acknowledgedFaultID = nil
-                if report.requiresManualRetry == true { wantsEnabled = false; faultAcknowledged = false; acknowledgedFaultID = nil }
+                wantsEnabled = false // No heartbeat may retry a failed write without an explicit user action.
                 calibrationCommand = nil
                 enabled = false; report.available = false; report.message = error.localizedDescription
                 report.recoveryPending = mayOwnOverrides
                 if mayOwnOverrides {
                     do {
                         let (success, response) = try await client.call(.release(owner))
-                        mayOwnOverrides = response.leaseHeldByRequester ?? !success
+                        mayOwnOverrides = !(success && response.leaseHeldByRequester == false && !response.recoveryPending)
                         report.recoveryPending = mayOwnOverrides
+                        simple.recoveryPending = mayOwnOverrides; simple.leaseMayExist = mayOwnOverrides; simple.save(defaults)
                         report.cutoffPhase = response.cutoffPhase
                         if !success && response.message != report.message { report.message += "；" + response.message }
                     } catch { report.message += "；恢复尚未确认，辅助程序将按45秒租约尝试恢复" }
@@ -917,24 +910,12 @@ final class BatteryManagementService: ObservableObject {
         if started && enabled && !automaticStartupDeferred && !automationSessionActive { startSchedulesIfNeeded() }
     }
     private func updateAwakeAssertion() {
-        let needed = BatteryAwakePolicy.needed(enabled: enabled, telemetry: telemetry,
-            preferences: preferences, mode: mode, calibrationActive: calibrationActive)
-        if needed && !assertionHeld {
-            assertionHeld = IOPMAssertionCreateWithName(kIOPMAssertionTypeNoIdleSleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "SuperIsland battery charging" as CFString, &assertion) == kIOReturnSuccess
-        } else if !needed && assertionHeld { IOPMAssertionRelease(assertion); assertionHeld = false }
+        if assertionHeld { IOPMAssertionRelease(assertion); assertionHeld = false }
     }
     private func updateDisplaySleep() {
-        let active = enabled && !automaticStartupDeferred && report.available && !report.recoveryPending && !authorizing && !terminationRequested
-        displaySleepController.update(active: active,
-                                      awake: !sleeping, policy: display.screenSleepPolicy)
-        lidLockController.update(active: active, awake: !sleeping, enabled: display.lockOnLidClose)
-        if let reason = displaySleepController.reason { displaySleepStatus = reason }
-        else if display.screenSleepPolicy == .system { displaySleepStatus = "显示屏策略：跟随系统" }
-        else if !active || sleeping { displaySleepStatus = "仅保存显示偏好；充电控制启用且系统醒着时执行。" }
-        else if displaySleepController.isHoldingDisplay {
-            displaySleepStatus = display.screenSleepPolicy == .never ? "本电池模块的显示常亮断言已启用。" : "正在等待所选空闲时长，持有本电池模块自己的显示断言。"
-        }
-        else { displaySleepStatus = "已选择\(display.screenSleepPolicy.title)，等待空闲条件；未确认屏幕已关闭。" }
+        displaySleepController.update(active: false, awake: !sleeping, policy: .system)
+        lidLockController.update(active: false, awake: !sleeping, enabled: false)
+        displaySleepStatus = nil
     }
     func shutdown() {
         terminationRequested = true
@@ -961,7 +942,7 @@ final class BatteryManagementService: ObservableObject {
     }
 #if DEBUG
     func attemptStartupForTesting() async {
-        wantsEnabled = true
+        wantsEnabled = simple.enabled && !simple.needsLimitChoice
         await synchronize()
     }
 #endif
