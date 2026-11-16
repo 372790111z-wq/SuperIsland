@@ -12,13 +12,10 @@ enum IslandShellMetrics {
     @MainActor
     static func compactSurfaceSize(for appState: AppState) -> CGSize {
         if appState.presentationHasNotch {
-            return CGSize(
-                width: max(Constants.compactNotchMinimumWidth, CGFloat(appState.compactIslandWidth)),
-                height: max(Constants.compactNotchMinimumHeight, CGFloat(appState.compactIslandHeight))
-            )
+            return appState.configuredCompactSize
         }
 
-        let contentSize = Constants.nonNotchCompactSize
+        let contentSize = appState.configuredCompactSize
         let topCornerRadius = min(Constants.compactCornerRadius, contentSize.height / 2)
         return CGSize(
             width: contentSize.width + topCornerRadius * 2,

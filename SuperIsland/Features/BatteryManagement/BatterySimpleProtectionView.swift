@@ -3,6 +3,7 @@ import SwiftUI
 /// Both native entry points share the service's draft, request and readback.
 struct BatterySimpleProtectionView: View {
     @ObservedObject var service: BatteryManagementService
+    @ObservedObject private var battery = BatteryManager.shared
     var surface: String
     @State private var confirmOff = false
     @State private var dischargeSheet = false
@@ -12,40 +13,45 @@ struct BatterySimpleProtectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            summary
-            Divider()
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("电池保护").font(.headline)
-                    Text(service.protectionRequested ? "充电上限 \(service.preferences.limit)%" : "关闭后重启也保持关闭")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Toggle("电池保护", isOn: Binding(get: { service.protectionRequested }, set: { value in
-                    if value { service.setEnabled(true) } else { confirmOff = true }
-                })).labelsHidden().toggleStyle(.switch)
-                    .disabled(service.busy || service.authorizing || (service.simpleRecoveryPending && !service.protectionRequested))
-                    .dataAnnotationID("si.bm.simple.enabled")
-            }
-            limit
-            Divider()
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(service.mode == .discharge ? "放电至 \(service.simpleDischargeTarget ?? 80)%" : "主动放电").font(.headline)
-                    Text(service.mode == .discharge ? "停止后恢复上限管理" : service.simpleDischargeReason)
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button(service.mode == .discharge ? "停止放电" : "开始放电") {
-                    if service.mode == .discharge { run { _ = try await service.execute(mode: .automatic) } }
-                    else {
-                        dischargeDraft = String(max(service.minimumDischargeTarget, min(service.preferences.limit, (service.telemetry.level ?? 81) - 1)))
-                        error = nil; dischargeSheet = true
+            if battery.presence == .absent && !service.simpleRecoveryPending {
+                Label("此设备没有内置电池，无需电池保护。", systemImage: "powerplug")
+                    .foregroundStyle(.secondary)
+            } else {
+                summary
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("电池保护").font(.headline)
+                        Text(service.protectionRequested ? "充电上限 \(service.preferences.limit)%" : "关闭后重启也保持关闭")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                }.disabled(service.mode == .discharge ? !service.canStopDischarge : !service.simpleCanDischarge)
-                    .dataAnnotationID(service.mode == .discharge ? "si.bm.simple.stop-discharge" : "si.bm.simple.discharge")
+                    Spacer()
+                    Toggle("电池保护", isOn: Binding(get: { service.protectionRequested }, set: { value in
+                        if value { service.setEnabled(true) } else { confirmOff = true }
+                    })).labelsHidden().toggleStyle(.switch)
+                        .disabled(service.busy || service.authorizing || (service.simpleRecoveryPending && !service.protectionRequested))
+                        .dataAnnotationID("si.bm.simple.enabled")
+                }
+                limit
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(service.mode == .discharge ? "放电至 \(service.simpleDischargeTarget ?? 80)%" : "主动放电").font(.headline)
+                        Text(service.mode == .discharge ? "停止后恢复上限管理" : service.simpleDischargeReason)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(service.mode == .discharge ? "停止放电" : "开始放电") {
+                        if service.mode == .discharge { run { _ = try await service.execute(mode: .automatic) } }
+                        else {
+                            dischargeDraft = String(max(service.minimumDischargeTarget, min(service.preferences.limit, (service.telemetry.level ?? 81) - 1)))
+                            error = nil; dischargeSheet = true
+                        }
+                    }.disabled(service.mode == .discharge ? !service.canStopDischarge : !service.simpleCanDischarge)
+                        .dataAnnotationID(service.mode == .discharge ? "si.bm.simple.stop-discharge" : "si.bm.simple.discharge")
+                }
+                notices
             }
-            notices
         }
         .onAppear { service.setMetricsVisible(surface, visible: true); service.refreshTelemetry() }
         .onDisappear { service.setMetricsVisible(surface, visible: false) }
@@ -67,7 +73,7 @@ struct BatterySimpleProtectionView: View {
             Text(service.telemetry.level.map { "\($0)%" } ?? "—").font(.system(size: 30, weight: .semibold, design: .rounded))
             Spacer()
             VStack(alignment: .trailing, spacing: 5) {
-                Text(service.simpleStatus).font(.caption).foregroundStyle(service.enabled ? Color.green : .secondary)
+                Text(battery.presence == .unknown ? "电池信息暂不可用" : service.simpleStatus).font(.caption).foregroundStyle(service.enabled ? Color.green : .secondary)
                 Text(batterySupplyDescription(service.telemetry)).font(.caption2).foregroundStyle(.secondary)
                 Text(batteryChargingDescription(service.telemetry)).font(.caption2).foregroundStyle(.secondary)
             }

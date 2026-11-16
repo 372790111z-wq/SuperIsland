@@ -38,6 +38,7 @@ final class KeepAwakeCompletionCompatibilityTests: XCTestCase {
         }
     }
     @MainActor func testNativeSettingsExplainResultsWithoutReminderOrPermissionControls() async throws {
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
         for hardware in [KeepAwakeEngine.Environment.Hardware.notebook, .desktop, .unknown] {
             let name = "KA1CompletionUI-" + UUID().uuidString
             let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
@@ -67,6 +68,12 @@ final class KeepAwakeCompletionCompatibilityTests: XCTestCase {
                 seen.removeAll(); values.removeAll(); host.layoutSubtreeIfNeeded(); visit(window); visit(host)
                 if values.contains("data-annotation-id=si.ka.completion-info") { break }
                 try await Task.sleep(for: .milliseconds(50))
+            }
+            if hardware == .desktop {
+                XCTAssertFalse(values.contains(where: { $0.contains("合盖") || $0.contains("开盖") }))
+                let menu = KeepAwakeMenuController(service: service).item().submenu
+                XCTAssertNotNil(menu)
+                XCTAssertFalse(menu?.items.contains(where: { !$0.isHidden && ($0.title.contains("合盖") || $0.title.contains("开盖")) }) ?? true)
             }
             XCTAssertTrue(values.contains("data-annotation-id=si.ka.completion-info"))
             XCTAssertFalse(values.contains("data-annotation-id=si.ka.notify"))

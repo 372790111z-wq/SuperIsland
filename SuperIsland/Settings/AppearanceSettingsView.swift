@@ -75,7 +75,7 @@ struct AppearanceSettingsView: View {
             ) {
                 sizeRow(
                     title: "宽度",
-                    description: "Pill width on notched Macs",
+                    description: "收起时的宽度，适用于内置和外接屏幕",
                     value: $appState.compactIslandWidth,
                     step: 2,
                     range: 140...320,
@@ -84,7 +84,7 @@ struct AppearanceSettingsView: View {
                 SettingRowDivider()
                 sizeRow(
                     title: "高度",
-                    description: "Pill height on notched Macs",
+                    description: "收起时的高度，刘海屏保留必要最小尺寸",
                     value: $appState.compactIslandHeight,
                     step: 1,
                     range: 28...60,

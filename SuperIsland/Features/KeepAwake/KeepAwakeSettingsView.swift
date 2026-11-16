@@ -24,7 +24,7 @@ struct KeepAwakeSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("保持唤醒").font(.title2.weight(.semibold))
-            Text("按本地任务或手动计时保持 Mac 工作，屏幕与合盖支持分别管理。")
+            Text(service.isNotebook ? "按本地任务或手动计时保持 Mac 工作，屏幕与合盖支持分别管理。" : "按本地任务或手动计时保持 Mac 工作，可设置屏幕策略。")
                 .font(.callout).foregroundStyle(.secondary)
             SettingGroup {
                 SettingToggleRow(title: "启用保持唤醒", description: "关闭后立即停止本功能保持并恢复系统设置，不会取消外部任务。",
@@ -89,7 +89,7 @@ struct KeepAwakeSettingsView: View {
                 HStack {
                     Text(service.environment.hardware == .desktop ? "桌面 Mac · 交流电源" : service.environment.battery.map { "电量 \($0)%" } ?? "电源能力检查中")
                     Spacer()
-                    Text(service.lidStatus)
+                    if service.isNotebook { Text(service.lidStatus) }
                 }.font(.caption).foregroundStyle(.secondary)
                 if let error = service.runtimeError { Text(error).font(.caption).foregroundStyle(.orange) }
             }.padding(16).frame(maxWidth: .infinity, alignment: .leading)

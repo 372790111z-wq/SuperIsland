@@ -57,11 +57,12 @@ final class KeepAwakeMenuController: NSObject, NSMenuDelegate {
         row(.automatic)?.state = service.engine.enabled && service.engine.mode == .automatic ? .on : .off
         row(.pause)?.title = service.engine.pauseDeadline.map { $0 > KeepAwakeClock.now() } == true ? "结束暂停" : "暂停 30 分钟"
         row(.pause)?.isEnabled = service.engine.enabled
+        row(.recapLast)?.isHidden = !service.isNotebook
         row(.recapLast)?.isEnabled = service.isNotebook && service.recap.latest != nil
         row(.recapAuto)?.state = service.recap.autoShow ? .on : .off
         row(.recapAuto)?.isEnabled = service.isNotebook && service.engine.enabled
         row(.recapAuto)?.isHidden = !service.isNotebook
-        row(.sources)?.title = "\(service.decision.runningSources) 个运行来源 · \(service.lidStatus)"
+        row(.sources)?.title = "\(service.decision.runningSources) 个运行来源" + (service.isNotebook ? " · " + service.lidStatus : "")
     }
     func item() -> NSMenuItem {
         let item = NSMenuItem(title: "保持唤醒", action: nil, keyEquivalent: "")

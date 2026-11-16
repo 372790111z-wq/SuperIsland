@@ -8,7 +8,9 @@ private final class QQCapabilityFixture {
         launchDate: Date(timeIntervalSince1970: 1), trackID: "fixture", title: "Song", artist: "Lead")
     var attributes: [Int: [String: Any]] = [:]
     var trusted = true, processMatches = true, updateOnPress = true
-    var sends = 0, trackReads = 0
+    var freshMediaMatches = false
+    var sends = 0, trackReads = 0, mediaReads = 0
+    var beforeMediaRead: ((Int) -> Void)?
     var beforeTrackRead: ((Int) -> Void)?
     var afterPress: (() -> Void)?
     var beforeActions: ((Int) -> Void)?
@@ -33,6 +35,7 @@ private final class QQCapabilityFixture {
         set(14, kAXTitleAttribute, "播放模式"); children(14, [15]); set(15, kAXRoleAttribute, kAXMenuRole)
         children(15, modes.compactMap { mode in MusicPlaybackMode.allCases.firstIndex(of: mode).map { 20 + $0 } })
         for (index, mode) in MusicPlaybackMode.allCases.enumerated() { set(20 + index, kAXTitleAttribute, mode.rawValue) }
+        for id in [20, 21, 22] { set(id, "AXMenuItemMarkChar", id == 20 ? "✓" : "") }
         for id in [13, 20, 21, 22] { set(id, kAXRoleAttribute, kAXMenuItemRole); set(id, kAXEnabledAttribute, true) }
     }
     var access: QQMusicAccessibility {
@@ -57,10 +60,14 @@ private final class QQCapabilityFixture {
                         self.set(13, kAXTitleAttribute, liked ? "喜欢歌曲" : "取消喜欢")
                     } else if let mode = self.attributes[id]?[kAXTitleAttribute] as? String {
                         self.set(5, kAXDescriptionAttribute, "播放模式（\(mode)）")
+                        for target in [20, 21, 22] { self.set(target, "AXMenuItemMarkChar", target == id ? "✓" : "") }
                     }
                 }
                 self.afterPress?()
                 return self.pressResult
+            }, verifyNowPlaying: { _ in
+                self.mediaReads += 1; self.beforeMediaRead?(self.mediaReads)
+                return self.freshMediaMatches
             })
     }
     func read() async -> MusicAdvancedSnapshot { await QQMusicControlAdapter(accessibility: access).read(context, fence: MusicControlFence()) }
@@ -70,6 +77,91 @@ private final class QQCapabilityFixture {
 }
 
 final class QQMusicCapabilityTests: XCTestCase {
+    func testClosedWindowUsesFreshMediaAndMenuForReadAndSingleSendReadback() async {
+        let f = QQCapabilityFixture()
+        f.set(1000, kAXWindowsAttribute, [AXUIElement]()); f.freshMediaMatches = true
+        let initial = await f.read()
+        XCTAssertEqual(initial.favorite, false); XCTAssertEqual(initial.mode, .sequential)
+        XCTAssertEqual(initial.availableModes, MusicPlaybackMode.allCases)
+        for mode in [MusicPlaybackMode.repeatOne, .shuffle, .sequential] {
+            let state = await f.apply(.mode(mode)); XCTAssertEqual(state.mode, mode); XCTAssertNil(state.message)
+        }
+        let liked = await f.apply(.favorite(true)); XCTAssertEqual(liked.favorite, true)
+        let restored = await f.apply(.favorite(false)); XCTAssertEqual(restored.favorite, false)
+        XCTAssertEqual(f.sends, 5); XCTAssertGreaterThan(f.mediaReads, 10)
+    }
+    func testBackgroundFallbackRejectsLostProofBeforeSendAndAfterSend() async {
+        for afterSend in [false, true] {
+            let f = QQCapabilityFixture()
+            f.set(1000, kAXWindowsAttribute, [AXUIElement]()); f.freshMediaMatches = true
+            if afterSend {
+                f.afterPress = { [unowned f] in f.freshMediaMatches = false }
+            } else {
+                var probes = 0
+                f.beforeActions = { [unowned f] id in
+                    if id == 13 { probes += 1; if probes == 2 { f.freshMediaMatches = false } }
+                }
+            }
+            let state = await f.apply(.favorite(true))
+            XCTAssertNil(state.favorite); XCTAssertEqual(f.sends, afterSend ? 1 : 0)
+        }
+    }
+    func testBackgroundFallbackRejectsUnknownAmbiguousAndAbsentModeMarks() async {
+        for variant in 0..<5 {
+            let f = QQCapabilityFixture()
+            f.set(1000, kAXWindowsAttribute, [AXUIElement]()); f.freshMediaMatches = true
+            switch variant {
+            case 0: f.set(21, "AXMenuItemMarkChar", "✓")
+            case 1: f.set(20, "AXMenuItemMarkChar", "")
+            case 2: f.children(15, [20, 20, 21, 22])
+            case 3:
+                f.children(15, [20, 21, 22, 23]); f.set(23, kAXTitleAttribute, "未来模式")
+                f.set(23, "AXMenuItemMarkChar", "✓")
+            default: f.set(20, "AXMenuItemMarkChar", "?")
+            }
+            let state = await f.read()
+            XCTAssertNil(state.mode); XCTAssertFalse(state.canSetMode); XCTAssertTrue(state.canFavorite)
+            _ = await f.apply(.mode(.shuffle)); XCTAssertEqual(f.sends, 0)
+        }
+    }
+    func testFreshMediaDoesNotBypassAmbiguousWindowOrTimeout() async {
+        for variant in 0..<3 {
+            let f = QQCapabilityFixture(); f.freshMediaMatches = true
+            if variant == 0 { f.set(1000, kAXWindowsAttribute, [f.element(1), f.element(1)]) }
+            if variant == 1 { f.children(1, [2, 2]) }
+            if variant == 2 { f.timeoutNode = 2 }
+            _ = await f.apply(.favorite(true)); XCTAssertEqual(f.sends, 0); XCTAssertEqual(f.mediaReads, 0)
+        }
+    }
+    func testMediaProofRequiresExactSourceProcessAndTrack() {
+        let f = QQCapabilityFixture()
+        let valid: [String: Any] = ["processIdentifier": 1000, "bundleIdentifier": QQMusicControlAdapter.bundleID,
+                                    "title": "Song", "artist": "Lead"]
+        XCTAssertTrue(QQMusicNowPlayingVerification.matches(valid, context: f.context))
+        for key in valid.keys {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertFalse(QQMusicNowPlayingVerification.matches(missing, context: f.context))
+            var wrong = valid; wrong[key] = key == "processIdentifier" ? 2000 : "Other"
+            XCTAssertFalse(QQMusicNowPlayingVerification.matches(wrong, context: f.context))
+        }
+        var parent = valid; parent["parentApplicationBundleIdentifier"] = "Other"
+        XCTAssertFalse(QQMusicNowPlayingVerification.matches(parent, context: f.context))
+    }
+    func testMediaHelperRejectsMalformedOversizedAndHungResponsesWithinBound() throws {
+        let f = QQCapabilityFixture(), directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("proof.pl")
+        let valid = #"print '{"processIdentifier":1000,"bundleIdentifier":"com.tencent.QQMusicMac","title":"Song","artist":"Lead"}';"#
+        for (source, expected) in [(valid, true), ("print 'invalid';", false),
+                                    ("print 'x' x (9 * 1024 * 1024);", false),
+                                    (#"$SIG{TERM} = 'IGNORE'; sleep 10;"#, false)] {
+            try source.write(to: script, atomically: true, encoding: .utf8)
+            let started = ProcessInfo.processInfo.systemUptime
+            XCTAssertEqual(QQMusicNowPlayingVerification.verify(f.context, script: script, framework: directory), expected)
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 1.5)
+        }
+    }
     func testCompatibleControlsWorkWithoutVersionMetadata() async {
         // No bundle URL or version metadata exists in this fixture.
         for modes in [[MusicPlaybackMode.sequential, .repeatOne], MusicPlaybackMode.allCases] {

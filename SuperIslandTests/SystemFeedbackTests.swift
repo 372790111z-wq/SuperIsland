@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import AppKit
+import IOKit.ps
 @testable import SuperIsland
 
 @MainActor
@@ -12,12 +13,55 @@ final class SystemFeedbackTests: XCTestCase {
         state.showVolumeHUD()
         XCTAssertFalse(state.usesNotchSafeSystemFeedback)
         XCTAssertEqual(state.contentSize(for: .compact), original)
-        XCTAssertEqual(original, Constants.nonNotchCompactSize)
+        XCTAssertEqual(original, state.configuredCompactSize)
         state.hideCompactSystemFeedback(if: .volume)
         state.showBrightnessHUD()
         XCTAssertFalse(state.usesNotchSafeSystemFeedback)
         XCTAssertEqual(state.contentSize(for: .compact), original)
         state.hideCompactSystemFeedback(if: .brightness)
+    }
+
+    func testNoNotchCompactDimensionsFollowPreferencesAndShell() {
+        let state = AppState(synchronizesRuntimeEnergyState: false)
+        let oldWidth = state.compactIslandWidth, oldHeight = state.compactIslandHeight
+        defer { state.compactIslandWidth = oldWidth; state.compactIslandHeight = oldHeight }
+        state.updatePresentationContext(screen: nil)
+        state.compactIslandWidth = 240; state.compactIslandHeight = 40
+        XCTAssertEqual(state.contentSize(for: .compact), CGSize(width: 240, height: 40))
+        let firstShell = IslandShellMetrics.compactSurfaceSize(for: state)
+        state.compactIslandWidth = 300; state.compactIslandHeight = 55
+        XCTAssertEqual(state.contentSize(for: .compact), CGSize(width: 300, height: 55))
+        let nextShell = IslandShellMetrics.compactSurfaceSize(for: state)
+        XCTAssertGreaterThan(nextShell.width, firstShell.width)
+        XCTAssertEqual(nextShell.height, 55)
+        XCTAssertEqual(state.windowSize(for: .compact), nextShell)
+        state.showBrightnessHUD()
+        XCTAssertEqual(state.contentSize(for: .compact), CGSize(width: 300, height: 55))
+        state.hideCompactSystemFeedback(if: .brightness)
+        state.compactIslandWidth = 20; state.compactIslandHeight = 200
+        XCTAssertEqual(state.contentSize(for: .compact), CGSize(width: 140, height: 60))
+    }
+
+    func testInternalBatteryPresenceSeparatesAbsentFromUnknownAndUPS() {
+        XCTAssertEqual(BatteryPresence.detect(nil), .unknown)
+        XCTAssertEqual(BatteryPresence.detect([nil]), .unknown)
+        XCTAssertEqual(BatteryPresence.detect([[:]]), .unknown)
+        XCTAssertEqual(BatteryPresence.detect([]), .absent)
+        XCTAssertEqual(BatteryPresence.detect([], hasBatteryHardware: true), .unknown)
+        XCTAssertEqual(BatteryPresence.detect([[kIOPSTypeKey: "UPS"]]), .absent)
+        XCTAssertEqual(BatteryPresence.detect([[kIOPSTypeKey: kIOPSInternalBatteryType], nil]), .present)
+        XCTAssertFalse(BatteryPresence.absent.offersBatteryUI)
+        XCTAssertTrue(BatteryPresence.unknown.offersBatteryUI)
+        XCTAssertTrue(BatteryPresence.present.offersBatteryUI)
+    }
+
+    func testMissingOrInvalidCapacityNeverBecomesZeroPercent() {
+        XCTAssertNil(BatteryManager.normalizedLevel([:]))
+        XCTAssertNil(BatteryManager.normalizedLevel([kIOPSCurrentCapacityKey: 0]))
+        XCTAssertNil(BatteryManager.normalizedLevel([kIOPSCurrentCapacityKey: 1, kIOPSMaxCapacityKey: 0]))
+        XCTAssertNil(BatteryManager.normalizedLevel([kIOPSCurrentCapacityKey: -1, kIOPSMaxCapacityKey: 100]))
+        XCTAssertEqual(BatteryManager.normalizedLevel([kIOPSCurrentCapacityKey: 0, kIOPSMaxCapacityKey: 100]), 0)
+        XCTAssertEqual(BatteryManager.normalizedLevel([kIOPSCurrentCapacityKey: 40, kIOPSMaxCapacityKey: 80]), 50)
     }
 
     func testControlCenterOnlyRecognizesSystemVolumeAndDisplayBrightness() {

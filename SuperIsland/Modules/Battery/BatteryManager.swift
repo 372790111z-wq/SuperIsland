@@ -24,12 +24,35 @@ struct BatteryConsumerApp: Identifiable, Equatable {
     }
 }
 
+enum BatteryPresence: Equatable {
+    case unknown, present, absent
+
+    // A failed read is unknown; an empty successful list means no internal battery.
+    // UPS and peripheral batteries never count as the Mac's built-in battery.
+    static func detect(_ descriptions: [[String: Any]?]?, hasBatteryHardware: Bool = false) -> Self {
+        guard let descriptions else { return .unknown }
+        if descriptions.contains(where: { $0?[kIOPSTypeKey] as? String == kIOPSInternalBatteryType }) { return .present }
+        guard descriptions.allSatisfy({ $0?[kIOPSTypeKey] is String }) else { return .unknown }
+        return hasBatteryHardware ? .unknown : .absent
+    }
+    var offersBatteryUI: Bool { self != .absent }
+}
+
 @MainActor
 final class BatteryManager: ObservableObject {
     static let shared = BatteryManager()
 
     @Published var batteryLevel: Int = 0
     @Published private(set) var hasBattery = false
+    @Published private(set) var presence: BatteryPresence = .unknown
+    @Published private(set) var displayLevel: Int?
+
+    static func normalizedLevel(_ info: [String: Any]) -> Int? {
+        guard let current = info[kIOPSCurrentCapacityKey] as? Int,
+              let maximum = info[kIOPSMaxCapacityKey] as? Int,
+              maximum > 0, current >= 0, current <= maximum else { return nil }
+        return Int((Double(current) / Double(maximum) * 100).rounded())
+    }
     @Published var isCharging: Bool = false
     @Published var isPluggedIn: Bool = false
     @Published var timeRemaining: String = ""
@@ -102,25 +125,31 @@ final class BatteryManager: ObservableObject {
     func updateBatteryInfo() {
         let wasPluggedIn = isPluggedIn
 
-        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [Any],
-              let first = sources.first(where: { source in
-                  let description = IOPSGetPowerSourceDescription(snapshot, source as CFTypeRef)?.takeUnretainedValue() as? [String: Any]
-                  return description?[kIOPSTypeKey] as? String == kIOPSInternalBatteryType
-              }),
-              let info = IOPSGetPowerSourceDescription(snapshot, first as CFTypeRef)?.takeUnretainedValue() as? [String: Any]
-        else { hasBattery = false; isCharging = false; isLowBattery = false; timeRemaining = ""; return }
+        let descriptions: [[String: Any]?]?
+        if let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+           let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [Any] {
+            descriptions = sources.map { source in
+                IOPSGetPowerSourceDescription(snapshot, source as CFTypeRef)?.takeRetainedValue() as? [String: Any]
+            }
+        } else { descriptions = nil }
+        let batteryHardware = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        presence = BatteryPresence.detect(descriptions, hasBatteryHardware: batteryHardware != 0)
+        if batteryHardware != 0 { IOObjectRelease(batteryHardware) }
+        guard presence == .present,
+              let info = descriptions?.compactMap({ $0 }).first(where: { $0[kIOPSTypeKey] as? String == kIOPSInternalBatteryType }) else {
+            hasBattery = false; displayLevel = nil; isCharging = false; isLowBattery = false
+            isPluggedIn = false; timeRemaining = ""; powerSource = presence == .absent ? "Power Adapter" : "Unknown"
+            return
+        }
         hasBattery = true
         cycleCount = BatteryTelemetry.read().cycles ?? 0
-
-        if let capacity = info[kIOPSCurrentCapacityKey] as? Int {
-            let oldLevel = batteryLevel
-            let maximum = info[kIOPSMaxCapacityKey] as? Int ?? 100
-            guard maximum > 0 else { hasBattery = false; return }
-            batteryLevel = max(0, min(100, Int((Double(capacity) / Double(maximum) * 100).rounded())))
-            isLowBattery = batteryLevel <= 20
-
-            if hasLoadedInitialSnapshot && (abs(oldLevel - batteryLevel) >= 5 || (oldLevel > 20 && batteryLevel <= 20)) {
+        let oldLevel = displayLevel
+        displayLevel = Self.normalizedLevel(info)
+        isLowBattery = displayLevel.map { $0 <= 20 } ?? false
+        if let level = displayLevel {
+            batteryLevel = level
+            if hasLoadedInitialSnapshot, let oldLevel,
+               abs(oldLevel - level) >= 5 || (oldLevel > 20 && level <= 20) {
                 AppState.shared.showHUD(module: .battery)
             }
         }
@@ -159,7 +188,7 @@ final class BatteryManager: ObservableObject {
     }
 
     private func appendHistorySample(force: Bool) {
-        guard hasBattery else { return }
+        guard hasBattery, displayLevel != nil else { return }
         let now = Date()
         if let last = batteryHistory.last, now.timeIntervalSince(last.timestamp) < historySampleInterval,
            last.sessionID == historySession { return }
@@ -357,9 +386,10 @@ final class BatteryManager: ObservableObject {
     }
 
     var batteryColor: String {
+        guard let level = displayLevel else { return "white" }
         if isCharging { return "green" }
-        if batteryLevel <= 10 { return "red" }
-        if batteryLevel <= 20 { return "yellow" }
+        if level <= 10 { return "red" }
+        if level <= 20 { return "yellow" }
         return "white"
     }
 

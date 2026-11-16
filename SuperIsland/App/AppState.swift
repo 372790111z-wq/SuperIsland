@@ -1185,7 +1185,7 @@ final class AppState: ObservableObject {
         switch module {
         case .nowPlaying: return nowPlayingEnabled
         case .volumeHUD: return volumeHUDEnabled
-        case .battery: return batteryEnabled
+        case .battery: return batteryEnabled && BatteryManager.shared.presence.offersBatteryUI
         case .shelf: return shelfEnabled
         case .connectivity: return connectivityEnabled
         case .calendar: return calendarEnabled
@@ -1401,7 +1401,7 @@ final class AppState: ObservableObject {
         switch state {
         case .compact:
             if usesWideCompactLayout {
-                return Constants.nonNotchCompactSize
+                return configuredCompactSize
             }
             let baseSize = compactBaseSize
             if usesNotchSafeSystemFeedback {
@@ -1589,12 +1589,14 @@ final class AppState: ObservableObject {
         return 4
     }
 
-    private var compactBaseSize: CGSize {
-        compactIslandMetrics?.size ?? CGSize(
-            width: compactIslandWidth,
-            height: compactIslandHeight
-        )
+    var configuredCompactSize: CGSize {
+        let width = compactIslandWidth.isFinite ? compactIslandWidth : 200
+        let height = compactIslandHeight.isFinite ? compactIslandHeight : 36
+        return CGSize(width: max(presentationHasNotch ? Constants.compactNotchMinimumWidth : 140, min(320, width)),
+                      height: max(presentationHasNotch ? Constants.compactNotchMinimumHeight : 28, min(60, height)))
     }
+
+    private var compactBaseSize: CGSize { configuredCompactSize }
 
     private var compactMinimalSideExpansion: CGFloat {
         guard let notch = presentationNotchRect,
@@ -1620,8 +1622,8 @@ final class AppState: ObservableObject {
 
         // User-controlled compact size, clamped to sensible lower bounds so
         // the notch cutout still physically fits over the camera housing.
-        let width = max(Constants.compactNotchMinimumWidth, compactIslandWidth)
-        let height = max(Constants.compactNotchMinimumHeight, compactIslandHeight)
+        let width = configuredCompactSize.width
+        let height = configuredCompactSize.height
         let bottomCornerRadius = min(Constants.compactNotchBottomCornerRadius, height / 2)
 
         return ScreenDetector.CompactIslandMetrics(

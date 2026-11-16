@@ -44,7 +44,7 @@ struct BatteryExpandedView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     if control.display.showPercentage && control.display.popupFields.contains(.percentage) {
-                        Text(manager.hasBattery ? "\(manager.batteryLevel)%" : "—")
+                        Text(manager.displayLevel.map { "\($0)%" } ?? "—")
                             .font(.system(size: 20, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
                     }
@@ -84,7 +84,7 @@ struct BatteryExpandedView: View {
 
                 RoundedRectangle(cornerRadius: 4)
                     .fill(batteryColor)
-                    .frame(width: geometry.size.width * CGFloat(manager.batteryLevel) / 100)
+                    .frame(width: geometry.size.width * CGFloat(manager.displayLevel ?? 0) / 100)
                     .animation(.easeInOut(duration: 0.5), value: manager.batteryLevel)
             }
         }
@@ -92,9 +92,10 @@ struct BatteryExpandedView: View {
     }
 
     private var batteryColor: Color {
+        guard let level = manager.displayLevel else { return .secondary }
         if manager.isCharging { return .green }
-        if manager.batteryLevel <= 10 { return .red }
-        if manager.batteryLevel <= 20 { return .yellow }
+        if level <= 10 { return .red }
+        if level <= 20 { return .yellow }
         return .white
     }
 }

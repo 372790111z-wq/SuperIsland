@@ -313,7 +313,7 @@ struct FullExpandedTopBarView: View {
     private var trailingShoulderControls: some View {
         HStack(spacing: 8) {
             lockButton
-            if appState.batteryEnabled {
+            if appState.batteryEnabled && batteryManager.presence.offersBatteryUI {
                 batteryButton
             }
             if appState.notificationsEnabled {
@@ -449,13 +449,14 @@ struct FullExpandedTopBarView: View {
     }
 
     private func batteryButtonTint(isSelected: Bool) -> Color {
+        guard let level = batteryManager.displayLevel else { return Color.white.opacity(0.5) }
         if batteryManager.isCharging {
             return Color.green.opacity(isSelected ? 0.96 : 0.84)
         }
-        if batteryManager.batteryLevel <= 10 {
+        if level <= 10 {
             return Color.red.opacity(isSelected ? 0.96 : 0.82)
         }
-        if batteryManager.batteryLevel <= 20 {
+        if level <= 20 {
             return Color.yellow.opacity(isSelected ? 0.96 : 0.82)
         }
         return Color.white.opacity(isSelected ? 0.9 : 0.74)
