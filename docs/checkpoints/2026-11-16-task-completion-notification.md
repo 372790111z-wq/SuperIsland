@@ -22,3 +22,7 @@
 尚未替换本机、推送 GitHub 或发布安装包。真实合盖/开盖硬件流程本轮未重测；自动化回归不替代实机验收。主工作区原未跟踪待办、profile和缓存保持不变；本记录接续11月13日待办，按11月16日新确认覆盖无机盖设备规则。
 
 候选包已生成：`20261116144536`，Apple Silicon；源码 `29b1fb1cc8236d6f7b0f75d60611faf5d2774660`。ZIP SHA-256：`25f5bfc143ed65d01f399e71589e4cbe0692689ae1343adfc7b306cea0075db3`。Release构建、同一签名身份封签及解包回验通过，本机签名未公证。回执位于 `build/CompletionRelease.noindex/`。未替换当前安装20261112171859，未推送或发布。
+
+## 本机安装（用户随后授权）
+
+20261116144536 已替换到 `/Applications/SuperIsland.app` 并启动。旧进程19600正常退出，新进程70705；安装版源码、二进制哈希、签名要求与候选一致，音乐/布局/挂绳、通知总开关和保持唤醒偏好回读一致。旧版20261112171859的Backup与Retired副本保存在本worktree `build/CompletionRelease.noindex/Installation/`，同目录有安装与验证回执。尚待用户真实任务完成横幅验收；未推送GitHub或发布。
