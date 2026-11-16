@@ -730,6 +730,7 @@ final class AppState: ObservableObject {
 
     /// Replace compact content, widening around a physical notch when needed.
     func showVolumeHUD() {
+        SystemFeedbackDiagnostics.write("volumePresentation", fields: ["enabled": volumeHUDEnabled, "interactionSuppressed": isZilanInteractionSuppressed, "isCompact": currentState == .compact])
         guard !isZilanInteractionSuppressed, volumeHUDEnabled else { return }
         if currentState == .expanded, automaticNotificationReturn != nil, !isHovering { dismiss() }
         guard currentState == .compact else { return }
@@ -745,6 +746,7 @@ final class AppState: ObservableObject {
     }
 
     private func showCompactSystemFeedback(_ kind: SystemFeedbackKind, duration: TimeInterval) {
+        SystemFeedbackDiagnostics.write("feedbackPresentation", fields: ["kind": kind == .volume ? "volume" : "brightness", "shelfDrag": isShelfDragActive, "emojiInteraction": isSystemEmojiInteractionActive, "presentationHeld": presentationHoldModule != nil, "duration": duration])
         guard !isShelfDragActive, !isSystemEmojiInteractionActive, presentationHoldModule == nil else { return }
         compactVolumeHUDDismissWorkItem?.cancel()
         compactFeedbackGeneration &+= 1

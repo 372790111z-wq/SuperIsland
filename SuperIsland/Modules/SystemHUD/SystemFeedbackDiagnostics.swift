@@ -12,8 +12,11 @@ enum SystemFeedbackDiagnostics {
             .appendingPathComponent("Library/Application Support/SuperIsland/SF1Validation")
         let file = directory.appendingPathComponent("diagnostics.json")
         var document = ((try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]) ?? [:]
-        document[section] = fields
-        document["updatedAt"] = ISO8601DateFormatter().string(from: Date())
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        var sample = fields
+        sample["observedAt"] = timestamp
+        document[section] = sample
+        document["updatedAt"] = timestamp
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: document, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: file, options: .atomic)

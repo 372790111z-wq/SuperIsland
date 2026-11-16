@@ -15,7 +15,7 @@ struct KeepAwakeEngine: Equatable {
         var respectLowPower = true
         var screen: ScreenPolicy = .system
         // Retained solely for old preference decoding and rollback compatibility.
-        // Completion events no longer send system notifications on any hardware.
+        // Notification master policy owns completion alerts; this flag is ignored.
         var notifyCompletion = true
     }
     struct Environment: Equatable {

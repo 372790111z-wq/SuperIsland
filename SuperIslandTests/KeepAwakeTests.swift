@@ -11,13 +11,13 @@ final class KeepAwakeLocalSourceTests: XCTestCase {
         let started = expectation(description: "first sample started")
         var pending: CheckedContinuation<KeepAwakeKimiMonitor.Snapshot, Never>?
         var calls = 0
-        let service = KeepAwakeService(defaults: defaults, root: root) {
+        let service = KeepAwakeService(defaults: defaults, root: root, localSampler: {
             calls += 1
             if calls == 1 {
                 return await withCheckedContinuation { pending = $0; started.fulfill() }
             }
             return .init(state: nil, message: "replacement unknown")
-        }
+        })
         service.start(); defer { service.shutdown() }
         try service.connect(KeepAwakeSource.all.first { $0.id == "kimi-code-desktop" }!)
         await fulfillment(of: [started], timeout: 2)
@@ -118,9 +118,9 @@ final class KeepAwakeLocalSourceTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: name); try? FileManager.default.removeItem(at: root) }
         defaults.set(["kimi-code-desktop", "kimi-code-cli"], forKey: "keepAwake.sources.v1")
         var samples = 0
-        let service = KeepAwakeService(defaults: defaults, root: root) {
+        let service = KeepAwakeService(defaults: defaults, root: root, localSampler: {
             samples += 1; return .init(state: .running, message: "must not be sampled")
-        }
+        })
         service.start(); defer { service.shutdown() }
         for source in KeepAwakeSource.all.filter(\.isDeferred) {
             XCTAssertThrowsError(try service.connect(source))

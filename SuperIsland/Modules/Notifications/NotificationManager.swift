@@ -121,7 +121,17 @@ final class NotificationManager: ObservableObject {
     private let dismissedNotificationRetention: TimeInterval = 300
     private let lowInformationSuppressionWindow: TimeInterval = 10
     private var dismissedNotifications: [DismissedNotificationRecord] = []
-    init(startMonitoring: Bool = true) {
+    private var feedGeneration: UInt64 = 0
+    private var feedEnabled: Bool?
+    private var feedSources: Set<String>?
+    private let macSourceActivation: ((Bool) -> Void)?
+    private lazy var taskCompletions = TaskCompletionNotifications(
+        enabled: { AppState.shared.notificationsEnabled },
+        show: { [weak self] in self?.addNotification($0) })
+    func receiveTaskCompletion(_ event: TaskCompletionEvent) { taskCompletions.receive(event) }
+
+    init(startMonitoring: Bool = true, macSourceActivation: ((Bool) -> Void)? = nil) {
+        self.macSourceActivation = macSourceActivation
         if startMonitoring {
             checkPermission()
             self.startMonitoring()
@@ -191,6 +201,7 @@ final class NotificationManager: ObservableObject {
 
     func applyMacNotificationSource() {
         let enabled = AppState.shared.notificationsEnabled && AppState.shared.isNotificationSourceEnabled(.macOS)
+        if let macSourceActivation { macSourceActivation(enabled); return }
         MacNotificationBridge.shared.apply(enabled: enabled) { [weak self] id, banner in
             guard let self, AppState.shared.notificationsEnabled,
                   AppState.shared.isNotificationSourceEnabled(.macOS) else { return }
@@ -1122,10 +1133,11 @@ final class NotificationManager: ObservableObject {
 
     func addNotification(_ notification: IslandNotification) {
         let normalized = normalizedNotification(notification)
-        guard AppState.shared.notificationsEnabled, isNotificationAllowed(normalized) else { return }
+        guard AppState.shared.notificationsEnabled, isNotificationAllowed(normalized), !taskCompletions.isEcho(normalized) else { return }
 
+        let generation = feedGeneration
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.feedGeneration == generation else { return }
             self.recentNotifications = self.recentNotifications
                 .map { self.normalizedNotification($0) }
                 .filter { self.isNotificationAllowed($0) }
@@ -1168,13 +1180,24 @@ final class NotificationManager: ObservableObject {
             let eventID = mergedNotification.sourceID
             AppState.shared.presentIncomingNotification(eventID) { [weak self] in
                 guard let self, let event = self.recentNotifications.first(where: { $0.sourceID == eventID }) else { return false }
-                return AppState.shared.notificationsEnabled && self.isNotificationAllowed(event)
+                return self.feedGeneration == generation && AppState.shared.notificationsEnabled && self.isNotificationAllowed(event)
             }
         }
     }
 
     func applyFeedPreferences() {
+        let enabled = AppState.shared.notificationsEnabled
+        let sources = AppState.shared.enabledNotificationSourceIDs
+        if feedEnabled != enabled || feedSources != sources {
+            feedEnabled = enabled; feedSources = sources; feedGeneration &+= 1
+        }
         applyMacNotificationSource()
+        taskCompletions.synchronize()
+        guard AppState.shared.notificationsEnabled else {
+            clearAll()
+            if AppState.shared.activeBuiltInModule == .notifications { AppState.shared.dismiss() }
+            return
+        }
         AppState.shared.cancelPendingNotificationPresentation()
         recentNotifications = recentNotifications
             .map { normalizedNotification($0) }
@@ -1273,7 +1296,7 @@ final class NotificationManager: ObservableObject {
     }
 
     private func isNotificationAllowed(_ notification: IslandNotification) -> Bool {
-        AppState.shared.isNotificationSourceEnabled(feedSource(for: notification))
+        notification.sourceID.hasPrefix("task-completion:") || AppState.shared.isNotificationSourceEnabled(feedSource(for: notification))
     }
 
     private func feedSource(for notification: IslandNotification) -> NotificationFeedSource {

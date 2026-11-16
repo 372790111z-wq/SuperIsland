@@ -304,7 +304,7 @@ final class KeepAwakeCodexServiceTests: XCTestCase {
                              turns: [.init(id: turn, status: turnStatus)], turnsComplete: true)])
     }
 
-    @MainActor private func makeService(uninstaller: @escaping @MainActor (KeepAwakeSource) throws -> Void = { _ in
+    @MainActor private func makeService(completionSink: @escaping (TaskCompletionEvent) -> Void = { _ in }, uninstaller: @escaping @MainActor (KeepAwakeSource) throws -> Void = { _ in
         XCTFail("An isolated fixture must not invoke the production hook uninstaller.")
     }, sampler: @escaping @MainActor () async throws -> Snapshot) throws
         -> (name: String, defaults: UserDefaults, root: URL, service: KeepAwakeService) {
@@ -315,7 +315,7 @@ final class KeepAwakeCodexServiceTests: XCTestCase {
             codexHome: root.appendingPathComponent("private-codex"), socketURL: root.appendingPathComponent("private-codex/control.sock"))
         defaults.set(try JSONEncoder().encode(["codex-cli": KeepAwakeCodexConnection(profile: profile, mode: .hooks), "codex-desktop": KeepAwakeCodexConnection(profile: profile, mode: .rpc)]),
                      forKey: KeepAwakeCodexConnection.defaultsKey)
-        let service = KeepAwakeService(defaults: defaults, root: root, codexSampler: sampler,
+        let service = KeepAwakeService(defaults: defaults, root: root, completionSink: completionSink, codexSampler: sampler,
                                        codexAvailability: { true }, hookUninstaller: uninstaller, codexResolver: { profile })
         return (name, defaults, root, service)
     }
@@ -345,6 +345,22 @@ final class KeepAwakeCodexServiceTests: XCTestCase {
         XCTAssertFalse(service.lid.enabled, file: file, line: line)
         XCTAssertFalse(service.lid.applied, file: file, line: line)
         XCTAssertFalse(service.lid.busy, file: file, line: line)
+    }
+
+    @MainActor func testAcceptedRPCCompletionEmitsOnceWhileKeepAwakeDisabled() async throws {
+        var calls = 0, completions: [TaskCompletionEvent] = []
+        let fixture = try makeService(completionSink: { completions.append($0) }) {
+            calls += 1
+            return calls == 1 ? self.snapshot("active", turn: "turn", turnStatus: "inProgress") : self.snapshot("idle", turn: "turn", turnStatus: "completed")
+        }
+        let service = fixture.service
+        defer { service.shutdown(); fixture.defaults.removePersistentDomain(forName: fixture.name); try? FileManager.default.removeItem(at: fixture.root) }
+        service.start(); try service.connect(source())
+        guard await waitUntil({ completions.count == 1 }) else { return }
+        assertNoRealHold(service)
+        XCTAssertEqual(completions.first?.sourceName, KeepAwakeSource.all.first { $0.id == "codex-desktop" }?.name)
+        guard await waitUntil({ calls >= 3 }) else { return }
+        XCTAssertEqual(completions.count, 1)
     }
 
     @MainActor func testRepeatedConnectIsIdempotentAndNewTurnKeepsMonotonicSequence() async throws {

@@ -543,7 +543,7 @@ struct ModuleSettingsView: View {
             get: { appState.notificationsEnabled },
             set: { newValue in
                 appState.notificationsEnabled = newValue
-                notificationManager.applyMacNotificationSource()
+                notificationManager.applyFeedPreferences()
                 guard newValue else {
                     NotificationManager.shared.clearAll()
                     return

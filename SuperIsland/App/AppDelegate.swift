@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var fullScreenProbe: ChromeFullScreenProbe?
     private let keepAwakeMenu = KeepAwakeMenuController()
     private var menuBarDefaultsObserver: NSObjectProtocol?
+    private var notificationPreferencesObserver: NotificationPreferencesObserver?
     private var settingsResetObservers: [NSObjectProtocol] = []
     private var runtimeDefaultsSnapshot: RuntimeDefaultsSnapshot?
     private var powerStateObserver: NSObjectProtocol?
@@ -606,7 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.runtimeDefaultsSnapshot = RuntimeDefaultsSnapshot()
                 self.applyMenuBarVisibility()
                 self.applyVolumeHUDSetting()
-                NotificationManager.shared.applyMacNotificationSource()
+                NotificationManager.shared.applyFeedPreferences()
                 self.rebuildStatusMenu()
                 AppState.shared.refreshEnergyState()
                 ModuleRefreshScheduler.shared.refreshScheduling()
@@ -838,6 +839,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func observeMenuBarSetting() {
         guard menuBarDefaultsObserver == nil else { return }
         runtimeDefaultsSnapshot = RuntimeDefaultsSnapshot()
+        notificationPreferencesObserver = NotificationPreferencesObserver {
+            NotificationManager.shared.applyFeedPreferences()
+        }
         menuBarDefaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: nil,
@@ -912,7 +916,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .connectivity: AppState.shared.connectivityEnabled = newState
         case .calendar: AppState.shared.calendarEnabled = newState
         case .weather: AppState.shared.weatherEnabled = newState
-        case .notifications: AppState.shared.notificationsEnabled = newState
+        case .notifications:
+            AppState.shared.notificationsEnabled = newState
+            NotificationManager.shared.applyFeedPreferences()
         case .teleprompter:
             AppState.shared.teleprompterEnabled = newState
             if newState {

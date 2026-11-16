@@ -89,7 +89,7 @@ final class KeepAwakeService: ObservableObject {
             }
         }
     }
-    static let shared = KeepAwakeService()
+    static let shared = KeepAwakeService(completionSink: { NotificationManager.shared.receiveTaskCompletion($0) })
     @Published private(set) var engine = KeepAwakeEngine()
     @Published private(set) var decision = KeepAwakeEngine.Decision(hold: false, title: "保持唤醒已关闭", detail: "打开自动模式或开始手动计时。")
     @Published private(set) var environment = KeepAwakeEngine.Environment()
@@ -144,6 +144,7 @@ final class KeepAwakeService: ObservableObject {
     private let localSampler: @MainActor () async -> KeepAwakeKimiMonitor.Snapshot
     var openSettings: (() -> Void)?
     private let defaults: UserDefaults
+    private let completionSink: (TaskCompletionEvent) -> Void
     let lid: KeepAwakeLidClient
     private var lidObserver: AnyCancellable?
     private let power = KeepAwakePower()
@@ -172,6 +173,7 @@ final class KeepAwakeService: ObservableObject {
     static let codexChatMetadataConsentKey = "keepAwake.codex.chatMetadata.v1"
 
     init(defaults: UserDefaults = .standard, root: URL? = nil,
+         completionSink: @escaping (TaskCompletionEvent) -> Void = { _ in },
          localSampler: @escaping @MainActor () async -> KeepAwakeKimiMonitor.Snapshot = { await KeepAwakeKimiMonitor.sample() },
          codexSampler: (@MainActor () async throws -> KeepAwakeCodexMonitor.Snapshot)? = nil,
          codexAvailability: @escaping @MainActor () -> Bool = { KeepAwakeCodexRPC.endpointAvailable() },
@@ -189,6 +191,7 @@ final class KeepAwakeService: ObservableObject {
         self.environmentReader = environmentReader; self.policyClock = policyClock
         self.awakeClock = awakeClock
         self.defaults = defaults
+        self.completionSink = completionSink
         lid = lidClient ?? KeepAwakeLidClient(
             readEnabledIntent: { defaults.bool(forKey: KeepAwakeLidClient.enabledIntentKey) },
             saveEnabledIntent: { defaults.set($0, forKey: KeepAwakeLidClient.enabledIntentKey) })
@@ -570,7 +573,9 @@ final class KeepAwakeService: ObservableObject {
         pollLocalSource(now: now)
         pollCodexSource(now: now)
         for event in mailbox.read() where connections.contains(event.source) {
+            let previous = engine.sessions[event.storageKey]
             if engine.receive(event, now: now) {
+                reportCompletion(from: previous, to: event)
                 if event.taskID == KeepAwakeHookContract.codexSessionEnded {
                     updateRecap(sessions: Array(engine.sessions.values.filter { $0.event.source == event.source && $0.event.session == event.session }), complete: false)
                 } else if let session = engine.sessions[event.storageKey] { updateRecap(sessions: [session], complete: false) }
@@ -807,7 +812,9 @@ final class KeepAwakeService: ObservableObject {
             self.nextCodexPoll = arrived + 5
             self.codexSequence &+= 1
             for event in self.codexLedger.consume(snapshot: snapshot, now: arrived, sequence: self.codexSequence) {
+                let previous = self.engine.sessions[event.storageKey]
                 if self.engine.receive(event, now: arrived) {
+                    self.reportCompletion(from: previous, to: event)
                     if let session = self.engine.sessions[event.storageKey] { self.updateRecap(sessions: [session], complete: false) }
                     self.receivedSources.insert(source)
                 }
@@ -931,6 +938,7 @@ final class KeepAwakeService: ObservableObject {
                     guard let current = self.engine.sessions[event.storageKey], current.isUnfinished,
                           current.event.sequence == sequence,
                           self.engine.receive(event, now: KeepAwakeClock.now()) else { continue }
+                    self.reportCompletion(from: current, to: event)
                     if let session = self.engine.sessions[event.storageKey] { self.updateRecap(sessions: [session], complete: false) }
                     self.acceptance.append("accepted-task-event", fields: ["source": source,
                         "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
@@ -961,8 +969,10 @@ final class KeepAwakeService: ObservableObject {
                 let event = KeepAwakeEngine.Event(source: source, session: result.identity.sessionHash,
                     sequence: mach_continuous_time(), state: KeepAwakeEngine.TaskState(rawValue: result.state) ?? .idle,
                     taskID: result.identity.taskHash, startsTask: false)
-                guard event.state.isTerminal, self.engine.sessions[event.storageKey]?.isUnfinished == true,
+                let previous = self.engine.sessions[event.storageKey]
+                guard event.state.isTerminal, previous?.isUnfinished == true,
                       self.engine.receive(event, now: KeepAwakeClock.now()) else { continue }
+                self.reportCompletion(from: previous, to: event)
                 if let session = self.engine.sessions[event.storageKey] { self.updateRecap(sessions: [session], complete: false) }
                 self.acceptance.append("accepted-task-event", fields: ["source": source,
                     "sessionHash": KeepAwakeHookContract.anonymousIdentity(event.session),
@@ -1005,6 +1015,9 @@ final class KeepAwakeService: ObservableObject {
             self.localPollStarted = nil
             self.tick()
         }
+    }
+    private func reportCompletion(from previous: KeepAwakeEngine.Session?, to event: KeepAwakeEngine.Event) {
+        if let completion = TaskCompletionEvent.transition(from: previous, to: event) { completionSink(completion) }
     }
     private func record(_ message: String) {
         activity.insert(Date().formatted(date: .omitted, time: .standard) + " · " + message, at: 0)

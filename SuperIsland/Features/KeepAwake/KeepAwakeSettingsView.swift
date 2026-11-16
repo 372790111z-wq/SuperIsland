@@ -221,8 +221,8 @@ struct KeepAwakeSettingsView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("任务完成后")
                     Text(service.isNotebook
-                         ? "不额外发送完成通知。合盖期间的任务结果可在开盖回顾中查看。"
-                         : "不额外发送完成通知。任务状态仍会正常更新。")
+                         ? "任务完成提醒跟随“模块 → 通知”总开关，与保持唤醒开关无关。合盖结果仍可在开盖回顾中查看。"
+                         : "任务完成提醒跟随“模块 → 通知”总开关，与保持唤醒开关无关。")
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
                     .dataAnnotationID("si.ka.completion-info")
