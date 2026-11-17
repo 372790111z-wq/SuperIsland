@@ -52,6 +52,164 @@ final class FeatureMasterSwitchTests: XCTestCase {
         try await Task.sleep(for: .seconds(seconds))
     }
 
+    @MainActor func testIndependentIconPreferencesPersistWithoutChangingFeatureState() throws {
+        let f = try Fixture(); defer { f.dispose() }
+        XCTAssertTrue(FeatureMenuBarIcon.screenshotLine.isVisible(in: f.defaults))
+        XCTAssertTrue(FeatureMenuBarIcon.keepAwake.isVisible(in: f.defaults))
+        XCTAssertFalse(FeatureMenuBarIcon.battery.isVisible(in: f.defaults))
+        for enabled in [false, true] {
+            for key in ["screenshotLine.enabled", "keepAwake.enabled", "batteryProtection.v1.enabled", "general.showMenuBarIcon"] {
+                f.defaults.set(enabled, forKey: key)
+            }
+            for feature in FeatureMenuBarIcon.allCases {
+                for visible in [false, true] {
+                    let before = f.defaults.dictionaryRepresentation()
+                    f.defaults.set(visible, forKey: feature.key)
+                    let reloaded = try XCTUnwrap(UserDefaults(suiteName: f.name))
+                    XCTAssertEqual(feature.isVisible(in: reloaded), visible)
+                    for (key, value) in before where key != feature.key {
+                        XCTAssertEqual(reloaded.object(forKey: key) as? NSObject, value as? NSObject)
+                    }
+                }
+            }
+        }
+    }
+    @MainActor func testIconObserverReactsOnlyToPresentationPreferences() async throws {
+        let f = try Fixture(); defer { f.dispose() }
+        var changes: [FeatureMenuBarVisibility] = []
+        let observer = FeatureMenuBarVisibilityObserver(defaults: f.defaults) { changes.append($0) }
+        XCTAssertEqual(changes.count, 1)
+        f.defaults.set(true, forKey: "keepAwake.enabled"); observer.refresh()
+        f.defaults.set(false, forKey: "general.showMenuBarIcon"); observer.refresh()
+        XCTAssertEqual(changes.count, 1)
+        f.defaults.set(false, forKey: FeatureMenuBarIcon.keepAwake.key)
+        NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: f.defaults)
+        try await wait(0.08)
+        XCTAssertEqual(changes.count, 2); XCTAssertFalse(changes.last!.keepAwake)
+        observer.refresh(); XCTAssertEqual(changes.count, 2)
+        XCTAssertTrue(f.defaults.bool(forKey: "keepAwake.enabled"))
+    }
+    @MainActor func testWakeIconVisibilityNeverChangesEnablementOrCreatesDuplicates() throws {
+        let f = try Fixture(); defer { f.dispose() }
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .notRegistered })
+        let service = KeepAwakeService(defaults: f.defaults, root: f.root, codexAvailability: { false }, lidClient: client)
+        let controller = KeepAwakeMenuController(service: service)
+        defer { controller.setStatusItemVisible(false); service.shutdown() }
+        for enabled in [false, true] {
+            service.setEnabled(enabled)
+            for _ in 0..<3 {
+                controller.setStatusItemVisible(true)
+                let first = try XCTUnwrap(controller.statusItem)
+                controller.setStatusItemVisible(true); XCTAssertTrue(first === controller.statusItem)
+                controller.setStatusItemVisible(false); XCTAssertNil(controller.statusItem)
+                controller.setStatusItemVisible(false); XCTAssertNil(controller.statusItem)
+                XCTAssertEqual(service.engine.enabled, enabled)
+            }
+        }
+    }
+    @MainActor func testScreenshotIconVisibilityDoesNotStopCaptureOrEnableDisabledFeature() throws {
+        let f = try Fixture(); defer { f.dispose() }
+        f.defaults.set("none", forKey: "screenshotLine.shortcut")
+        f.defaults.set(false, forKey: FeatureMenuBarIcon.screenshotLine.key)
+        let line = f.line(); line.start(appName: "MS1Test", installUI: true)
+        defer { line.stop() }
+        XCTAssertNil(line.statusItem, "A hidden startup preference must not flash a new item")
+        for enabled in [false, true] {
+            line.setEnabled(enabled)
+            for _ in 0..<3 {
+                line.setMenuBarIconVisible(true)
+                let item = try XCTUnwrap(line.statusItem)
+                line.setMenuBarIconVisible(true); XCTAssertTrue(item === line.statusItem)
+                line.setMenuBarIconVisible(false); XCTAssertNil(line.statusItem)
+                XCTAssertEqual(line.isEnabled, enabled); XCTAssertEqual(f.writes, 0)
+            }
+        }
+        line.stop(); line.setMenuBarIconVisible(true); XCTAssertNil(line.statusItem)
+        line.start(appName: "MS1Test", installUI: true); XCTAssertNil(line.statusItem)
+    }
+    @MainActor func testBatteryIconReadOnlyLifecycleAndDesktopGuard() throws {
+        var snapshot = BatteryStatusMenuController.Snapshot(presence: .present, level: 72, charging: false)
+        var opened = 0
+        let controller = BatteryStatusMenuController(read: { snapshot }, openSettings: { opened += 1 })
+        defer { controller.setVisible(false) }
+        controller.setVisible(true)
+        let first = try XCTUnwrap(controller.statusItem)
+        controller.refresh(); XCTAssertTrue(first === controller.statusItem)
+        XCTAssertEqual(first.button?.toolTip, "电池 72%")
+        snapshot.level = nil; controller.refresh()
+        XCTAssertEqual(first.button?.toolTip, "电池电量暂不可用")
+        XCTAssertEqual(snapshot.symbol, "questionmark.circle")
+        XCTAssertEqual(opened, 0)
+        first.menu?.performActionForItem(at: 2); XCTAssertEqual(opened, 1)
+        snapshot.presence = .absent; controller.refresh(); XCTAssertNil(controller.statusItem)
+        snapshot.presence = .present; controller.refresh(); XCTAssertNotNil(controller.statusItem)
+        controller.setVisible(false); snapshot.level = 80; controller.refresh(); XCTAssertNil(controller.statusItem)
+        XCTAssertEqual(opened, 1)
+    }
+
+    @MainActor func testNativeDisplayTogglesUpdateIconsWithoutEnablingFeatures() async throws {
+        let f = try Fixture(); defer { f.dispose() }
+        f.defaults.set(false, forKey: "screenshotLine.enabled")
+        f.defaults.set("none", forKey: "screenshotLine.shortcut")
+        let line = f.line(); line.start(appName: "MS1Test", installUI: true)
+        let client = KeepAwakeLidClient(readEnabledIntent: { false }, saveEnabledIntent: { _ in }, serviceStatus: { .notRegistered })
+        let service = KeepAwakeService(defaults: f.defaults, root: f.root, codexAvailability: { false }, lidClient: client)
+        let wake = KeepAwakeMenuController(service: service)
+        let battery = BatteryStatusMenuController(read: { .init(presence: .present, level: 80, charging: false) }, openSettings: {})
+        let observer = FeatureMenuBarVisibilityObserver(defaults: f.defaults) { state in
+            line.setMenuBarIconVisible(state.screenshotLine); wake.setStatusItemVisible(state.keepAwake); battery.setVisible(state.battery)
+        }
+        defer { withExtendedLifetime(observer) {}; line.stop(); wake.setStatusItemVisible(false); battery.setVisible(false); service.shutdown() }
+        NSApp.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        let host = NSHostingView(rootView: VStack {
+            FeatureMenuBarToggle(.screenshotLine); FeatureMenuBarToggle(.keepAwake); FeatureMenuBarToggle(.battery)
+        }.padding(20).defaultAppStorage(f.defaults))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 620, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        func controls() -> [String: NSObject] {
+            var seen = Set<ObjectIdentifier>(), result: [String: NSObject] = [:]
+            func text(_ object: NSObject, _ key: String) -> String? {
+                let selector = NSSelectorFromString(key)
+                return object.responds(to: selector) ? object.perform(selector)?.takeUnretainedValue() as? String : nil
+            }
+            func visit(_ object: NSObject) {
+                guard seen.insert(ObjectIdentifier(object)).inserted else { return }
+                if text(object, "accessibilityRole") == "AXCheckBox", let id = text(object, "accessibilityIdentifier") { result[id] = object }
+                let selector = NSSelectorFromString("accessibilityChildren")
+                if object.responds(to: selector), let children = object.perform(selector)?.takeUnretainedValue() as? [NSObject] { children.forEach(visit) }
+                if let view = object as? NSView { view.subviews.forEach(visit) }
+            }
+            visit(window); visit(host); return result
+        }
+        for _ in 0..<40 {
+            host.layoutSubtreeIfNeeded()
+            if controls().count == 3 { break }
+            try await wait(0.025)
+        }
+        for feature in FeatureMenuBarIcon.allCases {
+            for _ in 0..<2 {
+                let previous = feature.isVisible(in: f.defaults)
+                let node = try XCTUnwrap(controls()["data-annotation-id=" + feature.annotationID])
+                let selector = NSSelectorFromString("accessibilityPerformPress")
+                XCTAssertTrue(node.responds(to: selector))
+                typealias Press = @convention(c) (AnyObject, Selector) -> Bool
+                XCTAssertTrue(unsafeBitCast(node.method(for: selector), to: Press.self)(node, selector))
+                try await wait(0.12)
+                XCTAssertEqual(feature.isVisible(in: f.defaults), !previous)
+                XCTAssertEqual(line.statusItem != nil, FeatureMenuBarIcon.screenshotLine.isVisible(in: f.defaults))
+                XCTAssertEqual(wake.statusItem != nil, FeatureMenuBarIcon.keepAwake.isVisible(in: f.defaults))
+                XCTAssertEqual(battery.statusItem != nil, FeatureMenuBarIcon.battery.isVisible(in: f.defaults))
+                XCTAssertFalse(line.isEnabled); XCTAssertFalse(service.engine.enabled); XCTAssertEqual(f.writes, 0)
+            }
+        }
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+        attachment.name = "IndependentMenuBarToggles"; attachment.lifetime = .keepAlways; add(attachment)
+    }
+
     @MainActor func testScreenshotDisableRetainsFilesPreferencesAndPersistedIntentWithoutClipboardReplay() async throws {
         let f = try Fixture(); defer { f.dispose() }
         f.defaults.set(true, forKey: "screenshotLine.clipboard")
@@ -213,7 +371,7 @@ final class FeatureMasterSwitchTests: XCTestCase {
         XCTAssertEqual(menu.items[master].state, .off)
         XCTAssertTrue(menu.items[master].isEnabled)
         XCTAssertFalse(try XCTUnwrap(menu.items.first { $0.title == "展开挂绳" }).isEnabled)
-        XCTAssertFalse(try XCTUnwrap(menu.items.first { $0.title == "接收纯图片剪贴板" }).isEnabled)
+        XCTAssertFalse(try XCTUnwrap(menu.items.first { $0.title == "接收剪贴板图片" }).isEnabled)
         XCTAssertTrue(try XCTUnwrap(menu.items.first { $0.title == "打开截图挂绳设置" }).isEnabled)
         menu.performActionForItem(at: master)
         XCTAssertTrue(line.isEnabled)

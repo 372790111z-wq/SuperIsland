@@ -13,7 +13,7 @@ final class KeepAwakeMenuController: NSObject, NSMenuDelegate {
     private let service: KeepAwakeService
     private var updateObserver: AnyCancellable?
     private var menus: [MenuReference] = []
-    private var statusItem: NSStatusItem?
+    private(set) var statusItem: NSStatusItem?
 
     init(service: KeepAwakeService = .shared) {
         self.service = service
@@ -24,8 +24,12 @@ final class KeepAwakeMenuController: NSObject, NSMenuDelegate {
             .sink { [weak self] _ in self?.refreshLiveValues() }
     }
 
-    /// Installed by normal bootstrap, independently of the main App icon or
-    /// module enablement. Switching the module off must retain this entry point.
+    func setStatusItemVisible(_ visible: Bool) {
+        if visible { installStandaloneStatusItem() }
+        else if let item = statusItem { NSStatusBar.system.removeStatusItem(item); statusItem = nil }
+    }
+
+    /// Display preference is independent of both the main App icon and enablement.
     @discardableResult func installStandaloneStatusItem() -> NSStatusItem {
         if let statusItem { return statusItem }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)

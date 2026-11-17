@@ -31,6 +31,7 @@ struct KeepAwakeSettingsView: View {
                                  isOn: Binding(get: { service.engine.enabled }, set: service.setEnabled))
                     .toggleStyle(.switch).disabled(!service.canEnable)
                     .dataAnnotationID("si.ka.master")
+                FeatureMenuBarToggle(.keepAwake)
             }
             status
             if service.isNotebook { KeepAwakeRecapSettings(recap: service.recap, enabled: service.engine.enabled) }

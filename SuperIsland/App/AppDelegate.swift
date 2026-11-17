@@ -62,6 +62,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var fullScreenProbe: ChromeFullScreenProbe?
     private let keepAwakeMenu = KeepAwakeMenuController()
+    private var featureMenuBarObserver: FeatureMenuBarVisibilityObserver?
+    private lazy var batteryStatusMenu = BatteryStatusMenuController(openSettings: {
+        Self.showSettingsWindow(initialPane: .batteryManagement)
+    })
     private var menuBarDefaultsObserver: NSObjectProtocol?
     private var notificationPreferencesObserver: NotificationPreferencesObserver?
     private var settingsResetObservers: [NSObjectProtocol] = []
@@ -396,10 +400,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         didBootstrapApp = true
         KeepAwakeService.shared.openSettings = { Self.showSettingsWindow(initialPane: .keepAwake) }
         KeepAwakeService.shared.start()
-        keepAwakeMenu.installStandaloneStatusItem()
+
         // Every shell (including WE1) must install battery renewal before
         // returning. App activation is not guaranteed for background launches.
         defer {
+            observeFeatureMenuBarVisibility()
             startBatteryManagement()
             startZilanSuppressionReceiver()
         }
@@ -749,6 +754,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Menu Bar
+
+    private func observeFeatureMenuBarVisibility() {
+        guard featureMenuBarObserver == nil else { return }
+        featureMenuBarObserver = FeatureMenuBarVisibilityObserver { [weak self] visible in
+            guard let self else { return }
+            self.keepAwakeMenu.setStatusItemVisible(visible.keepAwake)
+            ScreenshotLineFeature.shared.setMenuBarIconVisible(visible.screenshotLine)
+            self.batteryStatusMenu.setVisible(visible.battery)
+        }
+    }
 
     private func applyMenuBarVisibility() {
         if AppState.shared.showMenuBarIcon {

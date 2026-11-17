@@ -298,7 +298,8 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
     private var appName = "ScreenshotLine"
     private var support = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
     private var panel: NSPanel?
-    private var statusItem: NSStatusItem?
+    private(set) var statusItem: NSStatusItem?
+    private var menuBarIconVisible = true
     private var pointerTimer: Timer?
     private var clipboardTimer: Timer?
     private var watcher: ScreenshotLineWatcher?
@@ -401,7 +402,8 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
             retryClearRecovery()
         } else { restoreIndex() }
         restoreInterruptedTakeover()
-        if installUI { readCurrentSpaceContext(); makePanel(); makeMenu() }
+        menuBarIconVisible = FeatureMenuBarIcon.screenshotLine.isVisible(in: defaults)
+        if installUI { readCurrentSpaceContext(); makePanel(); setMenuBarIconVisible(menuBarIconVisible) }
         refreshRuntime()
         guard installUI else { return }
         menuObserver = objectWillChange.debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
@@ -440,6 +442,7 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
         if takeoverActive || recoveryPending { restoreTakeover() }
         panel?.orderOut(nil)
+        if let item = statusItem { NSStatusBar.system.removeStatusItem(item); statusItem = nil }
     }
 
     var moduleStatus: String {
@@ -1227,7 +1230,14 @@ final class ScreenshotLineFeature: NSObject, ObservableObject {
         if Date().timeIntervalSince(awaySince!) > 0.5 { awaySince = nil; hideLine() }
     }
 
+    func setMenuBarIconVisible(_ visible: Bool) {
+        menuBarIconVisible = visible
+        if started && installsUI && visible { makeMenu(); refreshMenuState() }
+        else if let item = statusItem { NSStatusBar.system.removeStatusItem(item); statusItem = nil }
+    }
+
     private func makeMenu() {
+        guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "tshirt", accessibilityDescription: appName + " " + SL("截图挂绳"))
         let menu = NSMenu()
@@ -1952,6 +1962,7 @@ struct ScreenshotLineSettingsView: View {
                         .toggleStyle(.switch)
                         .disabled(!line.isEnabled && line.recoveryPending)
                         .dataAnnotationID("si.sc.master")
+                    FeatureMenuBarToggle(.screenshotLine)
                 }
                 Text(line.moduleStatus).foregroundStyle(.secondary)
                 if !line.status.isEmpty { Text(line.status).foregroundStyle(.orange).dataAnnotationID("si.sc.clear-result") }
