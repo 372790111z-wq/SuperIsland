@@ -26,3 +26,11 @@
 设置仍可从灵动岛设置入口进入；本次不把隐藏等同于退出或卸载功能。macOS 菜单栏空间不足仍可能影响实际可见性，本实现不操控其他 App 的图标位置。不同屏幕/其他机器的最终视觉效果仍待安装后验收。
 
 当前仅本地源码和测试完成，未替换 /Applications/SuperIsland.app，未提交推送或发布。原已验收构建 20261116222813 保持不变。审查记录在 ~/.codex/reviews/20261117-142012-465-independent-feature-menubar-icons.md。
+
+## 本机替换 · 2026-11-17
+
+- 用户明确授权“替换本机我测试”。已审查源码本地提交 f0b30cca98f6480e59848d7c5d68a1fd2320dbf1，Release clean build 通过、前后源码一致。
+- 已安装并启动 /Applications/SuperIsland.app，版本 1.0.10 (20261117151038)，保留原 bundle/签名身份。安装包深度签名、解包及应用二进制摘要核验通过。
+- 旧版 20261116222813 正常退出后替换，备份位于 build/IndependentMenuIconsInstall.noindex/Installation/Backup/SuperIsland.app，另外保留 Retired 副本。
+- 新进程 PID 19120 完成启动并持续观察 30 秒；内核 CDHash 580c468cbef41cbd52939c2f2843fbf4093c2df3 与安装包一致。菜单栏显示偏好、主应用图标及挂绳启用偏好回读保持一致。
+- 安装证据：build/IndependentMenuIconsInstall.noindex/Installation/receipt.json。未修改系统权限或 helper 登记，未推送 GitHub 或发布。仍待用户实际测试三个独立开关；启动核验不等于长期稳定或全部设备验收。

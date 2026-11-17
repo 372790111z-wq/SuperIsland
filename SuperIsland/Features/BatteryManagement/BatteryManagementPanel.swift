@@ -14,7 +14,11 @@ struct BatteryManagementPanel: View {
                     .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
                     .dataAnnotationID("si.bm.simple.settings-entry") }
             }.padding(.horizontal, 22).padding(.vertical, 12)
-        }.dataAnnotationID("si.bm.simple.panel")
+        }
+        // The island has a fixed black surface even when macOS uses light mode.
+        // Scope semantic text and control colors here, not on the shared settings view.
+        .environment(\.colorScheme, .dark)
+        .dataAnnotationID("si.bm.simple.panel")
     }
 }
 

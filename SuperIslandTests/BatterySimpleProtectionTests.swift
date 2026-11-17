@@ -248,6 +248,45 @@ final class BatterySimpleProtectionTests: XCTestCase {
         XCTAssertEqual(d.data(forKey: BatterySimplePreferences.key), before)
         XCTAssertNil(d.object(forKey: "batteryProtection.v1.legacyBackup"))
     }
+    func testIslandBatteryRemainsReadableUnderLightAndDarkHostAppearance() async throws {
+        let d = store(), t = Transport(), s = service(t, d)
+        await s.attemptStartupForTesting()
+        let output = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("build/BatteryAppearanceValidation", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        var counts: [Int] = []
+        for scheme in [ColorScheme.light, .dark] {
+            let host = NSHostingView(rootView: BatteryManagementPanel(service: s)
+                .environment(\.colorScheme, scheme).background(Color.black))
+            host.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+            let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 658, height: 350), styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false; window.contentView = host; window.appearance = host.appearance
+            window.makeKeyAndOrderFront(nil)
+            defer { window.close() }
+            for _ in 0..<8 { host.layoutSubtreeIfNeeded(); window.displayIfNeeded(); try await Task.sleep(for: .milliseconds(25)) }
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            let name = scheme == .light ? "light-host" : "dark-host"
+            try png.write(to: output.appendingPathComponent(name + ".png"))
+            let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            attachment.name = "battery-island-" + name; attachment.lifetime = .keepAlways; add(attachment)
+            var brightNeutral = 0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    guard let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                    let values = [c.redComponent, c.greenComponent, c.blueComponent]
+                    if c.alphaComponent > 0.8, values.min()! > 0.55, values.max()! - values.min()! < 0.15 { brightNeutral += 1 }
+                }
+            }
+            counts.append(brightNeutral)
+        }
+        XCTAssertGreaterThan(counts[1], 500, "Dark-host reference must contain readable neutral text, not a blank panel")
+        XCTAssertGreaterThanOrEqual(Double(counts[0]), Double(counts[1]) * 0.85,
+            "Fixed black island must retain its bright text under a light host: \(counts)")
+        XCTAssertTrue(t.requests.isEmpty); XCTAssertFalse(s.protectionRequested)
+    }
+
     func testNativeSurfacesExposeSimpleControlsAndApplySharedDraft() async throws {
         let policy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.regular)
